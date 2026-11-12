@@ -20,8 +20,8 @@ internal object MusicActivityOnCreateFingerprint : Fingerprint(
 @Suppress("unused")
 val helloPatch = patch(
     name = "Hello",
-    description = "Shows a toast when YouTube Music opens, to check that this bundle is applied.",
-    default = true,
+    description = "Shows a toast when YouTube Music opens, to check that this bundle is applied. For testing.",
+    default = false,
 ) {
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
 

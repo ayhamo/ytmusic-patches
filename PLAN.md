@@ -226,6 +226,19 @@ Test patch: `SpikeCPatch.kt` + `SpikeC.java` + `ProtoWire.java` (offline), `Song
 - Download unlock: in one playlist download, 2 of 6 songs stayed "Premium required to download" (YT then stores "This video requires payment", and its Retry doesn't ask again; only removing and re-downloading does). A second run of the same playlist saved all 6. The stream fetch for the replaced response is now tried 3 times (1.5 s, 3 s apart) before giving up.
 - Token watcher: `watcher/apple_token_watch.py` (stdlib Python) + `.github/workflows/apple-token-watch.yml` (daily 06:17 UTC, and by hand). It scrapes the web player token the way `AppleCanvas` does, searches a probe song (Anti-Hero, Midnights) and loads its motion-art HLS playlist, and compares the latest commits of the scrape code in BitChord (`AppleMusicCanvas.kt`) and the extension (`src/apple-canvas.js`) with `watcher/upstream.json`. A failure opens one issue ("Apple token watch failed"); later failures comment on it. After reviewing an upstream change: `python watcher/apple_token_watch.py --accept` and commit `upstream.json`. Tested locally: all good, and a simulated upstream change fails as it should. Needs the project pushed to a GitHub repository to run (git initialised locally, no commit yet).
 
+- Audit fixes (same night):
+  - SongVersion skips lookups offline and for 2 min after a failure.
+  - Analyzer: a too-long song isn't re-downloaded.
+  - SpikeCover asks again after 30 s with no cover.
+  - SpikeH: the backdrop is removed when switched off, and band names with "," or "&" are tried whole first.
+  - HlsClip: temp file per thread. Engine: `selfCall` is volatile. SungLyrics checks for a missing file at most every 5 s.
+  - emu_net: kill order, watchdog check, and a 20 s timeout on `adb devices`.
+  - Automix band: drawn from the player's own length, so it doesn't depend on English text.
+  - YT's title and artist colours come back when the BitChord screen is switched off.
+  - Tests: JVM 75/75, Python 42/42. On the emulator: playback, song change and collapse OK.
+- Repo public at github.com/ayhamo/ytmusic-patches (first commit 9546bec). Morphe source link: `https://morphe.software/add-source?github=ayhamo/ytmusic-patches`. Not used yet: the Release workflow (by hand) has to run first. The work since 9546bec isn't committed.
+- GitHub's secret-scanning alert for `AIzaSyAOgh…` in SongVersion.java is a false positive: it's YouTube Music's public app key, also in the YT APK and in Morphe's source. Close the alert as false positive.
+
 ## 1. Lyric line above the seek bar
 - Shows the current line from Morphe's lyrics (`LyricsManager.getInstance().getCurrentLineText()`). Needs Morphe's "Third-party lyrics" on.
 - Tapping it opens YT Music's lyrics tab (Morphe's providers).
@@ -251,6 +264,27 @@ Test patch: `SpikeCPatch.kt` + `SpikeC.java` + `ProtoWire.java` (offline), `Song
   - song/video pairing;
   - late autoplay queue;
   - short tracks.
+- Fixed 2026-11-12, "the mix doesn't happen":
+  - **Cause:** the queue is read every ~1.5 s. Right after our engine moved YT on, that read still named the outgoing song. The engine took this as "the queue played another song" and dropped a 34 s loop mix into a 1.5 s crossfade from the new song's start. It now waits for the queue to catch up.
+  - **Tested:** Dusk Till Dawn → Starboy loop mix. Takeover at 3:41, YT moved on at 13.4 s, handover at 28.4 s, done. Starboy plays on from 0:23 (the decks played its opening).
+  - **Mix lengths, as BitChord and the extension have them:** the loop mix is set by bars (4 enter + tempo-ramp bars + 2, rounded to the loop; about 30 s). A blend or filter mix is 16 beats (doubled when both sides are calm), capped at 12 s (8 s filter), so about 10 s is right for those. The crossfade fallback is 12 s.
+  - **"Original AutoDJ" / "Advanced AutoDJ":** the YT extension's names. Original is its port of BitChord web's AutoDJ; Advanced adds the BitChord phone app's ideas.
+- The seek bar during a mix (the extension's "flashing", crossfade.js stepPulse):
+  - YT's seek bar is hidden. A white fill grows from the takeover point to the bar's end and pulses on the mix's beats, following the tempo ramp: brightness (0.5 + 0.5 cos 2πφ)², resting at 0.1.
+  - With no beat grid (a crossfade) it breathes every 1.8 s.
+  - The band stays after YT has moved on to the next song, and YT's bar comes back at the handover.
+  - Tested on the emulator.
+- Stats for nerds, as BitChord's (PlayerControls SleeveNerdStats + CrossfadeController describeAutomix):
+  - Line 1, white 65 %: codec · sample rate (when YT gives one) · kbps · Mono/Stereo. No itag.
+  - Line 2, white 50 %, up to 2 lines: the mix running ("looping" / "letting go" + the loop), else the one planned ("loop mix in N s · out 8-bar, clear by lyrics · in 4-bar, clear by mask · 94 → 100 BPM over 3 bars", "filter mix in N s · 4 bars · reason", "mixing in N s · 8 bars · next at 1.034×", "crossfading in N s · 12 s", each with "no loop: why"), else "this song: analysed (94 BPM F# major, dsp grid 0.82) · next: analysing…".
+  - Centred, 11 sp medium, black 55 % shadow. Tested on the emulator through a Dusk Till Dawn → Starboy loop mix.
+- The lyric strip is never blank (BitChord shows the line due, or its ♪ note): once Morphe's line is 60 ms past its end and Morphe still names it, the line at the playhead is shown instead (♪ Instrumental in a gap). A second refresh runs right when that is due, not at the next 500 ms poll.
+  - Lines sharing a start time (a sung line and its ad-lib, "Bounce on the stage..." and "back it up" at 45.55 s in Bow Bow Bow): the line ends at the next line that starts later, and the first of them is the one at the playhead (Morphe shows that one). Before, such a line lasted 0 ms and was drawn faded out: only the chevron showed.
+  - Repeated lines ("Bow (work out, work out)" several times): the copy matched is the one running now, else the next to start (Morphe names a line a moment early), else the last one past; and the line is found again once the playhead passes its end. Before, the earlier ended copy was matched and the line drew faded out.
+  - Checked on Bow Bow Bow, 40 samples from 0:41: only the instant of a line's fade-out shows no words, as in BitChord.
+- During a mix, between YT moving on and the handover, the incoming song plays on our deck while YT's player is held, so Morphe's clock (and its line) is not where the singing is. The strip then takes the incoming song's line at our deck's position (`Automix.incomingHeardMs`), only once Morphe's lyrics are that song's (`lyricsVideoId` equals the mix's incoming id). Before, it showed the intro phrase ("Cue the vocals") over the singing. Tested Starboy → Bow Bow Bow.
+- The mix bar, as BitChord's PlayerScrubber: when a mix starts YT's bar is hidden, our fill sweeps from where the song was to the bar's end in 700 ms (FastOutSlowIn), then holds full width for the whole blend, white at 0.92 × the beat pulse (0.1 between beats, 1 on one; the pulse fades in over 900 ms), on a white 26 % track. "Mixing" is white 85 % × cover × (0.5 + 0.5 × pulse). Before, the fill grew with the mix's progress and read as the song's progress carrying on. YT's screen moves to the next song mid-mix, as BitChord (HANDOFF_AT 0.5) and the YT Extension do.
+- Open, found while testing: Morphe's lookup sometimes ends "not found" for the incoming song after an automix switch, though its lyrics are cached (Starboy, about 2 handovers in 5). Its forced reload (`reloadAfterSettingsChange`) ran and still ended "not found", so it was rolled back; the cause is inside Morphe's matching, which logs no reason. Also open: right after a cold start, the first mix can fall back to Morphe's crossfade ("mix not built: decoded audio missing") while the queue ahead is still being analysed. Wrong-language lyrics (Chinese lyrics on "i don't need ur love") come from Morphe's provider match; BitChord has no language check either.
 
 ## 4. BitChord-style now-playing UI
 Every element YT Music's player has, laid out and styled like BitChord. Nothing YT Music has is dropped, and nothing BitChord-only is added unless it's useful here.
@@ -279,6 +313,105 @@ Every element YT Music's player has, laid out and styled like BitChord. Nothing 
   - the lyrics and queue buttons (YT's swipe-up tabs already open Up next / Lyrics / Related);
   - the floating pill bar.
 - Song/Video switch and the swipe-up tabs stay where YT puts them.
+
+### Apple Music-style player (asked 2026-11-11, built 2026-11-12)
+The user's Apple Music screenshots and BitChord's "Fullscreen cover art" and "Animated covers" settings. Ignore "Backdrop videos". This replaces the "Not taken from BitChord" list above (★, lyrics/queue buttons) for the BitChord screen.
+
+Built:
+- **Settings:** "Fullscreen cover art" (`ayham_fullArt`, on by default), and "Animated art" renamed to "Animated covers" (`ayham_canvas`). Both switches are also in the player's … menu (`Features.setSwitch`, same pref).
+- **`FullArt`** (called from `PlayerScreen.tick`):
+  - Scales YT's `player_view_pager_container` about (0,0), so the card (`watch_fragment_container`) fills the width from y = 0. The animated cover inside it scales along.
+  - Fades the lower 42 % with a RenderEffect DST_IN smootherstep mask (API 31+).
+  - Morphs over 420 ms. It's up while the position moves or a clip shows; after 1 s paused with no clip it goes back to the card. Portrait and a square card only.
+  - YT's top bar gets +100 Z, and so does its layer (`player_page_bottom_layer`) relative to the card: Z orders only siblings, so the grown card (a CardView with elevation) would otherwise take the top bar's taps.
+  - Everything is given back per value: a translation or scale YT set itself while we held the view stays YT's; the rest goes back, pivot reset if it wasn't set.
+- **Title row:** ★ (clicks YT's like chip; lit from YT's media session: its like action's icon is `yt_fill_…thumb_up` when liked, `yt_outline_…` when not; the chip itself has no selected state) and … (PopupMenu with the two switches and "More options", which opens YT's own menu), with 34dp discs. The title and artist get a max width so they end before the ★ (given back). Not the row's end padding: YT re-sets it on every layout, which made the page lay out again on every frame (~60 layout passes a second, found by bisecting `tick`).
+- **Under the volume:** YT's whole chips row (like, dislike, Lyrics, comments, Save, Share, Download). No buttons of ours: YT's Lyrics chip and swipe-up sheet cover lyrics and the queue, and YT's cast button is in its top bar.
+- **Lyric line position:** centred in the room between the title row and the seek bar.
+- **Lyric line:** filled word by word when Morphe's chosen lyrics carry word timings (`LyricTiming` reads `LyricsManager.currentLyrics`, `state` and `getPositionMs()`; `LyricWords` is the pure maths). Redrawn 25×/s only while a timed line is being sung or fading (BitChord redraws its sung line every frame); line-only providers (KuGou, LRCLIB, NetEase) stay plain.
+- **Lyric line, BitChord's strip** (from BitChord's `PlayerLyrics.kt`, 2026-11-12):
+  - 16sp W600, letter spacing 0.05sp, all white: a line at 78 %, its unsung part at 55 % of that, the sung part clipped on top;
+  - each line fades out over the last 28 % of its time (160–700 ms) before the next starts; an empty line under 2.5 s counts as a breath;
+  - a new line slides up from +35 % of its height while the old one fades up to −35 % (340 ms, FastOutSlowIn);
+  - the intro ("Warming up", …, one per song) and instrumental gaps ("Instrumental") with a 16dp note at 50 %; plain lyrics show a note and "Lyrics";
+  - loading ("Getting the lyrics", …) at 55 %; "Lyrics not available" at 55 %, held 5 s, faded over 900 ms;
+  - a 14dp chevron at 50 % right after the words whenever there are lyrics; only then the row is tappable;
+  - the next line is read the moment the old one ends (not at the next 500 ms poll).
+  - Tested: loading line, intro, word fill, slide and fade on dandelion; 0 layout passes in 5 s paused or playing.
+- **Lyrics provider (why Midnight Sun varies):** Morphe asks providers in its source order (first 4 at once, the rest after 2 s) and, with "word sync" on (default), waits up to 5 s for a word-timed result before settling for line timing. Its default order has the word-timed LrcRed, BiniLyrics, Unison, Musixmatch, Lyricify and AMLL switched off; Apple and QQ are the word-timed sources that are on. When they don't answer within 5 s, NetEase's line timing wins. Turning on LrcRed/BiniLyrics in Morphe's lyrics sources (as BitChord and the YT extension do first) should make word timing the usual case. Neither BitChord nor the extension swaps lyrics once shown.
+- **Fullscreen cover on pause:** same rule as BitChord's `rememberForkArtAwake`: fullscreen while playing (buffering counts), back to the card 1 s after a pause, kept fullscreen while an animated cover plays, 420 ms FastOutSlowIn morph.
+- **BitChord's card (copied from its code, 2026-11-12):** we now lay out the card ourselves in song mode, with full-screen cover on or off.
+  - The card is the screen width less a 30dp gutter on each side, at most 560dp, centred at YT's card top. On the emulator that's 1120 px where YT's was 1360 px, and the column needs less room on a short screen.
+  - When paused the card scales to 0.86 (963 px, BitChord's is 964). It starts at the tap and uses BitChord's spring (damping 0.75, stiffness 200). A song with a clip never shrinks.
+  - The column starts below the card's box, so the title row stays put (y=1561) while the banner comes and goes and the card shrinks. The mesh seam and the stats line follow the drawn art.
+  - Lyrics on pause: Morphe's lyric clock runs on until YT's session reports the pause (about 1 s). The line used to jump to the next one and back. Now the tap holds the line and its fill until play resumes; a seek lets go.
+  - Tested on the emulator: SI NO ES CONTIGO paused and playing (banner holds 1 s, 0.4 s morph into the 0.86 card), Anti-Hero with its clip (frozen 57 ms after the tap, stays fullscreen), lyric line steady through the pause, 0 layout passes in 6 s playing.
+- **Seek bar:** YT's own (not redrawn by us). BitChord's is a thumbless 7dp capsule (12dp while dragging, 34dp touch area), played 92 %, unplayed 26 %, elapsed / "-remaining" 12sp W600 at 55 %, position polled every 500 ms only while playing and visible. Not copied: it would mean replacing YT's view.
+- **Review fixes:**
+  - ID lookups are cached;
+  - the like state is checked in the 500 ms refresh;
+  - the mesh redraws when the seam moves;
+  - the mesh's art copy follows the banner's scale and skips the faded part;
+  - the card offset subtracts the pager's scroll.
+
+Not done (later, if wanted):
+- "-m:ss" remaining time;
+- the tall 3:4 motion clip filling the banner;
+- a status-bar scrim;
+- the banner shrinks straight back (no morph) when a sheet opens.
+- Fixed 2026-11-12, dragging the page down: a drag of a few dp used to give YT its layout back, so the art snapped to YT's card and back on every small drag (the user's recording). Our layout, banner included, now slides down with the page; YT's comes back only near the mini player.
+
+Emulator findings (2026-11-12):
+- In YT 9.30 the art card (`watch_fragment_container`, a CardView) is its own layer in `player_page`, drawn over an empty `player_view_pager_container`. FullArt moves the card itself; it only falls back to the pager (and a shape search inside it) for layouts that keep the card inside.
+- Playing = our player's position or YT's `time_bar` progress moved in the last second. Our captured player alone was not enough.
+- The card holds YT's video SurfaceView. Its hole in the window showed black through the fade, so it is hidden while the banner is up (songs only: a video is not square) and shown again on give-back.
+- Verified: banner while playing, card 1 s after pause, menu toggle off and on, song change, queue, lyrics (YT's own), collapse.
+- Verified after the audit fixes: ★ like/unlike lit to match; animated cover in the banner; a music video in video mode gives the card back at once and plays (surface shown); song mode of a music video shows the banner; cast and ⋮ open with the banner up; 0 layout passes in 5 s paused (was ~300), one per new lyric line while playing; word fill on dandelion.
+- After switching a music video to song mode, the toggle would not switch back to video, also with the BitChord screen off: Morphe keeps video mode off while its crossfade/automix is active (expected; songs play as their song version anyway).
+- Which lyrics provider Morphe picks varies per run: Midnight Sun came word-timed once and NetEase (line timing) another time; Morphe's own Lyrics tab showed the same line timing then, so our line follows Morphe.
+
+### Naming (2026-11-12)
+The spike code has real names now:
+- **Packages:** `extension/music/spike` → `features`, and `patches/music/spike` → `features`.
+- **Classes:**
+  - SpikeA → Features
+  - SpikeB → NativeCheck (developer check)
+  - SpikeC → NativeDownloads
+  - SpikeD → AnimatedCover
+  - SpikeE → PlayerTap
+  - SpikeEq → EqPresets (`Equalizer` clashes with android.media.audiofx)
+  - SpikeG → PlayerScreen
+  - SpikeH → ArtistArt
+  - SpikeCover → SongCover
+- **Patches shown in Morphe:**
+  - "BitChord player and automix" (was Spike A);
+  - "Automix libraries" (was Spike B; resources moved to `natives/lib`);
+  - "Downloads without Premium" (was Spike C);
+  - "Hello" is now off by default.
+- **Unchanged on purpose:**
+  - the developer override file `spike.properties`;
+  - NativeCheck's `spike/` model and cache folders on the device;
+  - the `ayham_*` setting keys, so existing settings stay.
+
+- BitChord spec, from its source (`NowPlayingScreen.kt`, `PlayerControls.kt`, `ForkSleeveClip.kt`, `CanvasArtworkPlayer.kt`, `ArtworkMeshBackdrop.kt`):
+  - **Defaults:** both settings default on. The 3-dots rows are hidden for radio stations.
+  - **Banner:**
+    - full width from y = 0, height ≈ width + status bar − 10dp;
+    - crop, centred;
+    - corners 8dp × (1 − shown);
+    - fade 42 %, smootherstep;
+    - status scrim alpha = 0.16 + 0.49 × luminance of the cover's top band, 8 steps;
+    - no art: no banner.
+  - **Rows:**
+    - title 20sp bold white; artist 20sp at 55 %;
+    - lyric line 16sp at 55 %;
+    - seek bar is a capsule with no thumb, 7dp (12dp while dragging), elapsed / "-remaining";
+    - transport: ◀◀ goes to the previous track (restarts after 10 s), ▶▶ goes to the next;
+    - device line 11sp at 55 %, "This phone".
+  - **Animated clip:** muted, looped, fades in over 320 ms. When paused it freezes on its frame and the banner stays.
+- Emulator notes from tonight:
+  - LDPlayer's NAT can break TCP (ping still works, every connect times out, even with YT stopped). Fix: `ldconsole reboot --index 2` (emulator-5558 = Main-2).
+  - After a reboot it comes up in landscape; `settings put system user_rotation 1` brings portrait back.
 
 ## 5. Always play the song version
 - Morphe's "Play albums songs" (`PlayAlbumSongsPatch`) does this only for album tracks: it serves the song's audio under the video's id, so the queue and player never restart.
@@ -311,6 +444,33 @@ Goal: Morphe's downloader keeps the files, but tapping a downloaded song opens Y
   - Can Morphe's downloads appear there? Saved into the shared Music folder / MediaStore with proper tags and cover.
   - Can it be reached while signed in (offline)?
 
+### Moved to Morphe's own downloads (2026-11-12, Morphe 2.3.0-dev.2)
+- Upstream merged "feat(YouTube Music - Downloads): Native offline downloads support" (morphe-patches#4698, in v2.3.0-dev.2). It does what our "Downloads without Premium" did: the same YT hooks (offlineability, upsell, declined player response, refreshed offline state), driven by Morphe's "Download mode" setting (default In-app). It also deletes `LocalDownloadManager`, `PlaylistDownloader` and Morphe's own offline player.
+- So we take theirs:
+  - `scripts/patch.ps1` defaults to `patches-2.3.0-dev.2.mpp`.
+  - `FreeDownloadsPatch` / `NativeDownloads` are gone. In their place, "Offline lyrics and art" (`OfflineExtrasPatch` + `OfflineSave`): one read-only call at the start of Morphe's `BaseInAppDownloadsPatch.replaceDeclinedOfflinePlayerResponse`, which runs for every song YT saves; a response with an offline state (field 14) hands its video id to `OfflineExtras` (lyrics, animated art, video type). The settings switch `ayham_native` now turns this on or off.
+  - Automix and the native check fetched audio through `LocalDownloadManager.resolveStream` / `openAudioConnection`. Now `AudioStream`: Morphe's `StreamingDataRequest.fetchRequestForDownload` with the download clients, the highest-bitrate audio format with a plain url from the player response (field 4 → 3), fetched in 1 MB ranges with the same headers.
+- Upstream saves AAC (it skips `audio/webm`), where ours saved Opus 251: a 2:15 song is a 2.2 MB stream file.
+- 2.3.0-dev.2 also adds "A-B loop" and "Disable audio ducking", and shows a modal "Android System WebView is out of date" box on the emulator (WebView 124), answered once with "Do not show again".
+- Tested on the emulator: patching (56 applied, 0 failed, no warnings from our hooks), a song's Download from its menu → saved in Downloads with its check mark, and our hook saved its lyrics (LunaProvider). Java tests 129, Python 42 (136 after the fixes below).
+- Also tested: a playlist's Download ("new test", 1 track) → "Download complete", lyrics saved (Apple Music provider); automix on the new `AudioStream` (Opus 251, analysis ~16 s a song, loop mix built and run, handover aligned to 6 ms); our player screen unchanged, with upstream's Download chip in the action row.
+- Offline play tested with `scripts/emu_net.py run` (airplane mode, on-device watchdog): the downloaded song plays in our player (0:22 → 0:35 in 13 s), lyric line, cover and the "Downloaded" chip shown, network back on by itself.
+- Fixed on the way: the stats line threw every second for a downloaded song ("Expected receiver of type dbo, but got avny"). `PlayerTap` reuses the field path to the audio Format found on the first player, and the offline player holds other classes on that path. `follow` now returns null when an object on the path isn't of the field's class, so the path is searched again for that player; the line then shows the saved file's format (AAC · 131 kbps). Test in `PlayerTapTest`.
+- We wait for Morphe's stable 2.3.0 before releasing (asked 2026-11-12): on stable 2.2.0 there would be no downloads at all.
+
+### Open issues closed (2026-11-12, on 2.3.0-dev.2)
+- A-B loop: works with our screen. The seek bar is YT's own (we only draw the automix band over it, without taking touches): long-pressing it set the start (green) and end (blue) markers, and YT jumped back to 0:05.272 every 20 s. The setting was switched on for the test and back to its default (off) after.
+- First mix after a cold start: not a bug. After a launch the saved analysis loads, but its decoded audio (≈50 MB a song, the newest 4 kept) may be gone and is fetched and decoded again: measured, the playing song in 10 s, the next one in 18 s, the loop mix ready 21 s into the song. Only a mix due in those first ~20 s falls back (to Morphe's crossfade, then retried every 5 s), so seeking to the end right after a launch.
+- Wrong-language lyrics (`LyricsGuard`, two hooks in `PlayerFeaturesPatch`'s finalize):
+  - Cause: Morphe's providers match by title, artist and length only. Luna searches a Chinese catalogue and falls back to its top hit; the prefetch caches a result with no match check; a cached or remembered result is shown again with no check; nothing looks at the language.
+  - Fix: at the start of `LyricsMatch.isValidLyrics` (the gate of every result, one by one, the prefetch, the remembered preference and our offline save) lyrics are refused when the song's title and artist have no CJK and more than half the lyric lines hold Chinese characters with no kana or Hangul line. Counted by lines: the Luna match for "i don't need ur love" has 447 Chinese characters against 1003 Latin letters, but Chinese on most lines. Japanese and Korean lyrics are never refused (romanized names are common there). A one-line Chinese placeholder ("纯音乐，请欣赏" for an instrumental) is refused too.
+  - `LyricsCache.get` is wrapped (`aroundCacheGet`: it runs the real get once and filters it) so a stored wrong match is dropped too. The method has a single free register: the early-return path reuses `p1`.
+  - Tested: "i don't need ur love" now shows its English lyrics from the next provider; refused again during a mix and in the prefetch of a queued song.
+- No lyrics after a quick switch (an automix handover): Morphe stores each provider's miss on disk for good (`#notfound`, no expiry), and a lookup cut short by the switch counts as a miss, so a reload reads the misses again (why the earlier reload nudge didn't work). `LyricsGuard` listens to Morphe's lyrics state: on NOT_FOUND it looks the song up once more after 2 s, skipping the stored misses for that video for 20 s (the cache wrap), once per video per run. Tested on an instrumental (one retry, then it stays at "no lyrics", no loop); two mixes in a row kept their lyrics, the race itself didn't come up.
+- Album download: "Midnight Sun" (10 songs) saved, every song's lyrics saved; the album's animated cover saved once (`files/ayham-offline/canvas/cca0f133-720.mp4`, 4.9 MB) and shared by its 9 songs. Played offline with the watchdog: the song plays and the animated cover moves (the canvas cache still had its copy, so the saved copy, the fallback, was not the one used).
+- Java tests 136, Python 42.
+- Lesson: don't use airplane mode on LDPlayer for offline tests. Its adb runs over the emulator's network, so adb drops and the emulator has to be rebooted.
+
 ## 8. Stats for nerds (last, after all spike items are verified)
 - The info lines under the art, as in BitChord:
   - Line 1, the source format: codec · sample rate · bitrate · channels (e.g. "Opus · 48.0 kHz · 160 kbps · 2 ch"), read from YT's player (audio input format).
@@ -318,6 +478,8 @@ Goal: Morphe's downloader keeps the files, but tapping a downloaded song opens Y
 - Own toggle; tapping could expand more detail later (client used, stream itag, buffer).
 
 ## 7. Settings
+- All in their own screen, Morphe settings > BitChord fork (2026-11-12), with the categories Player and Automix. The keys are unchanged, so saved settings carry over.
+- The Automix version, Blend length and Equalizer preset lists draw their choices in the dialog's own text colour. YT's theme made them black on the dark dialog, so the rows looked blank.
 - One switch per feature; off = stock YT Music.
 - "Clear animated art cache" with its size.
 - "Clear lyrics cache" reuses Morphe's (`LyricsClearCachePreference`).

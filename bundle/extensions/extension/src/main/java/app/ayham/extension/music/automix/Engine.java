@@ -21,8 +21,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
-import app.ayham.extension.music.spike.SeekAccess;
-import app.ayham.extension.music.spike.SpikeE;
+import app.ayham.extension.music.features.SeekAccess;
+import app.ayham.extension.music.features.PlayerTap;
 
 /**
  * Plays a {@link Mix}: BitChord's loop-mix renderer (Signalsmith Stretch, beat knots) for each deck,
@@ -47,7 +47,7 @@ final class Engine {
 
     /** The volume YT (or Morphe) last asked each player for, not counting ours: its loudness level. */
     private static final java.util.Map<Object, Float> ytAsked = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
-    private static boolean selfCall;
+    private static volatile boolean selfCall; // set by our thread, read on YT's
 
     static float ytVolume(Object player) {
         Float v = player == null ? null : ytAsked.get(player);
@@ -221,7 +221,7 @@ final class Engine {
                 .build();
         // the user's equalizer preset on the decks too, so the takeover doesn't change the sound
         try {
-            app.ayham.extension.music.spike.SpikeEq.attachDeck(track.getAudioSessionId());
+            app.ayham.extension.music.features.EqPresets.attachDeck(track.getAudioSessionId());
         } catch (Throwable t) {
             Log.w(TAG, "equalizer not on the decks", t);
         }
@@ -298,7 +298,7 @@ final class Engine {
         } finally {
             try {
                 track.stop();
-                app.ayham.extension.music.spike.SpikeEq.releaseDeck(track.getAudioSessionId());
+                app.ayham.extension.music.features.EqPresets.releaseDeck(track.getAudioSessionId());
                 track.release();
             } catch (Throwable ignored) {
             }
@@ -490,7 +490,7 @@ final class Engine {
     /** No incoming player from Morphe's crossfade: YT moved on in the same player, or another one is playing. */
     private void pollIncoming() {
         try {
-            Object p = SpikeE.current();
+            Object p = PlayerTap.current();
             if (p == null) return;
             long pos = Automix.position(p);
             if (p != outPlayer && pos >= 0) onIncoming(p);
@@ -520,6 +520,9 @@ final class Engine {
     private void checkSong() {
         String id = Automix.currentId();
         if (id == null || id.equals(inIdSeen)) return;
+        // the queue is read every ~1.5 s: right after YT moves on it still names the outgoing song,
+        // which is not "another song" (that read once broke a loop mix into a plain crossfade)
+        if (id.equals(m.outId)) return;
         inIdSeen = id;
         if (id.equals(m.inId)) return;
         Log.i(TAG, "the queue played " + id + " instead of " + m.inId + ": crossfading into it as it is");
@@ -593,8 +596,25 @@ final class Engine {
         return !finished;
     }
 
+    /** The mix second being heard now, or NaN before the decks are on YT's clock. */
+    double mixNow() {
+        double heard = heardFrames();
+        long off = offsetFrames;
+        return heard < 0 || off == Long.MIN_VALUE ? Double.NaN : (heard + off) / SR;
+    }
+
     boolean tookOverOnce() {
         return tookOver;
+    }
+
+    /** YT was asked for the next song: its screen shows the incoming song from here on. */
+    boolean askedNext() {
+        return asked;
+    }
+
+    /** YT's player has the next song's sound back (the decks are letting go). */
+    boolean handedOver() {
+        return handedOver;
     }
 
     /** A loop mix between its takeover and handover: what is heard is no longer YT's position. */

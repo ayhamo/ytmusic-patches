@@ -1,7 +1,7 @@
 package com.music.bitchord.playback.loopmix;
 
 /**
- * Spike: BitChord's native loop-mix renderer (libbitchord_loopmix.so, from the BitChord phone app):
+ * BitChord's native loop-mix renderer (libbitchord_loopmix.so, from the BitChord phone app):
  * two Signalsmith Stretch decks following beat knots, with gain / 250 Hz shelf / high-pass envelopes.
  * JNI entry points are bound to this class name.
  */

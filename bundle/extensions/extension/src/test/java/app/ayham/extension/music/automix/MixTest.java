@@ -119,4 +119,56 @@ public class MixTest {
         assertEquals(1, m.in.gain.at(13), 1e-9);
         assertTrue(m.askAt <= m.elementAt - Mix.NEXT_LEAD);
     }
+
+    // the seek bar's pulse during a mix (crossfade.js stepPulse)
+
+    @Test
+    public void pulseIsFullOnTheBeatAndRestsBetween() {
+        double[] beats = {0, 0.5, 1.0, 1.5};
+        assertEquals(1, Mix.pulse(beats, 0.5), 1e-9);
+        assertEquals(1, Mix.pulse(beats, 1.0), 1e-9);
+        // halfway between two beats: cos = -1, so only the rest level
+        assertEquals(Mix.PULSE_REST, Mix.pulse(beats, 0.75), 1e-9);
+        for (double t = 0; t < 1.5; t += 0.01) {
+            double v = Mix.pulse(beats, t);
+            assertTrue(v >= Mix.PULSE_REST - 1e-9 && v <= 1 + 1e-9);
+        }
+    }
+
+    @Test
+    public void pulseFollowsATempoRamp() {
+        // beats closing in (a tempo ramp): each one still lands at full brightness
+        double[] beats = {0, 0.64, 1.26, 1.86, 2.44};
+        for (double b : new double[]{0.64, 1.26, 1.86}) assertEquals(1, Mix.pulse(beats, b), 1e-9);
+        assertEquals(Mix.PULSE_REST, Mix.pulse(beats, (1.26 + 1.86) / 2), 1e-9);
+    }
+
+    @Test
+    public void pulseBreathesWithoutBeats() {
+        assertEquals(1, Mix.pulse(null, 0), 1e-9);
+        assertEquals(Mix.PULSE_REST, Mix.pulse(null, Mix.BREATH_SEC / 2), 1e-9);
+        assertEquals(1, Mix.pulse(null, Mix.BREATH_SEC), 1e-9);
+    }
+
+    @Test
+    public void blendBeatsCoverTheBlendOnTheOutgoingSpeed() {
+        Planner.Plan p = Planner.plan(new Planner.Settings(), "a", "b", PlannerTest.song("a", 120, 200, 0.9),
+                PlannerTest.song("b", 120, 180, 0.9), 200, 60, 60 + PlannerTest.EARLIEST_LEAD, null);
+        Mix m = Mix.blend(p, "a", "b", 200);
+        assertTrue(m.beats != null && m.beats.length > 4);
+        for (int k = 1; k < m.beats.length; k++) assertTrue("rising at " + k, m.beats[k] > m.beats[k - 1]);
+        // 120 BPM at rate 1: half a second apart through the blend, ending at its end
+        assertEquals(0.5, m.beats[m.beats.length - 1] - m.beats[m.beats.length - 2], 1e-6);
+        assertEquals(m.t0 + m.D, m.beats[m.beats.length - 1], 0.5);
+        assertEquals(m.t0 + m.D, m.pulseEnd(), 1e-9);
+    }
+
+    @Test
+    public void loopBeatsRunToTheHandover() {
+        Mix m = Mix.loop(PlannerTest.loopPlan(), "a", "b", 200);
+        assertTrue(m.beats != null && m.beats.length > 4);
+        assertEquals(0, m.beats[0], 1e-9);
+        assertEquals(m.elementAt, m.pulseEnd(), 1e-9);
+        assertEquals(m.elementAt, m.beats[m.beats.length - 1], 1e-6);
+    }
 }

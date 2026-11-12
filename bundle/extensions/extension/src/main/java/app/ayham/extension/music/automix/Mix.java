@@ -19,6 +19,8 @@ public final class Mix {
     public String style, outId, inId, note, title, sub;
     public boolean v2;
     public Planner.Plan plan;
+    /** The loop mix's plan (stats for nerds), or null for a blend. */
+    public Planner.LoopPlan loopPlan;
     /** Outgoing song second at mix 0, and where the outgoing song ends (mix seconds at its own speed). */
     public double takeoverSong, outEnd;
     /** The blend (or loop mix) on the mix clock. */
@@ -26,6 +28,34 @@ public final class Mix {
     /** YT moves to the next song; its player takes over from the incoming deck no earlier than [elementAt]. */
     public double askAt, elementAt;
     public final Deck out = new Deck(), in = new Deck();
+    /** The mix's beats on the mix clock (the seek bar pulses on them); null: no beat (a crossfade). */
+    public double[] beats;
+
+    /** Where the mix's pulse ends (the decks hand over to YT's player). */
+    public double pulseEnd() {
+        return "loop".equals(style) ? elementAt : t0 + D;
+    }
+
+    static final double PULSE_REST = 0.1, BREATH_SEC = 1.8;
+
+    /**
+     * The seek bar's brightness at mix second t (crossfade.js stepPulse): full on each beat,
+     * (0.5 + 0.5 cos 2πφ)² between, never under PULSE_REST; a slow 1.8 s breath without beats.
+     */
+    public static double pulse(double[] beats, double t) {
+        double phase;
+        if (beats != null && beats.length > 1 && t >= beats[0] && t < beats[beats.length - 1]) {
+            int k = java.util.Arrays.binarySearch(beats, t);
+            if (k < 0) k = -k - 2;
+            phase = (t - beats[k]) / (beats[k + 1] - beats[k]);
+        } else {
+            double b = beats != null && beats.length > 1 ? beats[beats.length - 1] - beats[beats.length - 2] : BREATH_SEC;
+            double from = beats != null && beats.length > 0 ? beats[beats.length - 1] : 0;
+            phase = (((t - from) % b) + b) % b / b;
+        }
+        double shape = 0.5 + 0.5 * Math.cos(2 * Math.PI * phase);
+        return PULSE_REST + (1 - PULSE_REST) * shape * shape;
+    }
 
     /** One automation lane, like a Web Audio AudioParam's events: set / linear ramp / exponential ramp. */
     public static final class Lane {
@@ -229,6 +259,14 @@ public final class Mix {
         }
         m.t0 = t;
         m.D = p.durationSec;
+        if (b > 0) {
+            // the ramp's beats as laid out above, then the blend's at the outgoing song's speed
+            List<Double> bt = new ArrayList<>();
+            for (int k = 1; k < ok.size(); k++) bt.add(ok.get(k)[0]);
+            for (double x = m.t0 + b / R; x <= m.t0 + m.D + 1e-6; x += b / R) bt.add(x);
+            m.beats = new double[bt.size()];
+            for (int k = 0; k < bt.size(); k++) m.beats[k] = bt.get(k);
+        }
         ok.add(new double[]{m.t0 + m.D + 1, mixOut + (m.D + 1) * R});
         m.out.knots(ok);
         m.out.stopAt = m.t0 + m.D + 0.2;
@@ -307,6 +345,7 @@ public final class Mix {
         Planner.LoopSchedule x = Planner.loopSchedule(lp, 0);
         Mix m = new Mix();
         m.style = "loop";
+        m.loopPlan = lp;
         m.outId = outId;
         m.inId = inId;
         m.takeoverSong = lp.out.loopStart;
@@ -325,6 +364,7 @@ public final class Mix {
         m.out.needFrom = lp.out.loopStart - 1;
         m.out.needTo = lp.out.loopEnd + 1;
         m.in.knots(ik);
+        m.beats = x.beatTimes.clone(); // the ramp and the settle bars, up to the handover
         m.in.loopA = lp.in.loopStart;
         m.in.loopB = lp.in.loopEnd;
         m.in.release = ik.get(beats)[1];

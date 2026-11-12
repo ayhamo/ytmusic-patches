@@ -1,7 +1,7 @@
 package com.music.bitchord.playback.smart;
 
 /**
- * Spike: the open-unmix STFT front end of BitChord's libbitchord_analysis.so (JNI bound to this class name).
+ * The open-unmix STFT front end of BitChord's libbitchord_analysis.so (JNI bound to this class name).
  * nativeCompute returns bin-major [channel][bin][frame] magnitudes, the model's [1, 2, bins, frames] layout.
  */
 public final class VocalSpectrogram {

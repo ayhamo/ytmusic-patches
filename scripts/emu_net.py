@@ -108,7 +108,11 @@ def main():
     p.add_argument("--out", default="offtest-out")
     a = p.parse_args()
 
-    if SERIAL not in subprocess.run([ADB, "devices"], capture_output=True, text=True).stdout:
+    try:
+        listed = subprocess.run([ADB, "devices"], capture_output=True, text=True, timeout=20).stdout
+    except subprocess.TimeoutExpired:
+        sys.exit("adb devices did not answer in 20 s (restart the adb server)")
+    if SERIAL not in listed:
         sys.exit(f"{SERIAL} is not connected")
     secs = max(60, int(a.minutes * 60))
 

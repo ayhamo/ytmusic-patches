@@ -11,6 +11,8 @@ import android.util.Log;
 import com.music.bitchord.playback.smart.MelSpectrogram;
 import com.music.bitchord.playback.smart.TrackFeatures;
 
+import app.ayham.extension.music.features.AudioStream;
+
 import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
@@ -20,11 +22,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
-import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -45,8 +44,6 @@ import java.util.Map;
  */
 final class Analyzer {
     private static final String TAG = Automix.TAG;
-    private static final String MORPHE_DOWNLOADS = "app.morphe.extension.music.patches.downloads.LocalDownloadManager";
-    private static final long RANGE = 1 << 20;
 
     static final double BEAT_WINDOW_SEC = 59;
     static final double VOCAL_WINDOW_SEC = (958 * 1024) / 44100.0;
@@ -54,6 +51,13 @@ final class Analyzer {
     static final double HEAD_SEC = 150, TAIL_SEC = 120;
     /** Longer songs (DJ sets, albums in one) are not analysed. */
     static final double MAX_SONG_SEC = 12 * 60;
+
+    /** A song over MAX_SONG_SEC: not analysed, and not downloaded again to retry. */
+    static final class TooLong extends IOException {
+        TooLong(String message) {
+            super(message);
+        }
+    }
     static final double RETRY_FAILED_MS = 60000;
     static final int KEEP_PCM = 4;
 
@@ -234,40 +238,7 @@ final class Analyzer {
     // Download and decode
 
     private static File download(Context c, String videoId) throws Exception {
-        Class<?> manager = Class.forName(MORPHE_DOWNLOADS);
-        Method resolve = manager.getDeclaredMethod("resolveStream", String.class);
-        resolve.setAccessible(true);
-        Object resolved = resolve.invoke(null, videoId);
-        if (resolved == null) throw new IOException("no stream for " + videoId);
-        Object format = resolved.getClass().getMethod("format").invoke(resolved);
-        String url = (String) format.getClass().getMethod("getUrl").invoke(format);
-        String mime = (String) format.getClass().getMethod("getMimeType").invoke(format);
-        long length = (long) format.getClass().getMethod("getContentLength").invoke(format);
-        Method open = manager.getDeclaredMethod("openAudioConnection", String.class, long.class, long.class);
-        open.setAccessible(true);
-        File dir = new File(c.getCacheDir(), "automix/dl");
-        //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
-        File out = new File(dir, videoId + (mime.contains("mp4") ? ".m4a" : ".webm"));
-        byte[] buffer = new byte[64 * 1024];
-        try (FileOutputStream os = new FileOutputStream(out)) {
-            for (long start = 0; start < length; start += RANGE) {
-                long end = Math.min(length, start + RANGE) - 1;
-                HttpURLConnection conn = (HttpURLConnection) open.invoke(null, url, start, end);
-                int code = conn.getResponseCode();
-                if (code != HttpURLConnection.HTTP_PARTIAL) {
-                    conn.disconnect();
-                    throw new IOException("range " + start + "-" + end + ": HTTP " + code);
-                }
-                try (InputStream in = conn.getInputStream()) {
-                    int n;
-                    while ((n = in.read(buffer)) > 0) os.write(buffer, 0, n);
-                } finally {
-                    conn.disconnect();
-                }
-            }
-        }
-        return out;
+        return AudioStream.download(new File(c.getCacheDir(), "automix/dl"), videoId);
     }
 
     /** One decode of a song: its mono (for the analysis) and its stereo opening and end (for the decks). */
@@ -301,7 +272,7 @@ final class Analyzer {
             if (track < 0) throw new IOException("no audio track");
             extractor.selectTrack(track);
             double knownDur = format.containsKey(MediaFormat.KEY_DURATION) ? format.getLong(MediaFormat.KEY_DURATION) / 1e6 : -1;
-            if (knownDur > MAX_SONG_SEC) throw new IOException(String.format(Locale.US, "%.0f s long, not analysed", knownDur));
+            if (knownDur > MAX_SONG_SEC) throw new TooLong(String.format(Locale.US, "%.0f s long, not analysed", knownDur));
             codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
             codec.configure(format, null, null, 0);
             codec.start();
@@ -389,7 +360,7 @@ final class Analyzer {
                         }
                     }
                     codec.releaseOutputBuffer(outIndex, false);
-                    if (frame > MAX_SONG_SEC * rate) throw new IOException("over " + MAX_SONG_SEC + " s, not analysed");
+                    if (frame > MAX_SONG_SEC * rate) throw new TooLong("over " + MAX_SONG_SEC + " s, not analysed");
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
                 }
             }
@@ -554,6 +525,8 @@ final class Analyzer {
         Decoded d;
         try {
             d = decode(file, headTmp, tailTmp);
+        } catch (TooLong e) {
+            throw e; // the length won't change with another download
         } catch (IOException e) {
             // "Failed to instantiate extractor" now and then: once more from a fresh download
             Log.w(TAG, "decode of " + id + " failed (" + e.getMessage() + "), downloading again");

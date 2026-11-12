@@ -1,5 +1,5 @@
 """Daily check that the animated art's Apple scrape still works, the same way the app does it
-(spike/AppleCanvas.java), and that the scrape code in BitChord and the browser extension hasn't
+(features/AppleCanvas.java), and that the scrape code in BitChord and the browser extension hasn't
 changed upstream. Exits 1 with a report when something is wrong; the GitHub Action then opens an
 issue. Standard library only.
 
@@ -141,7 +141,7 @@ def main():
                                     "Find it again, then update UPSTREAM_FILES and run with --accept.")
                 elif (seen.get(name) or {}).get("sha") != c["sha"]:
                     problems.append(f"upstream scrape code changed: {name} ({c['date']}: {c['message']}). "
-                                    "Compare with spike/AppleCanvas.java, then run with --accept and commit upstream.json.")
+                                    "Compare with features/AppleCanvas.java, then run with --accept and commit upstream.json.")
             report.append(f"upstream: {len(now)} files checked")
     except Exception as e:
         report.append(f"upstream: could not check ({e})")  # GitHub hiccup: not a scrape failure

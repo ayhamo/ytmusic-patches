@@ -47,6 +47,39 @@ public class AutomixVersionPreference extends ListPreference {
         }
     }
 
+    /**
+     * The choices drawn in the dialog's own text colour: YT's theme gives list items a dark colour,
+     * which on the dark dialog left every row blank but the highlighted one.
+     */
+    @Override
+    protected void onPrepareDialogBuilder(android.app.AlertDialog.Builder builder) {
+        super.onPrepareDialogBuilder(builder);
+        CharSequence[] entries = getEntries(), values = getEntryValues();
+        if (entries == null || values == null) return;
+        Context c = builder.getContext();
+        android.content.res.TypedArray ta = c.obtainStyledAttributes(new int[]{android.R.attr.textColorPrimary});
+        final int color = ta.getColor(0, 0xFFFFFFFF);
+        ta.recycle();
+        android.widget.ArrayAdapter<CharSequence> items = new android.widget.ArrayAdapter<CharSequence>(
+                c, android.R.layout.select_dialog_singlechoice, android.R.id.text1, entries) {
+            @Override
+            public android.view.View getView(int position, android.view.View convert, android.view.ViewGroup parent) {
+                android.view.View v = super.getView(position, convert, parent);
+                if (v instanceof android.widget.TextView) {
+                    ((android.widget.TextView) v).setTextColor(color);
+                    ((android.widget.TextView) v).setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 16);
+                }
+                return v;
+            }
+        };
+        builder.setSingleChoiceItems(items, findIndexOfValue(getValue()), (dialog, which) -> {
+            String value = values[which].toString();
+            if (callChangeListener(value)) setValue(value);
+            dialog.dismiss();
+        });
+        builder.setPositiveButton(null, null);
+    }
+
     @Override
     protected void onAttachedToActivity() {
         super.onAttachedToActivity();

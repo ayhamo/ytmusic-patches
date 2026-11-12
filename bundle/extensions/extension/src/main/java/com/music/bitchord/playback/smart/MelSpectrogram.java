@@ -1,7 +1,7 @@
 package com.music.bitchord.playback.smart;
 
 /**
- * Spike B: the JNI entry points of BitChord's libbitchord_analysis.so are bound to this class name.
+ * The JNI entry points of BitChord's libbitchord_analysis.so are bound to this class name.
  */
 public final class MelSpectrogram {
     private MelSpectrogram() {

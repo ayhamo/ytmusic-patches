@@ -37,6 +37,8 @@ final class SungLyrics {
     private static final Map<String, Boolean> asking = new ConcurrentHashMap<>();
     /** A lookup that failed (network) is asked again a minute later. */
     private static final Map<String, Long> failedAt = new ConcurrentHashMap<>();
+    /** When a song's saved answer was last looked for and not found: the file is checked every 5 s at most. */
+    private static final Map<String, Long> missingAt = new ConcurrentHashMap<>();
 
     private SungLyrics() {
     }
@@ -46,8 +48,18 @@ final class SungLyrics {
         if (id == null) return null;
         double[][] s = known.get(id);
         if (s != null) return s;
+        // called from the player's tick on the main thread: not a file check on every tick
+        Long missing = missingAt.get(id);
+        long now = System.currentTimeMillis();
+        if (missing != null && now - missing < 5000) return null;
         s = load(c, id);
-        if (s != null) known.put(id, s);
+        if (s != null) {
+            known.put(id, s);
+            missingAt.remove(id);
+        } else {
+            if (missingAt.size() > 200) missingAt.clear();
+            missingAt.put(id, now);
+        }
         return s;
     }
 

@@ -1,6 +1,6 @@
 package app.ayham.extension.music.automix;
 
-import app.ayham.extension.music.spike.SpikeA;
+import app.ayham.extension.music.features.Features;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -13,7 +13,7 @@ import android.widget.Toast;
 import java.lang.reflect.Method;
 import java.util.Locale;
 
-import app.ayham.extension.music.spike.SpikeE;
+import app.ayham.extension.music.features.PlayerTap;
 
 /**
  * Automix, the YT Music Extension's (BitChord web's AutoDJ) on the phone: the playing song and the
@@ -74,7 +74,7 @@ public final class Automix {
     // ---------------------------------------------------------------------------------------------
     // Hooks
 
-    /** Injection point (through SpikeA): MusicActivity.onCreate. */
+    /** Injection point (through Features): MusicActivity.onCreate. */
     public static void onActivityCreate(Activity activity) {
         app = activity.getApplicationContext();
         if (started) return;
@@ -87,7 +87,7 @@ public final class Automix {
     public static float gate(Object player, float volume) {
         return Engine.gate(player, volume);
     }
-    /** Injection point (through SpikeA): Morphe's crossfade has a new player. True when a mix takes it. */
+    /** Injection point (through Features): Morphe's crossfade has a new player. True when a mix takes it. */
     public static boolean onIncomingPlayerReady(Object player) {
         Engine e = engine;
         return e != null && e.running() && e.onIncoming(player);
@@ -156,7 +156,7 @@ public final class Automix {
                     nextTitle = nextItem == null ? null : (String) title.invoke(access, nextItem);
                     nextArtist = nextItem == null ? null : (String) artist.invoke(access, nextItem);
                     curId = cur;
-                    if (next != null && !next.equals(nextId)) SpikeA.lookAhead(next);
+                    if (next != null && !next.equals(nextId)) Features.lookAhead(next);
                     nextId = next;
                     queueAt = SystemClock.elapsedRealtime();
                 } catch (Throwable t) {
@@ -180,6 +180,8 @@ public final class Automix {
         Planner.Plan plan;
         String shown;
         double takeover;
+        /** The loop mix chosen for this song, or null (a blend or crossfade). */
+        Planner.LoopPlan loop;
 
         Song(String id) {
             this.id = id;
@@ -209,7 +211,7 @@ public final class Automix {
         if (!enabled()) return;
         Object player;
         try {
-            player = SpikeE.current();
+            player = PlayerTap.current();
         } catch (Throwable t) {
             player = null;
         }
@@ -237,8 +239,8 @@ public final class Automix {
 
         Analysis from = Analyzer.get(app, id), to = next != null ? Analyzer.get(app, next) : null;
         // music videos (known from the song-version lookup): no loop mix, as in the extension
-        if (from != null) from.musicVideo = SpikeA.isMusicVideo(id);
-        if (to != null) to.musicVideo = SpikeA.isMusicVideo(next);
+        if (from != null) from.musicVideo = Features.isMusicVideo(id);
+        if (to != null) to.musicVideo = Features.isMusicVideo(next);
         // where each song is sung, from its synced lyrics (the extension's first source; else the mask)
         SungLyrics.request(app, id, curTitle, curArtist, from != null ? from.durationSec : dur);
         if (to != null && next != null && !next.equals(id)) SungLyrics.request(app, next, nextTitle, nextArtist, to.durationSec);
@@ -262,6 +264,7 @@ public final class Automix {
                     s.bars == 0 ? "auto" : String.valueOf(s.bars), shown, waiting));
         }
         amx.plan = p;
+        amx.loop = loop ? lp : null;
         amx.takeover = takeover;
         if (!loop && (p.fallback || next == null)) return;   // Morphe's crossfade, as the extension's plain one
         if (!loop && !(p.durationSec >= 1)) return;
@@ -309,8 +312,9 @@ public final class Automix {
             Engine e = engine;
             String id = curId;
             if (id == null || !enabled()) return null;
-            boolean running = e != null && e.running() && e.tookOverOnce() && id.equals(e.m.outId);
-            Object p = SpikeE.current();
+            // a running mix keeps its band after YT has moved on to the next song (its midpoint)
+            boolean running = e != null && e.running() && e.tookOverOnce();
+            Object p = PlayerTap.current();
             long dur = p == null ? -1 : duration(p);
             if (dur <= 0) return null;
             if (running) return new long[]{Math.round(e.m.takeoverSong * 1000), dur, 1};
@@ -323,32 +327,116 @@ public final class Automix {
         }
     }
 
+    /**
+     * The seek bar during a mix: {how far the mix is (0-1), brightness on the beat (0.1-1)}, or null
+     * when no mix is heard.
+     */
+    public static float[] mixUi() {
+        Engine e = engine;
+        if (e == null || !e.running() || !e.tookOverOnce()) return null;
+        double t = e.mixNow();
+        if (Double.isNaN(t)) return null;
+        double end = e.m.pulseEnd();
+        float cover = (float) Math.max(0, Math.min(1, end > 0 ? t / end : 1));
+        return new float[]{cover, (float) Mix.pulse(e.m.beats, t)};
+    }
+
+    /**
+     * The incoming song's second heard now, in ms, while YT already shows it but its player is still
+     * held silent (YT moved on, before the handover): the song plays on our deck, and YT's position
+     * (Morphe's lyric clock) is not where the singing is. -1 otherwise.
+     */
+    public static long incomingHeardMs() {
+        Engine e = engine;
+        if (e == null || !e.running() || !e.askedNext() || e.handedOver()) return -1;
+        double t = e.mixNow();
+        if (Double.isNaN(t)) return -1;
+        double s = e.m.in.trackAt(t);
+        return s >= 0 ? Math.round(s * 1000) : -1;
+    }
+
+    /** The video id of the song a running mix goes into, or null. */
+    public static String incomingId() {
+        Engine e = engine;
+        return e == null || !e.running() ? null : e.m.inId;
+    }
+
     /** True while a loop mix runs (takeover to handover): the lyric line holds, as the extension's. */
     public static boolean holdLyrics() {
         Engine e = engine;
         return e != null && e.running() && e.loopHolding();
     }
 
-    /** Automix's status for the stats line: this song and the next (analysed / analysing / failed). */
+    /**
+     * Automix's stats-for-nerds line, as BitChord's (CrossfadeController describeAutomix): the mix
+     * running now, else the one planned for this song, else both songs' analysis.
+     */
     public static String status() {
         if (!enabled()) return null;
         String id = curId, next = nextId;
         if (id == null) return null;
-        StringBuilder b = new StringBuilder("Automix · ").append(describe(id));
-        if (next != null && !next.equals(id)) b.append("  →  next ").append(describe(next));
         Engine e = engine;
-        if (e != null && e.running() && e.tookOverOnce()) b.append("  ·  mixing (").append(e.m.style).append(')');
-        return b.toString();
+        if (e != null && e.running() && e.tookOverOnce()) {
+            Mix m = e.m;
+            if (m.loopPlan != null) return "Automix · " + (e.handedOver() ? "letting go" : "looping") + " · " + describeLoop(m.loopPlan);
+            if (m.plan != null) return "Automix · " + describePlan(m.plan, 0, null);
+            return "Automix · mixing now";
+        }
+        Song s = amx;
+        Object player;
+        try {
+            player = PlayerTap.current();
+        } catch (Throwable t) {
+            player = null;
+        }
+        double pos = player == null ? -1 : position(player) / 1000.0;
+        if (id.equals(s.id) && next != null && pos >= 0 && !"done".equals(s.state)) {
+            double in = Math.max(0, s.takeover - pos);
+            if (s.loop != null) return "Automix · loop mix in " + (int) Math.ceil(in) + " s · " + describeLoop(s.loop);
+            Planner.Plan p = s.plan;
+            if (p != null && !p.fallback && p.durationSec >= 1) {
+                Planner.LoopPlan lp = loopPlan;
+                String noLoop = lp != null && lp.none != null ? lp.none : "missing".equals(loopState) ? "audio not decoded yet" : null;
+                return "Automix · " + describePlan(p, in, noLoop);
+            }
+        }
+        return "Automix · this song: " + label(id) + " · next: " + (next == null || next.equals(id) ? "none" : label(next));
     }
 
-    private static String describe(String id) {
+    /** BitChord's describeLoop: "out 8-bar, clear by lyrics · in 4-bar, clear by mask · 94 → 100 BPM over 3 bars". */
+    static String describeLoop(Planner.LoopPlan p) {
+        long from = Math.round(p.out.bpm), to = Math.round(p.in.bpm / (p.fold > 0 ? p.fold : 1));
+        String tempo = from == to ? from + " BPM" : from + " → " + to + " BPM over " + p.rampBars + " bars";
+        String fold = p.fold > 1 ? " (next in double time)" : p.fold < 1 ? " (next in half time)" : "";
+        return "out " + side(p.out) + " · in " + side(p.in) + " · " + tempo + fold;
+    }
+
+    private static String side(Planner.LoopSide s) {
+        return s.bars + "-bar, clear by " + ("lyrics".equals(s.checkedBy) ? "lyrics" : "mask");
+    }
+
+    /**
+     * BitChord's line for a planned mix: "crossfading in 12 s · 12 s", "filter mix in 8 s · 4 bars",
+     * "mixing now · 8 bars · next at 1.034×", with its reason and why there is no loop mix.
+     */
+    static String describePlan(Planner.Plan p, double inSec, String noLoop) {
+        String when = inSec > 0 ? "in " + (int) Math.ceil(inSec) + " s" : "now";
+        String length = p.bars > 0 ? p.bars + " bars" : String.format(Locale.ROOT, "%.1f s", p.durationSec);
+        String why = p.reason != null ? " · " + p.reason : "";
+        String no = noLoop != null ? " · no loop: " + noLoop : "";
+        if ("crossfade".equals(p.style)) return "crossfading " + when + " · " + String.format(Locale.ROOT, "%.0f s", p.durationSec) + why + no;
+        if ("filter".equals(p.style)) return "filter mix " + when + " · " + length + why + no;
+        String stretch = Math.abs(p.rate - 1) < 0.0005 ? "same tempo" : String.format(Locale.ROOT, "next at %.3f×", p.rate);
+        return "mixing " + when + " · " + length + " · " + stretch + no;
+    }
+
+    /** BitChord's per-song label: analysing… / failed / analysed (94 BPM F# major, dsp grid 0.82). */
+    private static String label(String id) {
         Analysis a = app == null ? null : Analyzer.get(app, id);
-        if (a == null) return Analyzer.busy(id) ? "analysing…" : "not analysed";
-        StringBuilder b = new StringBuilder();
-        if (a.bpm > 0) b.append(String.format(Locale.US, "%.0f BPM", a.bpm));
-        if (a.keyName != null) b.append(b.length() > 0 ? " · " : "").append(a.keyName);
-        if (a.gridConfidence > 0) b.append(String.format(Locale.US, " · grid %.2f", a.gridConfidence));
-        return b.length() == 0 ? "analysed" : b.toString();
+        if (a == null) return Analyzer.busy(id) ? "analysing…" : "waiting";
+        if (!(a.bpm > 0)) return "failed";
+        String key = a.keyName != null && !a.keyName.isEmpty() ? " " + a.keyName : "";
+        return String.format(Locale.ROOT, "analysed (%d BPM%s, dsp grid %.2f)", Math.round(a.bpm), key, a.gridConfidence);
     }
 
     private static final Engine.Listener listener = new Engine.Listener() {
@@ -394,7 +482,7 @@ public final class Automix {
                     Planner.Audio inAudio = audio(Analyzer.head(app, next), 0, Planner.IN_REGION_SEC, to.durationSec);
                     if (outAudio == null || inAudio == null) {
                         // offline the audio can't be fetched: ask again every 30 s instead (crossfade meanwhile)
-                        boolean offline = SpikeA.offline();
+                        boolean offline = Features.offline();
                         Log.i(TAG, "no loop mix for this pair yet: decoded audio missing, trying again in " + (offline ? "30 s (offline)" : "5 s"));
                         state = "missing";
                         retryAt = SystemClock.elapsedRealtime() + (offline ? 30_000 : 5000);
@@ -457,6 +545,16 @@ public final class Automix {
     // YT's player and the screen
 
     private static Method posMethod, durMethod;
+
+    /** YT's player position now, or -1 (no player yet). */
+    public static long positionMs() {
+        try {
+            Object p = PlayerTap.current();
+            return p == null ? -1 : position(p);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
 
     static long position(Object player) {
         try {

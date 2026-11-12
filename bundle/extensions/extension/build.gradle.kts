@@ -22,8 +22,8 @@ configurations.configureEach {
 }
 
 dependencies {
-    // Spike B: ONNX Runtime's Java API goes into the extension dex; its native libraries are
-    // added to the APK by the Spike B patch.
+    // ONNX Runtime's Java API goes into the extension dex; its native libraries are
+    // added to the APK by the "Automix libraries" patch.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.28.0")
     testImplementation("junit:junit:4.13.2")
 }

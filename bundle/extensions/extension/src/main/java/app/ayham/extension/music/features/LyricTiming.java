@@ -241,7 +241,7 @@ final class LyricTiming {
             lastPos = pos;
             if (rematch(lyr == forLyrics, shown.equals(forShown), pos, spanEnd)) match(lyr, shown, pos);
             if (start == null) return -1;
-            return LyricWords.shown(LyricWords.sung(start, end, chars, pos), total, shown.length());
+            return LyricWords.shown(LyricWords.sung(start, end, chars, pos + FILL_LEAD_MS), total, shown.length());
         } catch (Throwable t) {
             broken = true;
             spanEnd = -1;
@@ -312,6 +312,15 @@ final class LyricTiming {
      * the line due, or its note ("" here: a gap).
      */
     static String catchUp(String shown) {
+        String out = pickShown(shown);
+        lastOut = out;
+        return out;
+    }
+
+    /** What [catchUp] returned last: the line as Morphe wrote it (its capitals, romanization). */
+    private static String lastOut;
+
+    private static String pickShown(String shown) {
         if (broken || shown == null) return shown;
         if (stale != null && !stale.equals(shown)) stale = null; // Morphe has moved on
         try {
@@ -322,9 +331,14 @@ final class LyricTiming {
             lines(lyr);
             long pos = position(manager);
             int due = due(pos);
-            // the next sung line at least [LEAD_MS] early, so its slide ends as it is sung (Morphe's own
-            // line already leads by its mini-line offset, 800 ms by default; this covers it set lower)
-            boolean early = due >= 0 && starts[due] > pos && !texts[due].equals(letters(shown));
+            String want = letters(shown);
+            // Morphe names the next line up to 800 ms early (its mini-line offset, for the mini
+            // player). In a fast song that is half the line still being sung, and the fill jumped to
+            // the next line (Midnight Sun): the line being sung stays until the next one's own lead.
+            // (+40 ms: the strip's wake-up for the next line reads a clock a few ms behind its own)
+            if (aheadOf(starts, texts, due, want, pos, LEAD_MS + 40) >= 0) return held(due);
+            // the next sung line at least [LEAD_MS] early, so its slide ends as it is sung
+            boolean early = due >= 0 && starts[due] > pos && !texts[due].equals(want);
             if (stale == null && !early && !(shown.equals(forShown) && overdue(pos, spanEnd))) return shown;
             stale = shown;
             return due < 0 ? shown : String.valueOf(lineText.invoke(lineObjs.get(due))).trim();
@@ -334,10 +348,43 @@ final class LyricTiming {
     }
 
     /**
+     * The line after [due] that Morphe names ([want], its letters) before its time: it starts more
+     * than [lead] after [pos] (within 2 s). -1 when Morphe's line is the one due, or not a later one.
+     */
+    static int aheadOf(long[] starts, String[] texts, int due, String want, long pos, long lead) {
+        if (want.isEmpty() || (due >= 0 && texts[due].equals(want))) return -1;
+        for (int j = Math.max(0, due + 1); j < starts.length && starts[j] - pos < 2000; j++)
+            if (texts[j].equals(want)) return starts[j] > pos + lead ? j : -1;
+        return -1;
+    }
+
+    /**
+     * The text to keep up while Morphe is ahead: line [due], or over a short breath the sung line
+     * before it; "" in the intro or a real gap (the note shows then). Morphe's own wording when
+     * it is the same line.
+     */
+    private static String held(int due) throws Exception {
+        int v = due;
+        if (v >= 0 && texts[v].isEmpty()) {
+            int next = nextVocal(v), prev = v;
+            while (prev >= 0 && texts[prev].isEmpty()) prev--;
+            v = next >= 0 && prev >= 0 && starts[next] - starts[v] < SHORT_GAP_MS ? prev : -1;
+        }
+        if (v < 0) return "";
+        if (lastOut != null && letters(lastOut).equals(texts[v])) return lastOut;
+        return String.valueOf(lineText.invoke(lineObjs.get(v))).trim();
+    }
+
+    /**
      * How early the next line comes up: the lyric strip's slide (340 ms), so the line is in place,
      * and its first word filling, when it is sung.
      */
     static final long LEAD_MS = 340;
+    /**
+     * The word fill runs this far ahead of the voice: a word sweeps over its own sung time, so at
+     * the playhead it is fully lit only as it ends, and reads late (the user's ear on the phone).
+     */
+    static final long FILL_LEAD_MS = 150;
 
     /** The line due at [pos] (see {@link #dueLine}), or -1. */
     private static int due(long pos) {

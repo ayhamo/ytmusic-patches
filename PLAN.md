@@ -511,7 +511,11 @@ Goal: Morphe's downloader keeps the files, but tapping a downloaded song opens Y
     - Stopping our deck's AudioTrack right after the mix muted the whole phone for ~10 ms (recorded). The deck now plays 3 s of silence before it stops. Four mixes recorded since: no cut.
   - Item 5: the "Mixing" label now sits just under the bar (12dp, was 20dp), clear of the pause button.
   - Bluetooth: the user's call is that speaker working means Bluetooth works too (both paths are placed by `AudioTrack.getTimestamp`). Not tested separately.
-  - Still open in Phase 0: item 1 (cast and ⋮ as transparent as the switch); item 4 checked by ear on the phone.
+  - Item 1: cast and ⋮ are drawn at 55% (`dimTopIcons`), given back with YT's layout. The user approved the look.
+  - Item 4 on the phone: the strip jumped to the next line mid-line on fast verses (Midnight Sun), because Morphe names the next line 800 ms early. The strip now holds the sung line until 340 ms before the next one (`LyricTiming.aheadOf`/`held`, plus a wake-up timed to the switch, `lineNext`). On the emulator every line switched 320–355 ms early. The word fill also read late: a word fills over its own sung time, so it was fully lit only as it ended. It now runs 150 ms ahead (`FILL_LEAD_MS`). The user confirmed both on the phone.
+  - The user's layout ask: the queue sheet rests 28dp lower (easing back as it is pulled up), the column takes all the slack above it, and the art banner reaches down to the seek bar, its sides cropped evenly, so no empty band is left under the art. Back from the open queue leaves YT's sheet half open: that place is no longer learnt as the resting place (only the bottom 30% of the screen counts).
+- Phase 1 (shared specs): `spec/` is a copy of the extension's master. `scripts/check-spec.ps1` fails when they differ. `SpecFixturesTest` runs our planner on the 5 real pairs: every plan field matches the extension's golden plans, v1 and v2, within 1e-3. The new `curves` are skipped until they are ported (the first Phase 2 task).
+- Testing from here on (the user, 2026-11-17): every feature on the emulator; the phone once at the very end of all features, with a debug build, going through each feature.
 
 ## 8. Stats for nerds (last, after all spike items are verified)
 - The info lines under the art, as in BitChord:

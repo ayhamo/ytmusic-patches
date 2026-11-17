@@ -28,6 +28,8 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -105,6 +107,7 @@ final class PlayerScreen {
                 overlay.setVisibility(View.GONE);
                 if (mesh != null) mesh.setVisibility(View.GONE);
                 giveBack();
+                giveSheetBack();
                 giveColorsBack();
                 FullArt.giveBack();
                 Log.i(TAG, "BitChord screen switched off: YT's layout given back");
@@ -137,7 +140,8 @@ final class PlayerScreen {
         // YT's Up next / Lyrics / Related sheet shrinks the art to a strip: the sheet owns the screen then
         boolean sheetOpen = art != null && art.getHeight() > 0 && art.getHeight() < decor.getWidth() / 2;
         // ...and the sheet starts rising before that: its handle leaves its resting place
-        int sheetAt = sheet != null && sheet.isShown() ? top(sheet) : decor.getHeight() - dp(a, 64);
+        // (YT's own place: our drop taken out, or the drop would be learnt as YT's and add up)
+        int sheetAt = sheet != null && sheet.isShown() ? top(sheet) - Math.round(ourDrop(sheet)) : decor.getHeight() - dp(a, 64);
         // YT parks the sheet below the window while it lays the page out (on the phone: 2922 on a
         // 2340 screen). That is not its resting place: learnt as one, the real place would read as
         // "sheet open" from then on and keep our layout off for good (items 2 and 9).
@@ -157,7 +161,9 @@ final class PlayerScreen {
             if (sheetAt > sheetRest) sheetRest = sheetAt;
             // still for a while with the art full size: wherever it is now is where it rests, also
             // when that is higher than the place learnt (a guessed or parked one)
-            else if (now - sheetSeenAt > 600 && sheetRest != sheetAt) sheetRest = sheetAt;
+            // (only near the bottom: Back from the open queue leaves YT's sheet half open, the art
+            // still full size, and learnt there the column would squeeze above it)
+            else if (now - sheetSeenAt > 600 && sheetRest != sheetAt && sheetAt > decor.getHeight() * 0.7f) sheetRest = sheetAt;
         }
         if (sheetAt < sheetRest - dp(a, 12)) sheetOpen = true;
         if (sheetOpen != sheetOpenLogged) {
@@ -168,6 +174,16 @@ final class PlayerScreen {
         // A drag of the page keeps our layout (it slides with the page); only near the mini player
         // is YT's given back, or every small drag would snap the art to YT's card and back
         boolean down = !page.isShown() || pageY > decor.getHeight() - dp(a, 200);
+        // the sheet rests a little lower than YT has it, so the art gets the room; its drop eases out
+        // as it is pulled up, and it is YT's again by the time it is open
+        int drop = 0;
+        if (down || sheet == null || !sheet.isShown() || sheetRest <= 0) {
+            giveSheetBack();
+        } else {
+            float k = (sheetAt - (sheetRest - dp(a, SHEET_EASE_DP))) / (float) dp(a, SHEET_EASE_DP);
+            drop = Math.round(dp(a, SHEET_DROP_DP) * Math.max(0f, Math.min(1f, k)));
+            dropSheet(sheet, drop);
+        }
         if (down || sheetOpen || art == null || song == null || controls == null || art.getHeight() == 0) {
             for (int i = 0; i < overlay.getChildCount(); i++) overlay.getChildAt(i).setVisibility(View.INVISIBLE);
             giveBack();
@@ -181,7 +197,7 @@ final class PlayerScreen {
         int gArt = dp(a, 14), gLyric = dp(a, 2), gCtl = dp(a, 4), gVol = dp(a, 4), gChips = dp(a, 10), gEnd = dp(a, 6);
         int need = gArt + hSong + gLyric + hLyric + gCtl + hCtl + gVol + hVol + gChips + hChips + gEnd;
         // while the page is dragged the column keeps its room: the sheet's resting place, moved with the page
-        int sheetTop = pageY > dp(a, 2) && sheetRest > 0 ? sheetRest + pageY : sheetAt;
+        int sheetTop = (pageY > dp(a, 2) && sheetRest > 0 ? sheetRest + pageY : sheetAt) + drop;
 
         // YT's art as BitChord's card, or its fullscreen banner: the column starts below the card's
         // box, which stays put; the mesh meets the art where it is drawn
@@ -204,9 +220,15 @@ final class PlayerScreen {
             int spread = Math.min(extra, dp(a, 48));
             gCtl += spread / 2;
             gVol += spread / 2;
-            gArt += (extra - spread) / 2;
+            // the rest above the column (the user: the whole column lower, the art bigger); it used to
+            // be split above and below, and the sheet rested [drop] higher
+            gArt += extra - spread;
         }
         int y = artBottom + gArt;
+        // the banner reaches down to the seek bar: its lower part fades out under the title and the
+        // lyric, so no empty band is left between the art and the column (the user); its sides are
+        // cropped evenly
+        FullArt.reach(y + hSong + gLyric + hLyric + gCtl, decor);
         place(song, y);
         int songEnd = y + hSong;
         y += hSong + gLyric + hLyric + gCtl;
@@ -223,7 +245,8 @@ final class PlayerScreen {
         for (int i = 0; i < overlay.getChildCount(); i++) overlay.getChildAt(i).setVisibility(View.VISIBLE);
         moveTo(lyricRow, lyricY - oy);
         moveTo(volRow, volY - oy);
-        moveTo(stats, FullArt.drawnBottom() - dp(a, 10) - stats.getHeight() - oy);
+        // the stats stay where the square art would end (the grown banner runs on to the title)
+        moveTo(stats, Math.min(FullArt.drawnBottom(), FullArt.squareBottom()) - dp(a, 10) - stats.getHeight() - oy);
         // the star and "..." at the title row's end, centred on it; the row ends before them
         int g = dp(a, 34), right = decor.getWidth() - (song.getLeft() > 0 ? song.getLeft() : dp(a, 20));
         View titleView = song.findViewById(id(a, "title"));
@@ -254,6 +277,7 @@ final class PlayerScreen {
         View ar = song.findViewById(id(a, "artist"));
         tint(t, Color.WHITE);
         tint(ar, 0x8CFFFFFF);
+        dimTopIcons(a, decor);
         if (!layoutLogged) {
             layoutLogged = true;
             Log.i(TAG, "laid out: art ends " + artBottom + ", title " + top(song) + ", lyric " + lyricY + ", controls " + ctlY
@@ -291,8 +315,65 @@ final class PlayerScreen {
         ytColors.clear();
     }
 
+    /** How bright the cast and ⋮ buttons in YT's top bar are drawn: quieter, like its audio/video switch (item 1). */
+    private static final float TOP_ICONS_ALPHA = 0.55f;
+    private static final List<View> dimmed = new ArrayList<>();
+
+    /** Cast and ⋮ of the player's top bar (its ⋮ is looked up next to the cast button: feed rows have one too). */
+    private static void dimTopIcons(Activity a, View decor) {
+        View cast = decor.findViewById(id(a, "cast_button_container"));
+        View menu = cast != null && cast.getParent() instanceof ViewGroup
+                ? ((ViewGroup) cast.getParent()).findViewById(id(a, "contextual_menu")) : null;
+        for (View v : new View[]{cast, menu}) {
+            if (v == null || v.getAlpha() == TOP_ICONS_ALPHA) continue;
+            if (v.getAlpha() != 1f) continue; // YT is fading it itself (the page moving): leave it
+            v.setAlpha(TOP_ICONS_ALPHA);
+            if (!dimmed.contains(v)) dimmed.add(v);
+        }
+    }
+
+    /** How far the Up next sheet rests below YT's place, giving the art room (the user's ask). */
+    private static final int SHEET_DROP_DP = 28;
+    /** Over how much of the sheet's own rise the drop eases out, so a drag meets YT's sheet smoothly. */
+    private static final int SHEET_EASE_DP = 160;
+    private static View droppedSheet;
+    private static float sheetYt, sheetOurs;
+
+    /** Our drop on [sheet] now (0 when YT has moved it itself since: its value then). */
+    private static float ourDrop(View sheet) {
+        if (sheet != droppedSheet) return 0;
+        if (Math.abs(sheet.getTranslationY() - sheetOurs) > 0.5f) {
+            droppedSheet = null;
+            return 0;
+        }
+        return sheetOurs - sheetYt;
+    }
+
+    private static void dropSheet(View sheet, float drop) {
+        if (sheet != droppedSheet) {
+            giveSheetBack();
+            droppedSheet = sheet;
+            sheetYt = sheet.getTranslationY();
+            sheetOurs = sheetYt;
+        }
+        float want = sheetYt + drop;
+        if (Math.abs(want - sheetOurs) > 0.5f) {
+            sheet.setTranslationY(want);
+            sheetOurs = want;
+        }
+    }
+
+    /** YT's sheet where YT put it (the page collapsed, or the screen switched off). */
+    private static void giveSheetBack() {
+        View s = droppedSheet;
+        droppedSheet = null;
+        if (s != null && Math.abs(s.getTranslationY() - sheetOurs) < 0.5f) s.setTranslationY(sheetYt);
+    }
+
     /** YT's views back where YT put them (collapse, sheet, switch off). */
     private static void giveBack() {
+        for (View v : dimmed) if (v.getAlpha() == TOP_ICONS_ALPHA) v.setAlpha(1f);
+        dimmed.clear();
         if (zone != null) zone.showYts(); // a mix may have hidden YT's seek bar
         for (Map.Entry<TextView, Integer> e : ytMaxWidth.entrySet())
             if (e.getKey() != null) e.getKey().setMaxWidth(e.getValue());
@@ -949,7 +1030,7 @@ final class PlayerScreen {
         private final Paint icon = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
         private final int noteRoom;
-        private final Runnable lineEnd;
+        private final Runnable lineEnd, lineNext;
         private int kind = INFO;
         private boolean chevron;
         private long changedAt, shownAt;
@@ -969,6 +1050,11 @@ final class PlayerScreen {
             icon.setStrokeJoin(Paint.Join.ROUND);
             // the next line shows the moment this one ends, not at the next 500 ms poll
             lineEnd = () -> {
+                if (isAttachedToWindow() && isShown()) refreshLine(a);
+            };
+            // the next sung line's own wake-up: redraws re-set it only while it is still ahead, so the
+            // fade's 40 ms redraws can't cancel it in its last moments (the next line came up late)
+            lineNext = () -> {
                 if (isAttachedToWindow() && isShown()) refreshLine(a);
             };
         }
@@ -1070,7 +1156,10 @@ final class PlayerScreen {
                 removeCallbacks(lineEnd);
                 // the next sung line comes up its slide early, to be in place when it is sung
                 long toNext = LyricTiming.msToNext();
-                if (toNext > 0) postDelayed(lineEnd, toNext + 5);
+                if (toNext > 0) {
+                    removeCallbacks(lineNext);
+                    postDelayed(lineNext, toNext + 5);
+                }
                 if (toEnd >= 0) {
                     postDelayed(lineEnd, toEnd + 30);
                     // Morphe a little late: the line due is put up as soon as it counts as overdue
@@ -1080,7 +1169,10 @@ final class PlayerScreen {
                 // the intro or a gap: the first line after it comes up early too, not at the next poll
                 removeCallbacks(lineEnd);
                 long toNext = LyricTiming.msToNext();
-                if (toNext > 0) postDelayed(lineEnd, toNext + 5);
+                if (toNext > 0) {
+                    removeCallbacks(lineNext);
+                    postDelayed(lineNext, toNext + 5);
+                }
             }
         }
 
@@ -1142,6 +1234,7 @@ final class PlayerScreen {
         @Override
         protected void onDetachedFromWindow() {
             removeCallbacks(lineEnd);
+            removeCallbacks(lineNext);
             super.onDetachedFromWindow();
         }
     }

@@ -193,6 +193,24 @@ final class FullArt {
         return new float[]{k, v};
     }
 
+    /** Where the banner should reach down to (the title row's top), screen px; set after each frame. */
+    private static int reach;
+    /** How much taller than the screen's width the banner is drawn this frame, px. */
+    private static int grow;
+    /** Where the banner would end as a square (its stats line sits there). */
+    private static int squareEnd;
+
+    /** Set from the layout after each frame; a change draws the next one. */
+    static void reach(int y, View decor) {
+        if (y == reach) return;
+        reach = y;
+        decor.postInvalidateOnAnimation();
+    }
+
+    static int squareBottom() {
+        return squareEnd;
+    }
+
     /** The art's drawn bottom this frame (apply returns the layout's, which never moves). */
     static int drawnBottom() {
         return drawn;
@@ -323,9 +341,11 @@ final class FullArt {
         float sc = cw / card.getWidth();
         float cardLeft = boxLeft + (box - cw) / 2, cardTop = ytTop + (box - cw) / 2;
         // ...and the banner: the screen's width from the page's top-left corner
-        float big = decor.getWidth() / (float) card.getWidth();
+        squareEnd = Math.round(pageTop + decor.getWidth());
+        grow = Math.max(0, reach - squareEnd);
+        float big = (decor.getWidth() + grow) / (float) card.getWidth();
         float s = sc + e * (big - sc);
-        float cardX = (1 - e) * cardLeft, cardY = (1 - e) * cardTop + e * pageTop;
+        float cardX = (1 - e) * cardLeft - e * grow / 2f, cardY = (1 - e) * cardTop + e * pageTop;
         float x = cardX - s * offX, y = cardY - s * offY;
         move.setPivotX(0);
         move.setPivotY(0);

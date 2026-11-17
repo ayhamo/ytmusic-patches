@@ -111,6 +111,23 @@ public class LyricTimingTest {
     }
 
     @Test
+    public void morpheNamingTheNextLineEarlyIsHeldBack() {
+        long[] starts = {1_000, 3_000, 4_500};
+        String[] texts = {"one", "two", "three"};
+        // Morphe already names "two" 800 ms early: held, "one" is still sung
+        assertEquals(1, LyricTiming.aheadOf(starts, texts, 0, "two", 2_200, 340));
+        // within the line's own lead: Morphe's line stands
+        assertEquals(-1, LyricTiming.aheadOf(starts, texts, 0, "two", 2_700, 340));
+        // Morphe names the line due: nothing to hold
+        assertEquals(-1, LyricTiming.aheadOf(starts, texts, 1, "two", 3_100, 340));
+        // the intro: the first line named early is held too
+        assertEquals(0, LyricTiming.aheadOf(starts, texts, -1, "one", 300, 340));
+        // a line further than 2 s ahead, or an earlier one: not Morphe being early
+        assertEquals(-1, LyricTiming.aheadOf(starts, texts, -1, "three", 300, 340));
+        assertEquals(-1, LyricTiming.aheadOf(starts, texts, 2, "one", 4_600, 340));
+    }
+
+    @Test
     public void aShortBreathIsSkippedToTheNextSungLine() {
         long[] starts = {0, 2_000, 3_000, 10_000};
         String[] texts = {"bow", "", "workout", ""};

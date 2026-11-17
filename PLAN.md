@@ -471,6 +471,48 @@ Goal: Morphe's downloader keeps the files, but tapping a downloaded song opens Y
 - Java tests 136, Python 42.
 - Lesson: don't use airplane mode on LDPlayer for offline tests. Its adb runs over the emulator's network, so adb drops and the emulator has to be rebooted.
 
+### From the first real-phone test (2026-11-15, `ytm-ayham-phone.apk`, package `app.ayham.ytmusic`), to fix later
+1. Look: the cast button and the ⋮ button in the player's top bar should be as transparent as YT's audio/video switch.
+2. Bug: after the screen turned off on its timeout and was turned back on, the player showed YT's old layout. Only restarting the app and starting the playlist again brought our screen back. A screen-off/on path probably doesn't rebuild or re-apply the BitChord layout; maybe a lifecycle event (onStop/onStart or a recreated view) isn't caught.
+3. Feature: the YT Music Extension added an automix overview. Put an automix overview behind a ⋮ button next to the ★ in our title row. Wait until the extension's version is ready, then port it the same way.
+4. Bug: lyrics tracking runs slightly late ("a few msec", the user's estimate; not measured yet). Plan: take Metrolist's lyrics timing approach later. The comparison chat will coordinate the Metrolist code, and both this project and the YT Music Extension will read from that shared source.
+5. Look: the "Mixing" label sits too low and touches the pause button; move it up. To make room, maybe move YT's top bar (the playlist name and its menu) down a little.
+6. Automix: Vaina Loca → SI NO ES CONTIGO on Advanced AutoDJ didn't mix the way the user wanted. The YT Music Extension logged exactly the automix the user wants for this pair; compare our plan with that log.
+7. Bug: when the mix ended and the song carried on, the audio cut for a moment ("a msec or 2"), and the user also heard a stretch with no song. Probably the handover from our deck back to YT's player (gate unmute or alignment). Check it in the phone's logs.
+   - Found and fixed 2026-11-17 on the emulator:
+     - When the incoming song is a music video swapped to its song, `AnimatedCover.songMode` clicked YT's song/video toggle mid-mix. YT reloaded its player and ignored our alignment seeks, so the handover landed 114 s off: YT jumped into the middle of the song.
+     - The click now waits until no mix runs.
+     - `Engine.rescueOffHandover` also seeks YT's playing player to the deck when a forced handover is more than 1 s off.
+     - Retest on a swapped music-video pair: handover +18 ms.
+8. Layout: the controls take about half the screen; the user wants more room for the art. Tighten the padding. Talk it over with the user first.
+9. Bug: rotating the phone to landscape shows the art full screen like a YouTube video (YT's own landscape layout). After rotating back to portrait, all our player changes are gone. Probably the same cause as item 2: a recreated activity or view isn't picked up again. Also design a landscape layout of our own, as BitChord has.
+
+### Phase 0 (2026-11-17): Morphe 2.3.0 stable
+- Morphe 2.3.0's patches need Morphe Desktop 2.2.0: the patcher in 2.1.1 lacks `PatchInterfacesKt`.
+  - The Dockerfile now pins `MORPHE_DESKTOP=2.2.0`, and `patch.ps1` defaults to `patches-2.3.0.mpp`.
+  - 60 patches applied, 0 failed; every hook of ours was found.
+- Re-checked on the emulator, all working:
+  - song version, square cover and artist art;
+  - stats, lyric line and lyrics guard hooks;
+  - animated cover (Anti-Hero);
+  - automix analysis and a filter mix (takeover −4 ms, handover +18 ms).
+- Screen off/on and rotation keep our screen on the emulator. YT doesn't rebuild its activity on this tablet emulator, so items 2/9 need the phone's logs.
+- Lyrics (item 4), measured on the emulator (Anti-Hero, word-timed):
+  - Morphe's lyric clock (`getPositionMs`) matches YT's player position within about ±60 ms.
+  - Morphe's line text already runs 800 ms ahead (its mini-line offset `LYRICS_MINI_NEXT_OFFSET_MS`, −800 by default), so with our 500 ms poll the line comes up 300–800 ms early, and the word fill follows the player.
+  - One real late case: during a mix the deck's line was picked exactly at its start and finished its 340 ms slide late. Fixed: the next sung line now comes up at least 340 ms early (`LyricTiming.dueLine`, `LEAD_MS`), on the deck too, and out of an intro or a gap on time instead of at the next poll.
+  - Not reproduced otherwise. Next: check on the phone by ear, and Morphe's per-track lyric offset (`TrackOffsetStore`) and "Lyrics offset" setting.
+- Phone build: `work/out/ytm-ayham-phone.apk` (package `app.ayham.ytmusic`, Morphe 2.3.0).
+- On the real phone (S21 FE, Android 15, speaker), 2026-11-17:
+  - Speaker latency: no tuning needed. Takeovers −8 to +9 ms, handovers +1 to +11 ms (one −44 ms). Both our deck and YT's player are placed by `AudioTrack.getTimestamp`.
+  - Items 2/9 (our screen lost after screen off/on or another app): YT parks its bottom sheet below the window while it lays the page out (2922 on a 2340 screen). We learnt that as the sheet's resting place, so its real place then read as "sheet open" for good. Fixed in `PlayerScreen.tick`: a parked sheet doesn't count, and the resting place is learnt again once the sheet stays still for 0.6 s. The phone's log now shows our screen coming back after every screen off/on.
+  - Item 7 (cut after the mix), measured by recording the phone's audio with scrcpy (`--audio-source=playback --audio-dup`) and looking for dropouts. There were two causes:
+    - The handover could fall mid-nudge, so YT's speed went back to x1 as it was unmuted. It now waits until YT's speed has been steady for 300 ms.
+    - Stopping our deck's AudioTrack right after the mix muted the whole phone for ~10 ms (recorded). The deck now plays 3 s of silence before it stops. Four mixes recorded since: no cut.
+  - Item 5: the "Mixing" label now sits just under the bar (12dp, was 20dp), clear of the pause button.
+  - Bluetooth: the user's call is that speaker working means Bluetooth works too (both paths are placed by `AudioTrack.getTimestamp`). Not tested separately.
+  - Still open in Phase 0: item 1 (cast and ⋮ as transparent as the switch); item 4 checked by ear on the phone.
+
 ## 8. Stats for nerds (last, after all spike items are verified)
 - The info lines under the art, as in BitChord:
   - Line 1, the source format: codec · sample rate · bitrate · channels (e.g. "Opus · 48.0 kHz · 160 kbps · 2 ch"), read from YT's player (audio input format).

@@ -241,6 +241,13 @@ final class AnimatedCover {
             return;
         }
         if (id == null || id.equals(switchedFor) || !"1".equals(Features.props().getProperty("autoSong")) || !SongVersion.swapped(id)) return;
+        // not during a mix: the toggle makes YT reload its player, so the incoming player our engine
+        // aligned is replaced and the handover lands far off (heard as a cut and a jump). Clicked
+        // once the mix is done, on a later tick.
+        try {
+            if (app.ayham.extension.music.automix.Automix.incomingId() != null) return;
+        } catch (Throwable ignored) {
+        }
         // the page has two copies of the toggle (one hidden): the one on screen
         View toggle = shownWithId(decor, id(activity, "audio_video_switch_toggle", activity.getPackageName()));
         if (toggle == null) return;

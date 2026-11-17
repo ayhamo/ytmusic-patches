@@ -61,7 +61,9 @@ final class PlayerScreen {
     private static long meshTry;
     private static boolean layoutLogged;
     /** Where the bottom sheet's handle rests while the sheet is closed. */
-    private static int sheetRest, sheetRestFor;
+    private static int sheetRest, sheetRestFor, sheetSeen = -1;
+    private static long sheetSeenAt;
+    private static boolean sheetOpenLogged;
     /** YT's views we draw elsewhere: {YT's own translationY, the one we set}. */
     private static final Map<View, float[]> moved = new WeakHashMap<>();
     /** YT's own title and artist colours, given back when the BitChord screen is switched off. */
@@ -136,14 +138,33 @@ final class PlayerScreen {
         boolean sheetOpen = art != null && art.getHeight() > 0 && art.getHeight() < decor.getWidth() / 2;
         // ...and the sheet starts rising before that: its handle leaves its resting place
         int sheetAt = sheet != null && sheet.isShown() ? top(sheet) : decor.getHeight() - dp(a, 64);
+        // YT parks the sheet below the window while it lays the page out (on the phone: 2922 on a
+        // 2340 screen). That is not its resting place: learnt as one, the real place would read as
+        // "sheet open" from then on and keep our layout off for good (items 2 and 9).
+        if (sheetAt > decor.getHeight() - dp(a, 24)) sheetAt = decor.getHeight() - dp(a, 64);
         if (decor.getHeight() != sheetRestFor) {
             // a new window height (rotation, split screen) moves the resting place: learnt again, as
             // an old, lower one would read as "sheet open" from then on and keep our layout off
             sheetRestFor = decor.getHeight();
             sheetRest = 0;
         }
-        if (expanded && pageY <= dp(a, 2) && sheetAt > sheetRest) sheetRest = sheetAt;
+        long now = SystemClock.uptimeMillis();
+        if (sheetAt != sheetSeen) {
+            sheetSeen = sheetAt;
+            sheetSeenAt = now;
+        }
+        if (expanded && pageY <= dp(a, 2) && !sheetOpen) {
+            if (sheetAt > sheetRest) sheetRest = sheetAt;
+            // still for a while with the art full size: wherever it is now is where it rests, also
+            // when that is higher than the place learnt (a guessed or parked one)
+            else if (now - sheetSeenAt > 600 && sheetRest != sheetAt) sheetRest = sheetAt;
+        }
         if (sheetAt < sheetRest - dp(a, 12)) sheetOpen = true;
+        if (sheetOpen != sheetOpenLogged) {
+            sheetOpenLogged = sheetOpen;
+            Log.i(TAG, "sheet " + (sheetOpen ? "open" : "closed") + ": at " + sheetAt + ", rests at " + sheetRest
+                    + ", art " + (art == null ? -1 : art.getHeight()) + ", window " + decor.getHeight());
+        }
         // A drag of the page keeps our layout (it slides with the page); only near the mini player
         // is YT's given back, or every small drag would snap the art to YT's card and back
         boolean down = !page.isShown() || pageY > decor.getHeight() - dp(a, 200);
@@ -849,9 +870,9 @@ final class PlayerScreen {
                 paint.setColor((Math.round(255 * look[1]) << 24) | 0xFFFFFF);
                 canvas.drawRoundRect(left, cy - h / 2, left + (right - left) * w, cy + h / 2, h / 2, h / 2, paint);
                 // BitChord's time label turns into "Mixing" (the extension's too), pulsing on the same beat,
-                // where YT's times sit (hidden with its bar)
+                // just under the bar (it sat level with YT's times and touched the pause button: item 5)
                 label.setAlpha(Math.round(255 * look[2]));
-                canvas.drawText("Mixing", getWidth() / 2f, cy + 20 * d - (label.descent() + label.ascent()) / 2, label);
+                canvas.drawText("Mixing", getWidth() / 2f, cy + 12 * d - (label.descent() + label.ascent()) / 2, label);
                 postInvalidateOnAnimation();
                 return;
             }
@@ -1047,11 +1068,19 @@ final class PlayerScreen {
                 if ((fill >= 0 && fill < text.length()) || (toFade <= 0 && toEnd > 0)) postInvalidateDelayed(40);
                 else if (toFade > 0) postInvalidateDelayed(toFade);
                 removeCallbacks(lineEnd);
+                // the next sung line comes up its slide early, to be in place when it is sung
+                long toNext = LyricTiming.msToNext();
+                if (toNext > 0) postDelayed(lineEnd, toNext + 5);
                 if (toEnd >= 0) {
                     postDelayed(lineEnd, toEnd + 30);
                     // Morphe a little late: the line due is put up as soon as it counts as overdue
                     postDelayed(lineEnd, toEnd + LyricTiming.CATCH_UP_MS + 20);
                 }
+            } else if (kind == NOTE && playing) {
+                // the intro or a gap: the first line after it comes up early too, not at the next poll
+                removeCallbacks(lineEnd);
+                long toNext = LyricTiming.msToNext();
+                if (toNext > 0) postDelayed(lineEnd, toNext + 5);
             }
         }
 

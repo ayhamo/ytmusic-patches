@@ -148,7 +148,7 @@ final class LyricTiming {
             Object lyr = current.get(manager);
             if (pos < 0 || lyr == null) return null;
             lines(lyr);
-            int i = at(pos);
+            int i = due(pos);
             return i < 0 ? "" : String.valueOf(lineText.invoke(lineObjs.get(i))).trim();
         } catch (Throwable t) {
             return null;
@@ -318,14 +318,57 @@ final class LyricTiming {
             init();
             Object manager = getInstance.invoke(null);
             Object lyr = current.get(manager);
-            if (lyr == null || starts == null || lyr != linesFor) return shown;
+            if (lyr == null) return shown;
+            lines(lyr);
             long pos = position(manager);
-            if (stale == null && !(shown.equals(forShown) && overdue(pos, spanEnd))) return shown;
+            int due = due(pos);
+            // the next sung line at least [LEAD_MS] early, so its slide ends as it is sung (Morphe's own
+            // line already leads by its mini-line offset, 800 ms by default; this covers it set lower)
+            boolean early = due >= 0 && starts[due] > pos && !texts[due].equals(letters(shown));
+            if (stale == null && !early && !(shown.equals(forShown) && overdue(pos, spanEnd))) return shown;
             stale = shown;
-            int i = at(pos);
-            return i < 0 ? shown : String.valueOf(lineText.invoke(lineObjs.get(i))).trim();
+            return due < 0 ? shown : String.valueOf(lineText.invoke(lineObjs.get(due))).trim();
         } catch (Throwable t) {
             return shown;
+        }
+    }
+
+    /**
+     * How early the next line comes up: the lyric strip's slide (340 ms), so the line is in place,
+     * and its first word filling, when it is sung.
+     */
+    static final long LEAD_MS = 340;
+
+    /** The line due at [pos] (see {@link #dueLine}), or -1. */
+    private static int due(long pos) {
+        return dueLine(starts, texts, pos, LEAD_MS);
+    }
+
+    /**
+     * The line at [pos], or the next sung line when it starts within [lead] of it. An empty line (a
+     * gap) never comes early: a short one keeps the line before it up.
+     */
+    static int dueLine(long[] starts, String[] texts, long pos, long lead) {
+        int i = lineAt(starts, pos), j = lineAt(starts, pos + lead);
+        return j > i && !texts[j].isEmpty() ? j : i;
+    }
+
+    /** Milliseconds until the next sung line comes up (its start less [LEAD_MS]); -1: none, or now. */
+    static long msToNext() {
+        if (broken) return -1;
+        try {
+            init();
+            Object manager = getInstance.invoke(null);
+            Object lyr = current.get(manager);
+            if (lyr == null) return -1;
+            lines(lyr);
+            long pos = position(manager);
+            int v = 0;
+            while (v < starts.length && (starts[v] <= pos || texts[v].isEmpty())) v++;
+            long ms = v >= starts.length ? -1 : starts[v] - LEAD_MS - pos;
+            return ms > 0 ? ms : -1;
+        } catch (Throwable t) {
+            return -1;
         }
     }
 

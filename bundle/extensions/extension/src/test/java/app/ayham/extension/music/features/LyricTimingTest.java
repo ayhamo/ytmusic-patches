@@ -98,6 +98,19 @@ public class LyricTimingTest {
     }
 
     @Test
+    public void theNextSungLineComesUpItsSlideEarly() {
+        long[] starts = {1_000, 5_000, 9_000, 20_000};
+        String[] texts = {"one", "two", "", "three"};
+        assertEquals(0, LyricTiming.dueLine(starts, texts, 4_600, 340)); // 400 ms to go: not yet
+        assertEquals(1, LyricTiming.dueLine(starts, texts, 4_700, 340)); // 300 ms early
+        assertEquals(1, LyricTiming.dueLine(starts, texts, 5_100, 340)); // sung now
+        assertEquals(1, LyricTiming.dueLine(starts, texts, 8_800, 340)); // a gap never comes early
+        assertEquals(2, LyricTiming.dueLine(starts, texts, 9_000, 340));
+        assertEquals(3, LyricTiming.dueLine(starts, texts, 19_700, 340)); // out of the gap, early
+        assertEquals(0, LyricTiming.dueLine(starts, texts, 700, 340)); // the first line too
+    }
+
+    @Test
     public void aShortBreathIsSkippedToTheNextSungLine() {
         long[] starts = {0, 2_000, 3_000, 10_000};
         String[] texts = {"bow", "", "workout", ""};

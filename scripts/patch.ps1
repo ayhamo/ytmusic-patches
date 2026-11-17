@@ -10,7 +10,7 @@
 # so every build installs over the previous one.
 param(
     [string]$Apk = "com.google.android.apps.youtube.music@9.30.53.xapk",
-    [string]$MorpheBundle = "patches-2.3.0-dev.2.mpp",
+    [string]$MorpheBundle = "patches-2.3.0.mpp",
     [switch]$Install
 )
 $ErrorActionPreference = "Stop"

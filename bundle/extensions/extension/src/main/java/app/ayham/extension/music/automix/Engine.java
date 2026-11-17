@@ -91,6 +91,8 @@ final class Engine {
     private boolean aligned;
     private final StringBuilder alignLog = new StringBuilder();
     private long settleUntil, nudgeUntil, lastP = -1, lastAt;
+    /** When align last changed YT's speed (elapsedRealtime). */
+    private long speedSetAt;
     private float nudge = 1, setSpeed = 1;
     private final List<Long> errs = new ArrayList<>();
     private long lastSeekCheck;
@@ -297,6 +299,11 @@ final class Engine {
             Log.e(TAG, "render failed", t);
         } finally {
             try {
+                // 3 s of silence before the deck stops: stopping it right after the mix cut the whole
+                // phone's sound for ~10 ms (S21 FE, recorded 2026-11-17: Samsung's output reconfigures
+                // as a track stops); stopped later, while it plays silence, nothing is heard
+                float[] z = new float[BLOCK * 2];
+                for (int k = 0; k < 3 * SR / BLOCK; k++) track.write(z, 0, z.length, AudioTrack.WRITE_BLOCKING);
                 track.stop();
                 app.ayham.extension.music.features.EqPresets.releaseDeck(track.getAudioSessionId());
                 track.release();
@@ -466,13 +473,18 @@ final class Engine {
             if (Double.isNaN(handoverAt)) align(mix);
         }
         // hand over once the player is in time (or as late as the decoded audio allows)
+        // ...but never mid-nudge: putting YT's speed back at the handover re-plans its audio as it is
+        // unmuted, heard as a short cut (phone, 2026-11-17: x0.994 -> x1.000 2 ms before the unmute).
+        // A nudge ends (silent) within 1 s, then the speed settles 300 ms.
+        boolean speedSettled = nudgeUntil == 0 && SystemClock.elapsedRealtime() - speedSetAt >= 300;
         if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null
-                && ((aligned && mix >= m.elementAt - 0.3) || mix >= Math.min(m.elementAt + 8, deadline))) {
+                && ((aligned && speedSettled && mix >= m.elementAt - 0.3) || mix >= Math.min(m.elementAt + 8, deadline))) {
             handoverAt = mix + 0.3;
             LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
         }
         if (!handedOver && !Double.isNaN(handoverAt) && mix >= handoverAt - 0.0125) {
             handedOver = true;
+            rescueOffHandover();
             if (setSpeed != 1) speed(inPlayer, 1f);
             released = inPlayer;
             restoreVolume(inPlayer);
@@ -485,6 +497,25 @@ final class Engine {
             return;
         }
         if (handedOver && mix >= handoverAt + 0.6) finish(true, null);
+    }
+
+    /**
+     * A handover forced at the deadline with YT far from the deck (its player was replaced, or seeks
+     * didn't land): YT's playing player is seeked to where the deck is, so the song carries on from
+     * the right place instead of jumping (a short gap instead of a jump into the middle).
+     */
+    private void rescueOffHandover() {
+        if (lastErr == Long.MIN_VALUE || Math.abs(lastErr) <= 1000) return;
+        try {
+            Object p = PlayerTap.current();
+            if (p == null) p = inPlayer;
+            long target = Math.round(m.in.trackAt(handoverAt) * 1000);
+            if (p instanceof SeekAccess) ((SeekAccess) p).ayham_seekTo(target);
+            if (p != inPlayer) inPlayer = p;
+            Log.w(TAG, "handover " + lastErr + " ms off: YT's player seeked to the deck, " + target + " ms");
+        } catch (Throwable t) {
+            Log.w(TAG, "handover rescue failed", t);
+        }
     }
 
     /** No incoming player from Morphe's crossfade: YT moved on in the same player, or another one is playing. */
@@ -647,6 +678,7 @@ final class Engine {
         if (Math.abs(base * nudge - setSpeed) > 0.0005 && nudgeUntil == 0) {
             setSpeed = base * nudge;
             speed(inPlayer, setSpeed);
+            speedSetAt = now;
         }
         if (seeks == 0) {
             seek(want, base, now);
@@ -657,6 +689,7 @@ final class Engine {
             nudge = 1;
             setSpeed = base;
             speed(inPlayer, base);
+            speedSetAt = now;
             nudgeUntil = 0;
             settleUntil = now + 300;
             errs.clear();
@@ -719,6 +752,7 @@ final class Engine {
         nudge = sp;
         setSpeed = base * sp;
         speed(inPlayer, setSpeed);
+        speedSetAt = now;
         nudgeUntil = now + dur;
         nudges++;
         alignLog.append(String.format(Locale.US, " err %d ms -> x%.3f for %d ms;", err, sp, dur));

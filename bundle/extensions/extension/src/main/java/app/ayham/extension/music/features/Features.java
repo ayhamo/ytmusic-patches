@@ -83,7 +83,7 @@ public final class Features {
         return cachedProps;
     }
 
-    /** The feature switches in Morphe's settings ("BitChord fork"), all on by default. */
+    /** The feature switches in Morphe's settings ("Fork settings"), all on by default. */
     static final String[] SWITCHES = {"ui", "fullArt", "artistArt", "canvas", "lyricLine", "stats", "autoSong", "native", "eq"};
 
     /**

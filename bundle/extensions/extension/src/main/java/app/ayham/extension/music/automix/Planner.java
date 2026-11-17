@@ -20,7 +20,7 @@ public final class Planner {
 
     /** The extension's automix settings. */
     public static final class Settings {
-        /** 1: Original AutoDJ, 2: Advanced AutoDJ. */
+        /** 1: Original AutoDJ, 2: Advanced AutoDJ, 3: Automix v2 (AutoDJ plus Orchard's rules). */
         public int version = 1;
         /** Advanced AutoDJ's key-aware blend length. */
         public boolean keyAware;
@@ -52,11 +52,23 @@ public final class Planner {
         public double[][] out, in;
     }
 
-    public static final class Plan {
+    public static final class Plan implements Cloneable {
         public String style;            // blend | filter | crossfade | loop
         public boolean fallback;
         public String reason;
         public boolean v2;
+        /** Automix v2's blend (its evidence fields below are set). */
+        public boolean v3;
+        /** Automix v2's hand-over (the boundary switch) or beatless bridge, both crossfades. */
+        public boolean handoff, bridge;
+        /** The fallback ladder's shape: dropin | muffle, or null. */
+        public String shape;
+        public double muffleLead = Double.NaN;
+        public double subBassContrast = Double.NaN, swapAt = Double.NaN;
+        public String swapMoved;
+        public Glide glide;
+        public Harmonic harmonic;
+        public Trim trim;
         public double clash;
         public String rerouted, vocalsBy, keyClash;
         public double mixOutTrackTime, durationSec, mixInTrackTime;
@@ -68,6 +80,17 @@ public final class Planner {
         public LoopPlan loop;
         /** What each deck does over the transition (spec/automix/plan.schema.json "curves"). */
         public Curves curves;
+        /** Automix v2's kick lock applied to mixInTrackTime, or null. */
+        public KickLock.Result kick;
+
+        /** A shallow copy (the kick lock moves the copy's cue). */
+        public Plan copy() {
+            try {
+                return (Plan) clone();
+            } catch (CloneNotSupportedException e) {
+                throw new AssertionError(e);
+            }
+        }
 
         @Override
         public String toString() {
@@ -77,6 +100,9 @@ public final class Planner {
             if (!style.equals("crossfade")) b.append(String.format(Locale.US, ", %d bars at %.1f BPM", bars, bpm));
             b.append(String.format(Locale.US, ", next song from %.2f s at x%.3f", mixInTrackTime, rate));
             if (outRate > 1.0001) b.append(String.format(Locale.US, ", playing song up to x%.4f over %d beats", outRate, rampBeats));
+            if (shape != null) b.append(", ").append(shape);
+            if (glide != null) b.append(String.format(Locale.US, ", glide x%.4f over %d beats", glide.q, glide.beats));
+            if (trim != null && (trim.outDb != 0 || trim.inDb != 0)) b.append(String.format(Locale.US, ", trim out %.1f / in %.1f dB", trim.outDb, trim.inDb));
             if (reason != null) b.append(" (").append(reason).append(')');
             if (v2 && !style.equals("crossfade")) {
                 b.append(String.format(Locale.US, " [AutoDJ: both sing %d%%", Math.round(clash * 100)));
@@ -259,7 +285,9 @@ public final class Planner {
         if (sung == null) sung = new Sung();
 
         if ("crossfade".equals(picked) && both) return fallback(cur, next, earliest, "picked in the overview");
+        boolean v3 = s.version == 3;
         if (fromGrid == null || cur.gridConfidence < MIN_GRID_CONFIDENCE) {
+            if (v3 && both) return handoff(cur, next, earliest, "this song has no beat grid at its end", sung);
             return fallback(cur, next, earliest, both ? "this song has no beat grid at its end" : "songs not analysed in time");
         }
         if ("filter".equals(picked)) {
@@ -267,66 +295,174 @@ public final class Planner {
             return filterMix(s, cur, next, fromGrid, g, requestedBars(s, cur, next, fromGrid, toGrid != null ? toGrid.downbeatSec : 0, true), pos, earliest,
                     "picked in the overview", sung);
         }
+        if (v3 && (toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE)) return handoff(cur, next, earliest, "next song has no beat grid", sung);
         if (toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE) {
             return filterMix(s, cur, next, fromGrid, null, requestedBars(s, cur, next, fromGrid, 0, true), pos, earliest, "next song has no beat grid", sung);
         }
 
         double ratio = foldRate(fromGrid.bpm / toGrid.bpm);
+        // v2: never more than V2_MAX_STRETCH of speed-up, never two 808 styles at once, never
+        // keys that clash badly; it can't beatmatch those, so it hands over instead
+        if (v3 && stretchOf(ratio) > V2_MAX_STRETCH) {
+            return handoff(cur, next, earliest, "tempos " + Math.round(stretchOf(ratio) * 100) + "% apart (v2 stretches at most "
+                    + Math.round(V2_MAX_STRETCH * 100) + "%)", sung);
+        }
+        double contrast = subBassContrast(cur, next);
+        if (v3 && contrast >= V2_SUB_BASS_VETO) {
+            return handoff(cur, next, earliest, "different sub-bass styles (" + String.format(Locale.US, "%.2f", contrast) + " apart)", sung);
+        }
+        Harmonic harmonic = v3 ? harmonicEvidence(cur, next) : null;
+        if (harmonic != null && harmonic.severeClash) {
+            return handoff(cur, next, earliest, "the keys clash (" + cur.keyName + " → " + next.keyName + ", " + js(harmonic.score) + ")", sung);
+        }
         if (!stretchAllowed(ratio)) {
             return filterMix(s, cur, next, fromGrid, toGrid, requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, true), pos, earliest,
                     "tempos " + Math.round(Math.abs(ratio - 1) * 100) + "% apart", sung);
         }
-        double rate = ratio < 1 ? 1 : ratio;
-        double outRate = ratio < 1 ? 1 / ratio : 1;
+        // Automix v2: over 4% apart, a glide on both songs instead of the speed-up (glideSteps)
+        double glideQ = v3 && stretchOf(ratio) > V2_MAX_CONSTANT ? 1 / ratio : Double.NaN;
+        boolean gliding = !Double.isNaN(glideQ);
+        double rate = gliding ? 1 : ratio < 1 ? 1 : ratio;
+        double outRate = gliding ? 1 : ratio < 1 ? 1 / ratio : 1;
         int rampBeats = outRate > 1.0001 ? (int) Math.ceil((outRate - 1) / TEMPO_STEP_PER_BEAT) : 0;
         double rampSongSec = rampBeats * fromGrid.beatSec;
-        String keyClash = s.version == 2 && s.keyAware ? keysClash(cur, next) : null;
-        int bars = keyClash != null ? keyClashBars(fromGrid) : requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, false);
+        // AutoDJ's key-aware length (its own toggle); Automix v2: Orchard's key score, always on
+        String keyClash = v3 ? (harmonic.shortBlend ? cur.keyName + " → " + next.keyName + ", " + js(harmonic.score) : null)
+                : s.version >= 2 && s.keyAware ? keysClash(cur, next) : null;
+        boolean pinnedBars = pick != null && pick.bars > 0;
+        int bars = keyClash != null && !pinnedBars ? keyClashBars(fromGrid) : requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, false);
         int effBars = effectiveBlendBars(bars, cur.gridConfidence, next.gridConfidence);
         double outSpan = effBars * fromGrid.barSec;
-        double dur = outSpan / outRate;
+        GlideSteps glide = gliding ? glideSteps(glideQ, effBars * 4, fromGrid.beatSec) : null;
+        double dur = glide != null ? glide.total : outSpan / outRate;
+        double inPerOut = glide != null ? 1 / glideQ : rate / outRate;
 
         double first = earliest + rampSongSec;
-        boolean v2 = s.version == 2;
+        boolean v2 = s.version >= 2;
         double mixOut = naturalMixOut(fromGrid, v2 ? musicEnd(cur) : cur, outSpan);
         if (mixOut < pos + rampSongSec) mixOut = phraseAtOrAfter(fromGrid, first);
         if (mixOut < first) mixOut = downbeatAtOrAfter(fromGrid, first);
         if (mixOut + outSpan > cur.durationSec - 0.3) {
+            if (v3) return handoff(cur, next, earliest, "too close to the end for a blend", sung);
             return filterMix(s, cur, next, fromGrid, toGrid, bars, pos, earliest, "too close to the end for a blend", sung);
         }
 
         double introEnd = Double.isNaN(next.introEndSec) ? 0 : next.introEndSec;
         double fullEnergyPhrase = phraseAtOrAfter(toGrid, Math.max(introEnd, toGrid.downbeatSec));
-        double mixIn = fullEnergyPhrase - dur * rate;
+        double mixIn = fullEnergyPhrase - outSpan * inPerOut;
+        boolean introShort = mixIn < toGrid.downbeatSec - 1e-6;
         if (mixIn < toGrid.downbeatSec) mixIn = toGrid.downbeatSec;
 
         Reroute dj = null;
         if (v2) {
             mixIn = capIncomingSkip(next, toGrid, mixIn);
-            dj = rerouteForVocals(cur, next, fromGrid, toGrid, mixOut, mixIn, outSpan, rate / outRate, Math.max(first, pos + rampSongSec), sung);
+            dj = rerouteForVocals(cur, next, fromGrid, toGrid, mixOut, mixIn, outSpan, inPerOut, Math.max(first, pos + rampSongSec), sung);
             mixOut = dj.mixOut;
             mixIn = dj.mixIn;
+        }
+        // v2: the bass changes hands on a bar where the playing song isn't mid-line
+        Swap swap = v3 && effBars >= 2 ? vocalSafeSwap(cur, mixOut, outSpan, effBars, sung.out) : null;
+
+        // v2's fallback ladder for a pair that beatmatches but can't blend: a drop-in, then a
+        // muffle, else the hand-over
+        String shape = null, shapeWhy = null;
+        double muffleLead = Double.NaN;
+        double djClash = dj != null ? dj.clash : 0;
+        if (v3 && (introShort || djClash > V2_CLASH_MAX)) {
+            String why = introShort ? "no intro in the next song to blend over" : "both would sing " + Math.round(djClash * 100) + "% of a blend";
+            double dSpan = DROP_IN_BARS * fromGrid.barSec;
+            GlideSteps dGlide = gliding ? glideSteps(glideQ, DROP_IN_BARS * 4, fromGrid.beatSec) : null;
+            double lo = Math.max(first, pos + rampSongSec);
+            double natural = naturalMixOut(fromGrid, musicEnd(cur), dSpan);
+            for (int k = 0; k * fromGrid.barSec <= MAX_DISCARD_SEC; k++) {
+                double o = natural - k * fromGrid.barSec;
+                if (o < lo) break;
+                double cut = voiceRisk(cur, o + dSpan - 1.5, o + dSpan, sung.out);
+                if (!Double.isNaN(cut) && cut >= SWAP_CLEAR) continue;
+                double bothSing = vocalOverlap(cur, next, o, dSpan, toGrid.downbeatSec, inPerOut, sung);
+                if ((Double.isNaN(bothSing) ? 0 : bothSing) > V2_CLASH_MAX) continue;
+                double dDur = dGlide != null ? dGlide.total : dSpan / outRate;
+                Plan p = new Plan();
+                p.style = "blend";
+                p.shape = "dropin";
+                p.reason = why + ": a drop-in on the next song's first beat" + (k > 0 ? " (exit " + k + " bar" + (k == 1 ? "" : "s") + " earlier, off a sung line)" : "");
+                p.v2 = v2;
+                p.v3 = true;
+                p.clash = Double.isNaN(bothSing) ? 0 : bothSing;
+                p.vocalsBy = dj != null ? dj.by : null;
+                p.keyClash = keyClash;
+                p.subBassContrast = contrast;
+                p.glide = dGlide != null ? new Glide(glideQ, DROP_IN_BARS * 4, fromGrid.beatSec) : null;
+                p.harmonic = harmonic;
+                p.trim = loudnessTrim(cur, o, dSpan, next, toGrid.downbeatSec, dSpan * inPerOut);
+                p.mixOutTrackTime = o;
+                p.durationSec = dDur;
+                p.mixInTrackTime = toGrid.downbeatSec;
+                p.rate = dGlide != null ? dGlide.inRate[0] : rate;
+                p.outRate = outRate;
+                p.rampBeats = rampBeats;
+                p.rampSongSec = rampSongSec;
+                p.beatSec = fromGrid.beatSec;
+                p.bars = DROP_IN_BARS;
+                p.swapDb = SHORT_BLEND_KILL_DB;
+                p.barSec = dGlide != null ? dDur / DROP_IN_BARS : fromGrid.barSec / outRate;
+                p.bpm = dGlide != null ? fromGrid.bpm * Math.sqrt(glideQ) : fromGrid.bpm * outRate;
+                p.outBpm = fromGrid.bpm;
+                p.inBpm = toGrid.bpm;
+                return p;
+            }
+            // muffle: the playing song keeps its level while a low-pass closes over it, the next
+            // fades in over the bars before the bass swap and takes the bass on it
+            int B = effBars * 4;
+            double at = swap != null ? swap.at : 0.5;
+            int leadBeats = (int) Math.min(MUFFLE_LEAD_BEATS, Math.round(at * B));
+            double lead = leadBeats / (double) B;
+            double inAtSwap = mixIn + at * outSpan * inPerOut, inAtLead = mixIn + (at - lead) * outSpan * inPerOut;
+            double body = bassMean(cur, mixOut, mixOut + at * outSpan);
+            double outRisk = voiceRisk(cur, mixOut + at * outSpan - 0.5, mixOut + at * outSpan + 0.5, sung.out);
+            double inRisk = voiceRisk(next, inAtSwap - 0.5, inAtSwap + 0.5, sung.in);
+            boolean swapsSingers = (Double.isNaN(outRisk) ? 0 : outRisk) >= 0.5 && (Double.isNaN(inRisk) ? 0 : inRisk) >= 0.7;
+            if (!introShort && leadBeats >= MUFFLE_MIN_LEAD_BEATS && at + MUFFLE_EXIT_BEATS / (double) B <= 1 + 1e-6
+                    && (Double.isNaN(body) || body >= MUFFLE_MIN_BODY) && inAtLead >= MUFFLE_MIN_OPENING_SEC && !swapsSingers) {
+                shape = "muffle";
+                muffleLead = lead;
+                shapeWhy = why + ": a muffle (the playing song closes behind a low-pass)";
+            } else {
+                return handoff(cur, next, earliest, why + " and no drop-in or muffle fits", sung);
+            }
         }
 
         Plan p = new Plan();
         p.style = "blend";
+        p.reason = shapeWhy;
+        p.shape = shape;
+        p.muffleLead = muffleLead;
         p.v2 = v2;
-        p.clash = dj != null ? dj.clash : 0;
+        p.v3 = v3;
+        p.clash = djClash;
         p.rerouted = dj != null ? dj.rerouted : null;
         p.vocalsBy = dj != null ? dj.by : null;
         p.keyClash = keyClash;
+        if (v3) {
+            p.subBassContrast = contrast;
+            p.swapAt = swap != null ? swap.at : Double.NaN;
+            p.swapMoved = swap != null ? swap.moved : null;
+            p.glide = glide != null ? new Glide(glideQ, effBars * 4, fromGrid.beatSec) : null;
+            p.harmonic = harmonic;
+            p.trim = loudnessTrim(cur, mixOut, outSpan, next, mixIn, outSpan * inPerOut);
+        }
         p.mixOutTrackTime = mixOut;
         p.durationSec = dur;
         p.mixInTrackTime = mixIn;
-        p.rate = rate;
+        p.rate = glide != null ? glide.inRate[0] : rate;
         p.outRate = outRate;
         p.rampBeats = rampBeats;
         p.rampSongSec = rampSongSec;
         p.beatSec = fromGrid.beatSec;
         p.bars = effBars;
         p.swapDb = effBars >= FULL_SWAP_MIN_BARS ? KILL_DB : SHORT_BLEND_KILL_DB;
-        p.barSec = fromGrid.barSec / outRate;
-        p.bpm = fromGrid.bpm * outRate;
+        p.barSec = glide != null ? dur / effBars : fromGrid.barSec / outRate;
+        p.bpm = glide != null ? fromGrid.bpm * Math.sqrt(glideQ) : fromGrid.bpm * outRate;
         p.outBpm = fromGrid.bpm;
         p.inBpm = toGrid.bpm;
         return p;
@@ -337,7 +473,7 @@ public final class Planner {
                           double earliest, String reason, Sung sung) {
         int bars = Math.min(requested, FILTER_MAX_BARS);
         double dur = bars * fromGrid.barSec;
-        boolean v2 = s.version == 2;
+        boolean v2 = s.version >= 2;
         double mixOut = naturalMixOut(fromGrid, v2 ? musicEnd(cur) : cur, dur);
         if (mixOut < pos) mixOut = phraseAtOrAfter(fromGrid, earliest);
         if (mixOut < earliest) mixOut = downbeatAtOrAfter(fromGrid, earliest);
@@ -511,6 +647,428 @@ public final class Planner {
         return gridOf(a) != null && a.gridConfidence >= MIN_GRID_CONFIDENCE;
     }
 
+    // ───────── Automix v2 (version 3): Orchard's rules, automix.js `version === 3` ─────────
+    static final double V2_MAX_STRETCH = 0.08, V2_MAX_CONSTANT = 0.04;
+    static final double V2_SUB_BASS_VETO = 0.9;
+    public static final double V2_SWITCH_SEC = 1.5;
+    static final double SWAP_SINGING = 0.5, SWAP_CLEAR = 0.3;
+    static final double V2_CLASH_MAX = 0.3;
+    static final int DROP_IN_BARS = 2;
+    static final int MUFFLE_LEAD_BEATS = 8, MUFFLE_MIN_LEAD_BEATS = 4, MUFFLE_EXIT_BEATS = 2;
+    static final double MUFFLE_MIN_BODY = 0.3, MUFFLE_MIN_OPENING_SEC = 2;
+    static final double BRIDGE_MIN_SEC = 4, BRIDGE_MAX_SEC = 12, BRIDGE_MAX_SKIP_SEC = 16, BEATLESS = 0.3;
+    static final double TRUSTED_KEY = 0.65;
+    static final double CLASH_CORRELATION = -0.3, CLASH_CONFIDENCE = 0.5, KEY_CONTEXT_SEC = 24;
+    static final double TRIM_TOLERANCE_DB = 1, TRIM_MAX_DB = 6;
+    static final double LOOP_MARGIN = 0.02;
+
+    /** The speed-up a pair needs, however it is split. */
+    static double stretchOf(double ratio) {
+        return Math.max(ratio, 1 / ratio) - 1;
+    }
+
+    /** A glide as the plan states it: the folded tempo ratio (next / playing), its beats, the playing song's beat. */
+    public static final class Glide {
+        public final double q, beatOutSec;
+        public final int beats;
+
+        Glide(double q, int beats, double beatOutSec) {
+            this.q = q;
+            this.beats = beats;
+            this.beatOutSec = beatOutSec;
+        }
+    }
+
+    /** glideSteps: each beat's rate on both songs, its output length and start, the next song's beat. */
+    public static final class GlideSteps {
+        public double[] outRate, inRate, dur, at;
+        public double total, beatInSec;
+    }
+
+    /**
+     * Orchard's glide, one step per beat of the blend: the shared tempo moves geometrically from the
+     * playing song's to the next one's; beat k plays the playing song at q^x and the next at
+     * q^(x - 1), x = (k + 0.5) / beats, so both play one beat of their own in the same output time.
+     */
+    public static GlideSteps glideSteps(double q, int beats, double beatOutSec) {
+        GlideSteps g = new GlideSteps();
+        g.outRate = new double[beats];
+        g.inRate = new double[beats];
+        g.dur = new double[beats];
+        g.at = new double[beats];
+        double t = 0;
+        for (int k = 0; k < beats; k++) {
+            double x = (k + 0.5) / beats;
+            g.outRate[k] = Math.pow(q, x);
+            g.inRate[k] = Math.pow(q, x - 1);
+            g.at[k] = t;
+            g.dur[k] = beatOutSec / g.outRate[k];
+            t += g.dur[k];
+        }
+        g.total = t;
+        g.beatInSec = beatOutSec / q;
+        return g;
+    }
+
+    /** The two songs' sub-bass ratios apart, or NaN. */
+    static double subBassContrast(Analysis a, Analysis b) {
+        if (a == null || b == null || Double.isNaN(a.subBassRatio) || Double.isNaN(b.subBassRatio)) return Double.NaN;
+        return Math.abs(a.subBassRatio - b.subBassRatio);
+    }
+
+    // keys (Orchard pairTempoHarmony)
+    public static final class Harmonic {
+        public double score, confidence, keyScore = Double.NaN, chromaScore = Double.NaN;
+        public boolean severeClash, shortBlend;
+    }
+
+    private static final String[] KEY_NAMES = {"C", "B#", "C#", "DB", "D", "D#", "EB", "E", "FB", "F", "E#", "F#", "GB", "G", "G#", "AB", "A", "A#", "BB", "B", "CB"};
+    private static final int[] KEY_ROOTS = {0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 8, 8, 9, 10, 10, 11, 11};
+
+    /** {root, minor ? 1 : 0}, or null. */
+    static int[] parsedKey(String name) {
+        if (name == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^(\\S+)\\s+(major|minor)$", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(name.trim());
+        if (!m.matches()) return null;
+        String root = m.group(1).toUpperCase(Locale.ROOT).replaceFirst("♯", "#").replaceFirst("♭", "B");
+        for (int i = 0; i < KEY_NAMES.length; i++) if (KEY_NAMES[i].equals(root)) return new int[]{KEY_ROOTS[i], m.group(2).equalsIgnoreCase("minor") ? 1 : 0};
+        return null;
+    }
+
+    static double keyRelationship(int[] a, int[] b) {
+        if (a == null || b == null) return Double.NaN;
+        int cw = (b[0] - a[0] + 12) % 12, d = Math.min(cw, 12 - cw);
+        if (a[1] != b[1]) {
+            if ((a[1] == 0 && cw == 9) || (a[1] == 1 && cw == 3)) return 0.95;
+            return d == 0 ? 0.7 : d == 5 ? 0.55 : d == 6 ? 0.05 : 0.35;
+        }
+        return d == 0 ? 1 : d == 5 ? 0.85 : d == 2 ? 0.65 : d == 1 ? 0.3 : d == 6 ? 0 : 0.45;
+    }
+
+    static double cosine(double[] a, double[] b) {
+        if (a == null || a.length != 12 || b == null || b.length != 12) return Double.NaN;
+        double dot = 0, pa = 0, pb = 0;
+        for (int k = 0; k < 12; k++) {
+            dot += a[k] * b[k];
+            pa += a[k] * a[k];
+            pb += b[k] * b[k];
+        }
+        return pa > 0 && pb > 0 ? clamp(dot / Math.sqrt(pa * pb), 0, 1) : Double.NaN;
+    }
+
+    /** The keys on Orchard's table (0.7) and the whole-song pitch profiles (0.3); severe under 0.2, short under 0.55. */
+    static Harmonic harmonicEvidence(Analysis a, Analysis b) {
+        double keyScore = keyRelationship(parsedKey(a.keyName), parsedKey(b.keyName));
+        double chromaScore = cosine(a.chroma, b.chroma);
+        double score = !Double.isNaN(keyScore) && !Double.isNaN(chromaScore) ? keyScore * 0.7 + chromaScore * 0.3
+                : !Double.isNaN(keyScore) ? keyScore : !Double.isNaN(chromaScore) ? chromaScore : 0.5;
+        double confidence = Math.sqrt(clamp(a.keyConfidence, 0, 1) * clamp(b.keyConfidence, 0, 1));
+        Harmonic h = new Harmonic();
+        h.score = r3(score);
+        h.confidence = r3(confidence);
+        h.keyScore = r3(keyScore);
+        h.chromaScore = r3(chromaScore);
+        h.severeClash = confidence >= TRUSTED_KEY && score < 0.2;
+        h.shortBlend = confidence >= TRUSTED_KEY && score < 0.55;
+        return h;
+    }
+
+    /** {profile[12], mean weight} over [from, to], or null. */
+    static double[][] chromaProfile(Analysis a, double from, double to) {
+        Analysis.ChromaCurve c = a == null ? null : a.chromaCurve;
+        if (c == null || c.values.length == 0 || !(to >= from)) return null;
+        double[] profile = new double[12];
+        double weight = 0;
+        int frames = 0;
+        for (int i = 0; i < c.values.length; i++) {
+            double t = c.start + i * c.step;
+            double[] f = c.values[i];
+            if (t < from || t > to || f == null) continue;
+            for (int k = 0; k < 12; k++) profile[k] += f[k] * c.weights[i];
+            weight += c.weights[i];
+            frames++;
+        }
+        return frames > 0 ? new double[][]{profile, {weight / frames}} : null;
+    }
+
+    static double pearson(double[] a, double[] b) {
+        double ma = 0, mb = 0;
+        for (double v : a) ma += v;
+        for (double v : b) mb += v;
+        ma /= a.length;
+        mb /= b.length;
+        double cov = 0, pa = 0, pb = 0;
+        for (int k = 0; k < a.length; k++) {
+            cov += (a[k] - ma) * (b[k] - mb);
+            pa += (a[k] - ma) * (a[k] - ma);
+            pb += (b[k] - mb) * (b[k] - mb);
+        }
+        return pa > 0 && pb > 0 ? cov / Math.sqrt(pa * pb) : 0;
+    }
+
+    static double tonality(double[][] side) {
+        double total = 0, max = Double.NEGATIVE_INFINITY;
+        for (double v : side[0]) {
+            total += v;
+            max = Math.max(max, v);
+        }
+        if (!(total > 0)) return 0;
+        return clamp((max / (total / 12) - 1.3) / 0.4, 0, 1) * clamp(side[1][0], 0, 1);
+    }
+
+    /** Where the two songs meet: {correlation, confidence, severe ? 1 : 0}, or null (no chroma). */
+    static double[] overlapHarmony(Analysis cur, Analysis next, double outFrom, double outTo, double inFrom, double inTo) {
+        double[][] left = chromaProfile(cur, Math.min(outFrom, outTo - KEY_CONTEXT_SEC), outTo);
+        double[][] right = chromaProfile(next, inFrom, Math.max(inTo, inFrom + KEY_CONTEXT_SEC));
+        if (left == null || right == null) return null;
+        double confidence = Math.min(tonality(left), tonality(right)), correlation = pearson(left[0], right[0]);
+        return new double[]{r3(correlation), r3(confidence), correlation <= CLASH_CORRELATION && confidence >= CLASH_CONFIDENCE ? 1 : 0};
+    }
+
+    // loudness (Orchard loudness.rs, strategy.rs loudness_trim)
+    public static final class Trim {
+        public double diffDb, outDb, inDb;
+
+        Trim(double diffDb, double outDb, double inDb) {
+            this.diffDb = diffDb;
+            this.outDb = outDb;
+            this.inDb = inDb;
+        }
+    }
+
+    /** A region's EBU R128 gated loudness from the song's 100 ms levels, or NaN. */
+    static double regionLoudness(Analysis a, double from, double dur) {
+        Analysis.Curve c = a == null ? null : a.loudnessCurve;
+        if (c == null || c.values.length == 0 || !(dur > 0)) return Double.NaN;
+        int i0 = (int) Math.max(0, Math.round((from - c.start) / c.step));
+        int i1 = (int) Math.min(c.values.length, Math.round((from + dur - c.start) / c.step));
+        if (i1 <= i0) return Double.NaN;
+        double[] p = new double[i1 - i0];
+        for (int i = i0; i < i1; i++) p[i - i0] = Math.pow(10, c.values[i] / 10);
+        List<Double> loud = new ArrayList<>();
+        for (int i = 0; i + 4 <= p.length; i++) {
+            double x = (p[i] + p[i + 1] + p[i + 2] + p[i + 3]) / 4;
+            if (lufs(x) > -70) loud.add(x);
+        }
+        if (loud.isEmpty()) {
+            double s = 0;
+            for (double v : p) s += v;
+            return Math.max(-70, lufs(s / p.length));
+        }
+        double s = 0;
+        for (double x : loud) s += x;
+        double rel = lufs(s / loud.size()) - 10;
+        double t = 0;
+        int n = 0;
+        for (double x : loud) {
+            if (lufs(x) > rel) {
+                t += x;
+                n++;
+            }
+        }
+        return lufs(t / n);
+    }
+
+    private static double lufs(double x) {
+        return -0.691 + 10 * Math.log10(x + 1e-30);
+    }
+
+    /** Each region against its whole song; more than 1 dB apart, the louder side is trimmed (at most 6 dB). */
+    static Trim loudnessTrim(Analysis cur, double outFrom, double outDur, Analysis next, double inFrom, double inDur) {
+        double o = regionLoudness(cur, outFrom, outDur), i = regionLoudness(next, inFrom, inDur);
+        double ow = regionLoudness(cur, 0, cur.durationSec), iw = regionLoudness(next, 0, next.durationSec);
+        if (Double.isNaN(o) || Double.isNaN(i) || Double.isNaN(ow) || Double.isNaN(iw)) return null;
+        double diff = (o - ow) - (i - iw);
+        if (Math.abs(diff) <= TRIM_TOLERANCE_DB) return new Trim(r1(diff), 0, 0);
+        double t = r1(Math.min(Math.abs(diff), TRIM_MAX_DB));
+        return diff > 0 ? new Trim(r1(diff), -t, 0) : new Trim(r1(diff), 0, -t);
+    }
+
+    // the hand-over and the beatless bridge (Orchard's boundary hand-off, beatlessBridge)
+
+    /** "Beatmatch or do nothing": a beatless bridge when both edges have one, else the playing song runs out with a short fade. */
+    static Plan handoff(Analysis cur, Analysis next, double earliest, String reason, Sung sung) {
+        double[] b = new double[3];
+        String none = beatlessBridge(cur, next, sung, b);
+        if (none == null && b[0] >= earliest) {
+            Plan p = new Plan();
+            p.style = "crossfade";
+            p.bridge = true;
+            p.reason = reason + ": a beatless bridge (" + String.format(Locale.US, "%.1f", b[1]) + " s, no beat on either side)";
+            p.mixOutTrackTime = b[0];
+            p.durationSec = b[1];
+            p.mixInTrackTime = b[2];
+            p.rate = 1;
+            p.trim = loudnessTrim(cur, b[0], b[1], next, b[2], b[1]);
+            return p;
+        }
+        double end = Math.min(musicEnd(cur).durationSec, cur.durationSec - 0.3);
+        double mixOut = Math.max(earliest, end - V2_SWITCH_SEC);
+        Plan p = new Plan();
+        p.style = "crossfade";
+        p.handoff = true;
+        p.reason = reason + ", so a straight hand-over (no beatless bridge: " + (none != null ? none : "past the playhead") + ")";
+        p.mixOutTrackTime = mixOut;
+        p.durationSec = Math.max(0, end - mixOut);
+        p.mixInTrackTime = 0;
+        p.rate = 1;
+        return p;
+    }
+
+    /** The bass curve's mean over [from, to], or NaN. */
+    static double bassMean(Analysis a, double from, double to) {
+        Analysis.Curve c = a == null ? null : a.bassCurve;
+        if (c == null || c.values.length == 0) return Double.NaN;
+        int i0 = (int) Math.max(0, Math.floor((from - c.start) / c.step));
+        int i1 = (int) Math.min(c.values.length - 1, Math.floor((to - c.start) / c.step));
+        if (i1 < i0) return Double.NaN;
+        double s = 0;
+        for (int i = i0; i <= i1; i++) s += c.values[i];
+        return s / (i1 - i0 + 1);
+    }
+
+    /** Orchard beatPresence: 0 in a beatless passage, 1 once kick and bass are in; NaN unmeasured. */
+    static double beatPresence(Analysis a, double t) {
+        double m = bassMean(a, t - 0.5, t + 0.5);
+        return Double.isNaN(m) ? Double.NaN : clamp((m - 0.1) / 0.4, 0, 1);
+    }
+
+    static double beatlessRun(Analysis a, double from, double limit, double step) {
+        double run = 0;
+        for (double t = from; step > 0 ? t < limit : t > limit; t += step) {
+            double p = beatPresence(a, t);
+            if (Double.isNaN(p) || p >= BEATLESS) break;
+            run += Math.abs(step);
+        }
+        return run;
+    }
+
+    /** The bridge into [into] {mixOut, dur, mixIn}; returns null, or why there is none. */
+    static String beatlessBridge(Analysis cur, Analysis next, Sung sung, double[] into) {
+        if (cur.bassCurve == null || next.bassCurve == null) return "no bass curves";
+        if (subBassContrast(cur, next) >= V2_SUB_BASS_VETO) return "the productions clash";
+        double end = Math.min(musicEnd(cur).durationSec, cur.durationSec - 0.3);
+        double outRun = beatlessRun(cur, end - 0.125, end - BRIDGE_MAX_SEC, -0.25);
+        double nextDur = next.durationSec > 0 ? next.durationSec : 60;
+        double inRun = beatlessRun(next, 0.125, Math.min(nextDur, 60), 0.25);
+        if (Math.min(outRun, inRun) < BRIDGE_MIN_SEC) return "beatless ending " + js(outRun) + " s, opening " + js(inRun) + " s";
+        double beat = cur.beatIntervalSec > 0 ? cur.beatIntervalSec : 0.5;
+        double dur = Math.floor(Math.min(Math.min(outRun, inRun), BRIDGE_MAX_SEC) / beat) * beat;
+        if (dur < BRIDGE_MIN_SEC) return "beatless edges too short";
+        double skip = Math.min(Math.max(0, inRun - dur), BRIDGE_MAX_SKIP_SEC);
+        double both = vocalOverlap(cur, next, end - dur, dur, skip, 1, sung);
+        if ((Double.isNaN(both) ? 0 : both) > 0.25) return "voices meet over the bridge";
+        double risk = voiceRisk(next, skip - 0.5, skip + 1, sung.in);
+        if ((Double.isNaN(risk) ? 0 : risk) >= 0.5) return "the next song would fade in mid-line";
+        double[] keys = overlapHarmony(cur, next, end - dur, end, skip, skip + dur);
+        if (keys != null && keys[2] > 0) return "the keys clash where they meet (" + js(keys[0]) + ")";
+        into[0] = end - dur;
+        into[1] = dur;
+        into[2] = skip;
+        return null;
+    }
+
+    /** Orchard's voice risk over [from, to): the vocal mask mapped to 0..1 (lyric lines: sung or not); NaN unknown. */
+    static double voiceRisk(Analysis a, double from, double to, double[][] spans) {
+        double sum = 0;
+        int n = 0;
+        for (double t = from; t < to; t += 0.05) {
+            double v = vocalAt(a, t, spans);
+            if (Double.isNaN(v)) continue;
+            sum += spans != null ? v : clamp((v - 0.15) / 0.45, 0, 1);
+            n++;
+        }
+        return n > 0 ? sum / n : Double.NaN;
+    }
+
+    static final class Swap {
+        double at;
+        String moved;
+    }
+
+    /** Orchard chooseBassSwap by the playing song's voice: the bar nearest the middle, moved off a sung line. */
+    static Swap vocalSafeSwap(Analysis cur, double mixOut, double outSpan, int bars, double[][] spans) {
+        Swap s = new Swap();
+        double mid = clamp(Math.round(bars / 2.0), 1, bars - 1) / bars;
+        double here = voiceRisk(cur, mixOut + mid * outSpan - 0.5, mixOut + mid * outSpan + 0.5, spans);
+        s.at = mid;
+        if (Double.isNaN(here) || here < SWAP_SINGING) return s;
+        List<Double> moves = new ArrayList<>();
+        for (int k = 1; k < bars; k++) {
+            double f = k / (double) bars;
+            if (f < 0.25 || f > 0.75 || Math.abs(f - mid) < 1e-9) continue;
+            double r = voiceRisk(cur, mixOut + f * outSpan - 0.5, mixOut + f * outSpan + 0.5, spans);
+            if (!Double.isNaN(r) && r < SWAP_CLEAR) moves.add(f);
+        }
+        moves.sort((x, y) -> {
+            int c = Double.compare(Math.abs(x - 0.5), Math.abs(y - 0.5));
+            return c != 0 ? c : Double.compare(x, y);
+        });
+        if (moves.isEmpty()) {
+            s.moved = "sung at the middle, no clear bar";
+            return s;
+        }
+        long by = Math.round((moves.get(0) - mid) * bars);
+        s.at = moves.get(0);
+        s.moved = "off a sung line, " + (by > 0 ? "+" : "") + by + " bar" + (Math.abs(by) == 1 ? "" : "s");
+        return s;
+    }
+
+    /** What plays: the loop mix or the blend (automix.js loopOrBlend), with why under Automix v2. */
+    public static final class Choice {
+        public final boolean loop;
+        public final String why;
+
+        Choice(boolean loop, String why) {
+            this.loop = loop;
+            this.why = why;
+        }
+    }
+
+    /**
+     * Loop mix or blend. Before Automix v2 a loop mix that found bars always plays. Under v2 a blend
+     * that fell back never beats it; otherwise both are scored as Orchard does on what differs
+     * (both singing, the keys, the length) and the blend has to win by LOOP_MARGIN.
+     */
+    public static Choice loopOrBlend(int version, Plan blend, LoopPlan loop) {
+        if (version != 3 || loop == null || loop.none != null) return new Choice(loop != null && loop.none == null, null);
+        if (blend == null || blend.fallback || !"blend".equals(blend.style) || blend.shape != null) return new Choice(true, "the blend fell back");
+        double b = choiceScore(blend.clash, blend.harmonic != null ? blend.harmonic.score : 0.5, blend.bars * 4);
+        double l = choiceScore(Math.min(loop.out.vocal, loop.in.vocal), 1, loop.totalBars * 4);
+        return new Choice(b < l + LOOP_MARGIN, "loop " + js(r4(l)) + " vs blend " + js(r4(b)) + " (the blend needs " + js(LOOP_MARGIN) + " more)");
+    }
+
+    private static double choiceScore(double clash, double keys, int beats) {
+        double vocal = 1 - Math.min(1, clash * 1.15) * 0.72;
+        double length = beats == 16 ? 1 : beats == 8 ? 0.85 : beats == 32 ? 0.75 : 0.65;
+        return 0.82 * (0.15 * vocal + 0.13 * keys + 0.02 * length);
+    }
+
+    static double clamp(double x, double lo, double hi) {
+        return Math.min(hi, Math.max(lo, x));
+    }
+
+    private static double r1(double v) {
+        return Math.round(v * 10) / 10.0;
+    }
+
+    private static double r3(double v) {
+        return Double.isNaN(v) ? Double.NaN : Math.round(v * 1000) / 1000.0;
+    }
+
+    private static double r4(double v) {
+        return Math.round(v * 1e4) / 1e4;
+    }
+
+    /** A number as JavaScript prints it in a template string. */
+    static String js(double v) {
+        if (Double.isNaN(v)) return "null";
+        if (v == Math.rint(v) && Math.abs(v) < 1e15) return Long.toString((long) v);
+        String s = Double.toString(v);
+        return s.contains("E") ? java.math.BigDecimal.valueOf(v).toPlainString() : s;
+    }
+
+
     // ───────── the loop mix (BitChord engine/loopMix.ts) ─────────
     static final int LOOP_BARS = 4;
     static final int[] LOOP_LENGTHS = {4, 2, 1};
@@ -567,6 +1125,11 @@ public final class Planner {
 
     /** null when there is no usable grid or a music video; a plan with [none] when a side has no instrumental bars. */
     public static LoopPlan planLoopMix(Analysis out, Audio outBuffer, Analysis inn, Audio inBuffer, double earliestOutSec, Sung sung) {
+        return planLoopMix(1, out, outBuffer, inn, inBuffer, earliestOutSec, sung);
+    }
+
+    /** The same for an engine version: Automix v2 (3) adds its gates (tempo cap, sub-bass, keys). */
+    public static LoopPlan planLoopMix(int version, Analysis out, Audio outBuffer, Analysis inn, Audio inBuffer, double earliestOutSec, Sung sung) {
         if (!(out.beatIntervalSec > 0) || Double.isNaN(out.firstDownbeatSec) || !(out.bpm > 0)) return null;
         if (!(inn.beatIntervalSec > 0) || Double.isNaN(inn.firstDownbeatSec) || !(inn.bpm > 0)) return null;
         if (out.musicVideo || inn.musicVideo) return null;
@@ -594,6 +1157,14 @@ public final class Planner {
             if (Math.abs(Math.log(inBpm / f / outBpm)) < Math.abs(Math.log(inBpm / fold / outBpm))) fold = f;
         }
         double target = inBpm / fold;
+        // v2: the loop ramps the tempo too, so the same cap (a wider gap: a blend or hand-over instead)
+        if (version == 3 && stretchOf(target / outBpm) > V2_MAX_STRETCH) {
+            return none("tempos " + Math.round(stretchOf(target / outBpm) * 100) + "% apart (v2 stretches at most " + Math.round(V2_MAX_STRETCH * 100) + "%)");
+        }
+        double contrast = subBassContrast(out, inn);
+        if (version == 3 && contrast >= V2_SUB_BASS_VETO) return none("different sub-bass styles (" + String.format(Locale.US, "%.2f", contrast) + " apart)");
+        Harmonic harmonic = version == 3 ? harmonicEvidence(out, inn) : null;
+        if (harmonic != null && harmonic.severeClash) return none("the keys clash (" + out.keyName + " → " + inn.keyName + ", " + js(harmonic.score) + ")");
         int rampBars = (int) Math.min(MAX_RAMP_BARS, Math.max(MIN_RAMP_BARS, Math.ceil(Math.abs(target - outBpm) / MAX_BPM_PER_BAR)));
         double inLoopOutBars = inPick.bars / fold;
         double totalBars = Math.ceil((ENTER_BARS + rampBars + 2) / inLoopOutBars) * inLoopOutBars;

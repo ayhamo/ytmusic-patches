@@ -191,14 +191,65 @@ public final class Mix {
         return djShape(style, clashIn, D, bpm, (int) Math.max(EP, Math.min(4000, Math.ceil(D * 40))));
     }
 
+    /** A plan's shape over [n] points: Automix v2's ladder shapes (drop-in, muffle) or djShape at its bass swap. */
+    static float[][] djShape(Planner.Plan m, double D, int n) {
+        if ("blend".equals(m.style) && ("dropin".equals(m.shape) || "muffle".equals(m.shape))) return ladderShape(m, D, n);
+        return djShape(m.style, m.clash, D, m.bpm, m.swapAt, n);
+    }
+
+    static float[][] djShape(Planner.Plan m, double D) {
+        return djShape(m, D, (int) Math.max(EP, Math.min(4000, Math.ceil(D * 40))));
+    }
+
     /** The same over [n] points (the plan's curves sample it more coarsely than the engine plays it). */
     static float[][] djShape(String style, double clashIn, double D, double bpm, int n) {
+        return djShape(style, clashIn, D, bpm, Double.NaN, n);
+    }
+
+    /**
+     * Automix v2's fallback ladder shapes (automix.js ladderShape). Drop-in: the next song at full
+     * level on its first beat (20 ms), its bass with it; the playing song closes and fades over the
+     * two bars. Muffle: the playing song holds its level while its low-pass closes (18 kHz to 300 Hz)
+     * over the lead before the bass swap; the next fades in over the same bars, takes the bass on
+     * the swap, and the playing song is gone two beats after it.
+     */
+    static float[][] ladderShape(Planner.Plan m, double D, int n) {
+        final double S = Math.PI / 2;
+        int beats = Math.max(1, (m.bars > 0 ? m.bars : 1) * 4);
+        float[] gIn = new float[n], gOut = new float[n], inHp = new float[n], outHp = new float[n], outLp = new float[n];
+        boolean dropin = "dropin".equals(m.shape);
+        double e = Math.min(0.02 / D, 0.05);
+        double at = m.swapAt > 0 && m.swapAt < 1 ? m.swapAt : 0.5;
+        double from = Math.max(0, at - (m.muffleLead > 0 ? m.muffleLead : 0.25));
+        double exit = Math.min(1, at + Planner.MUFFLE_EXIT_BEATS / (double) beats), w = 0.5 / beats;
+        for (int i = 0; i < n; i++) {
+            double p = i / (double) (n - 1);
+            if (dropin) {
+                gIn[i] = (float) clamp(p / e, 0, 1);
+                gOut[i] = (float) Math.cos(p * S);
+                outLp[i] = (float) glide(18000, 2000, p);
+                outHp[i] = (float) glide(20, 200, clamp(p / e, 0, 1));
+                inHp[i] = 20;
+            } else {
+                double h = clamp((p - at) / w, 0, 1);
+                gOut[i] = (float) (p <= at ? 1 : Math.cos(clamp((p - at) / (exit - at), 0, 1) * S));
+                gIn[i] = (float) Math.sin(clamp((p - from) / (at - from), 0, 1) * S);
+                outLp[i] = (float) glide(18000, 300, (p - from) / (at - from));
+                outHp[i] = (float) glide(20, 200, h);
+                inHp[i] = (float) glide(20, 200, 1 - h);
+            }
+        }
+        return new float[][]{gIn, gOut, inHp, outHp, outLp};
+    }
+
+    /** djShape with the bass swap at [swapAtIn] (0..1; else on the bar nearest the middle). */
+    static float[][] djShape(String style, double clashIn, double D, double bpm, double swapAtIn, int n) {
         double clash = clamp(clashIn, 0, 1);
         double beat = bpm > 0 ? 60 / bpm : 0;
         double grid = beat > 0 ? D / beat : 0;
         java.util.function.DoubleUnaryOperator onBar = (f) -> grid >= 8 ? clamp(Math.round((f * grid) / 4) * 4 / grid, 4 / grid, 1 - 4 / grid) : f;
         double w = grid >= 2 ? 0.5 / grid : 0.2;
-        double swapAt = onBar.applyAsDouble(0.5);
+        double swapAt = swapAtIn > 0 && swapAtIn < 1 ? swapAtIn : onBar.applyAsDouble(0.5);
         java.util.function.DoubleUnaryOperator h = (p) -> clamp((p - (swapAt - w)) / w, 0, 1);
         final double S = Math.PI / 2;
         float[] gIn = new float[n], gOut = new float[n], inHp = new float[n], outHp = new float[n], outLp = new float[n];
@@ -265,6 +316,40 @@ public final class Mix {
         }
         m.t0 = t;
         m.D = p.durationSec;
+        Planner.GlideSteps G = p.style.equals("blend") && p.glide != null ? Planner.glideSteps(p.glide.q, p.glide.beats, p.glide.beatOutSec) : null;
+        if (G != null) {
+            // Automix v2's glide (crossfade.js glideOutgoing): from the mix-out, one rate per beat,
+            // the last held after the blend while the playing song fades
+            int B = G.outRate.length;
+            double gb = p.glide.beatOutSec, last = G.outRate[B - 1];
+            m.beats = new double[B + 1];
+            for (int k = 0; k < B; k++) {
+                if (k > 0) ok.add(new double[]{m.t0 + G.at[k], mixOut + k * gb}); // (k = 0: the mix-out, added above)
+                m.beats[k] = m.t0 + G.at[k];
+            }
+            m.beats[B] = m.t0 + G.total;
+            ok.add(new double[]{m.t0 + G.total, mixOut + B * gb});
+            ok.add(new double[]{m.t0 + G.total + 1, mixOut + B * gb + last});
+            m.out.knots(ok);
+            m.out.stopAt = m.t0 + m.D + 0.2;
+            m.out.needFrom = m.takeoverSong - 1;
+            m.out.needTo = mixOut + B * gb + last + 1;
+            m.outEnd = m.t0 + G.total + Math.max(0, outDuration - (mixOut + B * gb)) / last;
+            // the next song (deckGlideIn): one rate per beat, ending at x1.0 with the blend
+            List<double[]> ik = new ArrayList<>();
+            double mixIn = p.mixInTrackTime;
+            for (int k = 0; k < B; k++) ik.add(new double[]{m.t0 + G.at[k], mixIn + k * G.beatInSec});
+            ik.add(new double[]{m.t0 + G.total, mixIn + B * G.beatInSec});
+            ik.add(new double[]{m.t0 + G.total + 0.5, mixIn + B * G.beatInSec + 0.5});
+            m.in.knots(ik);
+            m.in.runOn = true;
+            m.elementAt = m.t0 + G.total + 1;
+            m.in.needFrom = mixIn - 1;
+            m.in.needTo = m.in.trackAt(m.elementAt) + 30;
+            m.askAt = Math.min(Math.min(m.t0 + m.D / 2, m.t0 + m.D - 1.5 - NEXT_LEAD), m.outEnd - 1.5);
+            shape(m, p, rate);
+            return m;
+        }
         if (b > 0) {
             // the ramp's beats as laid out above, then the blend's at the outgoing song's speed
             List<Double> bt = new ArrayList<>();
@@ -309,17 +394,16 @@ public final class Mix {
         m.in.needFrom = mixIn - 1;
         m.in.needTo = m.in.trackAt(m.elementAt) + 30;
         m.askAt = Math.min(Math.min(m.t0 + m.D / 2, m.t0 + m.D - 1.5 - NEXT_LEAD), m.outEnd - 1.5);
+        shape(m, p, rate);
+        return m;
+    }
 
-        // gains: AutoDJ's fader for a version 2 blend or filter mix, else equal power
-        float[] gIn, gOut;
-        float[][] dj = m.v2 ? djShape(p.style, p.clash, m.D, p.bpm) : null;
-        if (dj != null) {
-            gIn = dj[0];
-            gOut = dj[1];
-        } else {
-            gIn = ep(true);
-            gOut = ep(false);
-        }
+    /** The blend's gains, EQ and filters, and its names (scheduleDeckBlend, blendShape). */
+    private static void shape(Mix m, Planner.Plan p, double rate) {
+        // gains: AutoDJ's fader for a version 2 blend or filter mix, else equal power; Automix v2's loudness trim on either
+        float[][] dj = m.v2 ? djShape(p, m.D) : null;
+        float[][] g = Curves.trimmed(p, dj != null ? dj[0] : ep(true), dj != null ? dj[1] : ep(false));
+        float[] gIn = g[0], gOut = g[1];
         m.out.gain.set(0, -H).lin(1, 0).set(1, m.t0).curve(gOut, m.t0, m.D).set(0, m.t0 + m.D);
         m.in.gain.set(0, 0).curve(gIn, m.t0, m.D).set(1, m.t0 + m.D);
 
@@ -342,14 +426,15 @@ public final class Mix {
             }
         }
 
-        String name = m.v2 ? "Advanced AutoDJ" : "Automix";
-        m.title = p.style.equals("blend") ? name : p.style.equals("filter") ? name + " · filter mix" : "Automix · crossfade";
+        String name = p.v3 ? "Automix v2" : m.v2 ? "Advanced AutoDJ" : "Automix";
+        String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : p.glide != null ? " · glide" : "";
+        m.title = p.style.equals("blend") ? name + kind : p.style.equals("filter") ? name + " · filter mix"
+                : p.handoff ? "Automix v2 · hand-over" : p.bridge ? "Automix v2 · beatless bridge" : "Automix · crossfade";
         m.sub = p.style.equals("crossfade")
                 ? String.format(Locale.US, "%.1f s%s", m.D, p.reason != null ? " · " + p.reason : "")
                 : String.format(Locale.US, "%d bars · %.1f s · %d BPM%s", p.bars, m.D, Math.round(p.bpm),
-                p.style.equals("blend") && Math.abs(rate - 1) > 0.002 ? String.format(Locale.US, " · ×%.3f", rate) : "");
-        m.note = p.toString();
-        return m;
+                p.glide != null ? String.format(Locale.US, " · glide ×%.3f", p.glide.q) : p.style.equals("blend") && Math.abs(rate - 1) > 0.002 ? String.format(Locale.US, " · ×%.3f", rate) : "");
+        m.note = p.toString() + (p.kick != null ? "; " + p.kick : "");
     }
 
     /** The loop mix, its clock from the outgoing loop's start (scheduleLoopMix). */

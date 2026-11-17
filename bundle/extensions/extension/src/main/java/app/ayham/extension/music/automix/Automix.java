@@ -60,7 +60,8 @@ public final class Automix {
     static Planner.Settings settings() {
         SharedPreferences p = prefs(app);
         Planner.Settings s = new Planner.Settings();
-        s.version = "2".equals(p.getString(KEY_VERSION, "1")) ? 2 : 1;
+        String v = p.getString(KEY_VERSION, "1");
+        s.version = "3".equals(v) ? 3 : "2".equals(v) ? 2 : 1;
         s.keyAware = p.getBoolean(KEY_KEY_AWARE, false);
         String bars = p.getString(KEY_BARS, "auto");
         try {
@@ -199,6 +200,8 @@ public final class Automix {
         String state = "idle"; // idle | building | armed | mixing | done | off
         Planner.Plan plan;
         String shown;
+        /** Automix v2: why the loop mix or the blend plays (loopOrBlend), or null. */
+        String choice;
         double takeover;
         /** The song's length when planned (a skip changes it before the queue is read again). */
         double dur;
@@ -285,13 +288,16 @@ public final class Automix {
         // a pair is looked at again when its lyrics arrive
         String pair = id + ">" + next + "|" + (sung.out != null ? "L" : "m") + (sung.in != null ? "L" : "m");
         if (!noLoop && next != null && from != null && to != null && !lyricsWait && (!pair.equals(loopKey)
-                || (loopState.equals("missing") && SystemClock.elapsedRealtime() >= loopRetryAt))) prepareLoop(id, next, from, to, pos, sung, pair);
+                || (loopState.equals("missing") && SystemClock.elapsedRealtime() >= loopRetryAt))) prepareLoop(s.version, id, next, from, to, pos, sung, pair);
         boolean loopPending = !noLoop && (lyricsWait || pair.equals(loopKey) && (loopState.equals("loading") || loopState.equals("missing")));
         Planner.LoopPlan lp = !noLoop && pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
         amx.loopPending = loopPending;
-        boolean loop = lp != null && lp.out.loopStart > pos + EARLIEST_LEAD;
+        // Automix v2: the loop mix plays only when it scores over the blend (automix.js loopOrBlend)
+        Planner.Choice choice = Planner.loopOrBlend(s.version, p, lp);
+        boolean loop = lp != null && choice.loop && lp.out.loopStart > pos + EARLIEST_LEAD;
+        amx.choice = lp != null ? choice.why : null;
         double takeover = loop ? lp.out.loopStart : p.mixOutTrackTime - Mix.HAND_LEAD - (p.style.equals("blend") ? p.rampSongSec : 0);
-        String shown = loop ? lp.toString() : p.toString();
+        String shown = (loop ? lp.toString() : p.toString()) + (amx.choice != null ? " [" + amx.choice + "]" : "");
         if (!shown.equals(amx.shown)) {
             amx.shown = shown;
             String waiting = from == null && Analyzer.busy(id) ? " (analysing this song)" : next != null && to == null && Analyzer.busy(next) ? " (analysing the next song)" : "";
@@ -311,7 +317,7 @@ public final class Automix {
         Object outPlayer = player;
         String inId = next;
         new Thread(() -> {
-            Mix mix = loop ? Mix.loop(lp, id, inId, dur) : Mix.blend(p, id, inId, dur);
+            Mix mix = loop ? Mix.loop(lp, id, inId, dur) : Mix.blend(s.version == 3 ? kickLocked(p, id, inId) : p, id, inId, dur);
             Engine built = Engine.build(app, mix, listener);
             main.post(() -> {
                 if (amx != me || !me.state.equals("building")) {
@@ -540,6 +546,7 @@ public final class Automix {
             if (id.equals(s.id) && s.shown != null && !"done".equals(s.state) && (!(s.dur > 0) || Math.abs(s.dur - curDur()) < 0.5)) {
                 loop = s.loop;
                 plan = loop == null ? s.plan : null;
+                o.choice = s.choice;
             }
             o.fromId = id;
             o.toId = next;
@@ -677,6 +684,8 @@ public final class Automix {
         String length = p.bars > 0 ? p.bars + " bars" : String.format(Locale.ROOT, "%.1f s", p.durationSec);
         String why = p.reason != null ? " · " + p.reason : "";
         String no = noLoop != null ? " · no loop: " + noLoop : "";
+        if (p.handoff) return "hand-over " + when + " · " + String.format(Locale.ROOT, "%.1f s", p.durationSec) + why + no;
+        if (p.bridge) return "beatless bridge " + when + " · " + String.format(Locale.ROOT, "%.1f s", p.durationSec) + why + no;
         if ("crossfade".equals(p.style)) return "crossfading " + when + " · " + String.format(Locale.ROOT, "%.0f s", p.durationSec) + why + no;
         if ("filter".equals(p.style)) return "filter mix " + when + " · " + length + why + no;
         String stretch = Math.abs(p.rate - 1) < 0.0005 ? "same tempo" : String.format(Locale.ROOT, "next at %.3f×", p.rate);
@@ -718,7 +727,43 @@ public final class Automix {
         return s;
     }
 
-    private static void prepareLoop(String id, String next, Analysis from, Analysis to, double pos, Planner.Sung sung, String key) {
+    /**
+     * Automix v2's kick lock (crossfade.js kickLockFor): the next song's cue moved a few ms so both
+     * songs' kicks land together, read from the decoded end and opening. The plan as it was when
+     * there is nothing to move or the audio is missing.
+     */
+    private static Planner.Plan kickLocked(Planner.Plan p, String id, String next) {
+        if (!"blend".equals(p.style) || !(p.beatSec > 0)) return p;
+        try {
+            long t = SystemClock.elapsedRealtime();
+            double b = p.beatSec, span = p.durationSec * 1.2 + 10 * b + 1;
+            Analyzer.Pcm tail = Analyzer.tail(app, id), head = Analyzer.head(app, next);
+            if (tail == null || head == null) {
+                Log.i(TAG, "kick lock: no decoded audio");
+                return p;
+            }
+            double oFrom = Math.max(0, p.mixOutTrackTime - 10 * b - 1), iFrom = Math.max(0, p.mixInTrackTime - 10 * b - 1);
+            float[][] o = tail.read(oFrom, p.mixOutTrackTime + span), i = head.read(iFrom, p.mixInTrackTime + span);
+            if (o[0].length == 0 || i[0].length == 0) {
+                Log.i(TAG, "kick lock: no decoded audio there");
+                return p;
+            }
+            KickLock.Side os = KickLock.kickSource(o, tail.rate, tail.fromSec((long) Math.floor(oFrom * tail.rate)), 0, Double.POSITIVE_INFINITY);
+            KickLock.Side is = KickLock.kickSource(i, head.rate, head.fromSec((long) Math.floor(iFrom * head.rate)), 0, Double.POSITIVE_INFINITY);
+            KickLock.Result k = KickLock.kickLock(p, os, is);
+            Log.i(TAG, (k == null ? "kick lock: not a blend" : k.toString()) + " (" + (SystemClock.elapsedRealtime() - t) + " ms)");
+            if (k == null || k.none != null) return p;
+            Planner.Plan q = p.copy();
+            q.mixInTrackTime += k.shift;
+            q.kick = k;
+            return q;
+        } catch (Throwable e) {
+            Log.w(TAG, "kick lock failed", e);
+            return p;
+        }
+    }
+
+    private static void prepareLoop(int version, String id, String next, Analysis from, Analysis to, double pos, Planner.Sung sung, String key) {
         loopKey = key;
         loopState = "loading";
         loopPlan = null;
@@ -742,7 +787,7 @@ public final class Automix {
                     } else {
                         Log.i(TAG, "sung parts from " + (sung.out != null ? "synced lyrics" : "the vocal mask") + " (playing song) and "
                                 + (sung.in != null ? "synced lyrics" : "the vocal mask") + " (next song)");
-                        plan = Planner.planLoopMix(cur, outAudio, to, inAudio, pos + Planner.LOOP_SETUP_SEC, sung);
+                        plan = Planner.planLoopMix(version, cur, outAudio, to, inAudio, pos + Planner.LOOP_SETUP_SEC, sung);
                         if (plan == null || plan.none != null) {
                             Log.i(TAG, "no loop mix for this pair: " + (plan == null ? "no beat grid to loop on" : plan.none));
                             plan = null;

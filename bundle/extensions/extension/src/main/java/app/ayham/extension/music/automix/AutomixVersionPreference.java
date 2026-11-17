@@ -42,8 +42,8 @@ public class AutomixVersionPreference extends ListPreference {
                     "Up to 16 bars (BitChord web default)", "Up to 32 bars"});
             setEntryValues(new CharSequence[]{"auto", "4", "8", "16", "32"});
         } else {
-            setEntries(new CharSequence[]{"Original AutoDJ", "Advanced AutoDJ"});
-            setEntryValues(new CharSequence[]{"1", "2"});
+            setEntries(new CharSequence[]{"Original AutoDJ", "Advanced AutoDJ", "Automix v2 (test)"});
+            setEntryValues(new CharSequence[]{"1", "2", "3"});
         }
     }
 
@@ -97,7 +97,7 @@ public class AutomixVersionPreference extends ListPreference {
         try {
             if (getPreferenceManager() == null) return;
             Preference p = getPreferenceManager().findPreference(Automix.KEY_KEY_AWARE);
-            if (p != null) p.setEnabled("2".equals(value));
+            if (p != null) p.setEnabled("2".equals(value) || "3".equals(value));
         } catch (Throwable ignored) {
         }
     }

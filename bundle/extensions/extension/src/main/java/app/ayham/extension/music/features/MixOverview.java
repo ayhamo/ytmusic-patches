@@ -379,6 +379,7 @@ final class MixOverview {
         else if (pk.bars > 0 && s.bars() > 0 && pk.bars != s.bars() && !"loop".equals(actual)) n = pk.bars + " bars asked; " + s.bars() + " fit here.";
         else if (!style.isEmpty() || pk.bars > 0) n = "Kept for these two songs.";
         else if (s.plan != null && s.plan.reason != null) n = s.plan.reason;
+        else if (s.choice != null) n = (s.loop != null ? "Loop mix: " : "Blend: ") + s.choice;
         else if (fixedLen) n = "loop".equals(actual) ? "A loop mix sets its own length: pick Blend or Filter to choose one." : "A fade has a fixed length.";
         set(note, n);
     }

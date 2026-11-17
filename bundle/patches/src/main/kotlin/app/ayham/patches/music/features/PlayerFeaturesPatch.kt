@@ -46,14 +46,14 @@ internal object MusicActivityOnCreateFingerprint : Fingerprint(
 /**
  * The player and everything around it: the BitChord screen (fullscreen and animated covers, artist
  * colours, lyric line, stats), automix, the song version of music videos, the equalizer, and the
- * "BitChord fork" screen in Morphe's settings.
+ * "Fork settings" screen in Morphe's settings.
  * Everything that touches Morphe's own classes runs in finalize, which comes after every
  * patch's execute, so Morphe's extension classes and its ExoPlayer bridge are already there.
  * Each hook is optional: if its target is missing it logs and skips, the build never fails.
  */
 val playerFeaturesPatch = patch(
     name = "BitChord player and automix",
-    description = "BitChord's now-playing screen (fullscreen and animated covers, artist colours, lyric line, stats), automix, song versions of music videos and an equalizer. Settings: Morphe settings > BitChord fork.",
+    description = "BitChord's now-playing screen (fullscreen and animated covers, artist colours, lyric line, stats), automix, song versions of music videos and an equalizer. Settings: Morphe settings > Fork settings.",
     default = true,
 ) {
     compatibleWith(COMPATIBILITY_YOUTUBE_MUSIC)
@@ -120,7 +120,7 @@ val playerFeaturesPatch = patch(
                 // keys stay the same, so nothing set before is lost.
                 root.insertChild(0, "PreferenceScreen") {
                 setAttribute("android:key", "ayham_screen")
-                setAttribute("android:title", "BitChord fork")
+                setAttribute("android:title", "Fork settings")
                 setAttribute("android:summary", "BitChord's player screen, automix, animated covers, artist colours, lyric line, downloads and equalizer")
                 // One switch per feature, stored by Morphe's settings screen in its own prefs file.
                 appendChild("PreferenceCategory") {
@@ -169,7 +169,7 @@ val playerFeaturesPatch = patch(
                     appendChild("$AUTOMIX.AutomixVersionPreference") {
                         setAttribute("android:key", "ayham_automix_version")
                         setAttribute("android:title", "Automix version")
-                        setAttribute("android:summary", "%s. Original: BitChord web's automix, a gentle bass and treble cross, equal-power fade. Advanced: plus the BitChord phone's ideas: a blend point where the two songs don't sing over each other, a quick bass swap at the middle, the old song's highs fading while the new one opens up, blends that end where the music ends, the next song never more than a quarter in.")
+                        setAttribute("android:summary", "%s. Original: BitChord web's automix, a gentle bass and treble cross, equal-power fade. Advanced: plus the BitChord phone's ideas: a blend point where the two songs don't sing over each other, a quick bass swap at the middle, the old song's highs fading while the new one opens up, blends that end where the music ends, the next song never more than a quarter in. Automix v2 (test): Advanced with Orchard's rules: up to 4%% apart one song is sped up, 4-8%% both glide to meet; further apart, or with clashing bass styles, a beatless bridge or a straight hand-over; a blend both songs would sing over becomes a drop-in or a muffle.")
                         setAttribute("android:defaultValue", "1")
                         setAttribute("android:dependency", "ayham_automix_enabled")
                     }

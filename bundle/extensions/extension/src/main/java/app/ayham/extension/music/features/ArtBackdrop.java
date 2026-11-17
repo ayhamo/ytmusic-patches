@@ -41,10 +41,18 @@ final class ArtBackdrop {
     });
     /** A song change: the old art stays up through YT's swipe, then crossfades to the new one. */
     static final long CROSSFADE_MS = 350;
-    private static final long CHECK_MS = 100, CLIP_FRAME_MS = 2000;
-    /** BLURRED_ARTWORK_SCRIM_ALPHA, and the mirrored clip canvas's 24dp blur. */
+    private static final long CHECK_MS = 100;
+    /** BLURRED_ARTWORK_SCRIM_ALPHA; the mirrored tall clip's 24dp blur (ClipFrameBleed) and the full-screen 48dp one (FullscreenBackdropBlurRadius). */
     private static final int SCRIM = Math.round(0.12f * 255);
-    private static final float CLIP_BLUR_DP = 24, CLIP_SCALE = 8;
+    private static final float CLIP_BLUR_DP = 24, CLIP_SCALE = 8, BACKDROP_BLUR_DP = 48, BACKDROP_SCALE = 16;
+    /** The live backdrop's own thread: one frame at a time, frames that come while it works are skipped. */
+    private static final ExecutorService liveWorker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "ayham-live-backdrop");
+        t.setPriority(Thread.NORM_PRIORITY - 1);
+        return t;
+    });
+    private static volatile boolean liveBusy;
+    private static long liveCount, liveMs, liveLogAt;
 
     private static final class Layer {
         int tone, width, detailTop, softTop;
@@ -57,7 +65,7 @@ final class ArtBackdrop {
 
     private static Layer cur, old;
     private static Bitmap clipNow, clipOld;
-    private static long clipAt, clipTry, checkAt;
+    private static long clipAt, checkAt;
     /** The clip's backdrop after its clip ended, fading out over the art below. */
     private static Bitmap held, sharp, heldSharp;
     private static long heldSince, heldFrom, sharpAt;
@@ -84,14 +92,13 @@ final class ArtBackdrop {
         // a sharp frame of the clip now and then: held in its place while YT's card is hidden for a swipe
         if (FullArt.clipMode() && !FullArt.hiding() && held == null && now - sharpAt > 500) {
             sharpAt = now;
-            Bitmap f = AnimatedCover.frame(360, 360);
+            int[] sz = AnimatedCover.sampleSize(360);
+            Bitmap f = AnimatedCover.frame(sz[0], sz[1]);
             if (f != null) sharp = f;
         }
-        // not while a song change plays out: the old clip, fading out, would be grabbed again
-        if (FullArt.clipMode() && now >= clipTry && !FullArt.hiding() && held == null) {
-            clipTry = now + (clipNow == null ? 250 : CLIP_FRAME_MS);
-            clipFrame(a, W, H);
-        }
+        density = a.getResources().getDisplayMetrics().density;
+        screenW = W;
+        screenH = H;
         if (now < checkAt) return;
         checkAt = now + CHECK_MS;
         View thumb = decor.findViewById(PlayerScreen.id(a, "player_thumbnail"));
@@ -211,20 +218,56 @@ final class ArtBackdrop {
         return px;
     }
 
-    /** The clip's backdrop: a small frame, centre-cropped above the seam, mirrored below, blurred. */
-    private static void clipFrame(Activity a, int W, int H) {
-        Bitmap f = AnimatedCover.frame(96, 96);
-        if (f == null) return;
-        int w = Math.max(1, Math.round(W / CLIP_SCALE)), h = Math.max(1, Math.round(H / CLIP_SCALE));
-        int seamRow = Math.round(FullArt.seam() * H / CLIP_SCALE);
+    private static float density = 1;
+    private static int screenW, screenH;
+
+    /**
+     * Each clip frame (48 px on its longest side), as Metrolist draws it behind the player: a tall
+     * cover's frame mirrored at the seam with a 24dp blur (ClipFrameBleed); anything else the frame
+     * centre-cropped to the whole screen with a 48dp blur (FullscreenBlurredBackdropCanvas). Made
+     * small on its own thread; a frame that comes while one is made is skipped.
+     */
+    static void live(int[] frame, int fw, int fh, boolean tall) {
+        if (liveBusy || held != null || FullArt.hiding() || screenW == 0) return;
+        liveBusy = true;
+        final int W = screenW, H = screenH;
+        final float scale = tall ? CLIP_SCALE : BACKDROP_SCALE;
         // a Compose blur radius as Skia's sigma, at the backdrop's scale
-        float sigma = (CLIP_BLUR_DP * a.getResources().getDisplayMetrics().density * 0.57735f + 0.5f) / CLIP_SCALE;
-        int[] px = ArtBleed.mirroredBackdrop(pixels(f), f.getWidth(), f.getHeight(), w, h, seamRow, sigma);
-        clipOld = clipNow;
-        clipNow = Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
-        clipAt = SystemClock.uptimeMillis();
-        redraw();
+        final float sigma = ((tall ? CLIP_BLUR_DP : BACKDROP_BLUR_DP) * density * 0.57735f + 0.5f) / scale;
+        final float seam = FullArt.seam();
+        final int gen = clipGen;
+        liveWorker.execute(() -> {
+            try {
+                long t0 = SystemClock.uptimeMillis();
+                int w = Math.max(1, Math.round(W / scale)), h = Math.max(1, Math.round(H / scale));
+                int seamRow = tall ? Math.round(seam * H / scale) : h;
+                Bitmap b = Bitmap.createBitmap(ArtBleed.mirroredBackdrop(frame, fw, fh, w, h, seamRow, sigma), w, h, Bitmap.Config.ARGB_8888);
+                long took = SystemClock.uptimeMillis() - t0;
+                main.post(() -> {
+                    liveBusy = false;
+                    if (gen != clipGen || !FullArt.clipMode()) return;
+                    if (clipNow == null) clipAt = SystemClock.uptimeMillis(); // the first one fades in
+                    clipNow = b;
+                    long now = SystemClock.uptimeMillis();
+                    liveCount++;
+                    liveMs += took;
+                    if (now - liveLogAt > 10_000) {
+                        Log.i(TAG, "live backdrop: " + liveCount + " frames, " + (liveMs / Math.max(1, liveCount)) + " ms each ("
+                                + (tall ? "tall, mirrored 24dp" : "full screen 48dp") + ", " + w + "x" + h + ")");
+                        liveLogAt = now;
+                        liveCount = liveMs = 0;
+                    }
+                    redraw();
+                });
+            } catch (Throwable t) {
+                main.post(() -> liveBusy = false);
+                Log.w(TAG, "live backdrop failed", t);
+            }
+        });
     }
+
+    /** Bumped when a clip ends, so a frame still being made for it is dropped. */
+    private static int clipGen;
 
     /** When the latest art's backdrop was first shown (uptime ms), 0 before any. */
     static long readySince() {
@@ -259,6 +302,7 @@ final class ArtBackdrop {
             }
             sharp = null;
             clipNow = clipOld = null;
+            clipGen++;
         }
         wasClip = clip;
         if (clip && clipNow != null) {
@@ -324,8 +368,14 @@ final class ArtBackdrop {
         float left = (v.getWidth() - side) / 2f, y0 = bannerTop + FullArt.fadeStart() * H, y1 = bannerTop + FullArt.seam() * H;
         int save = c.saveLayerAlpha(0, bannerTop, v.getWidth(), y1, Math.round(255 * a));
         paint.setAlpha(255);
-        dst.set(left, bannerTop, left + side, bannerTop + side);
+        // where the clip was drawn (Metrolist's place for it), inside the banner
+        RectF r = AnimatedCover.videoRect(v.getWidth(), H);
+        if (r == null) dst.set(left, bannerTop, left + side, bannerTop + side);
+        else dst.set(r.left, bannerTop + r.top, r.right, bannerTop + r.bottom);
+        c.save();
+        c.clipRect(left, bannerTop, left + side, bannerTop + side);
         c.drawBitmap(bmp, null, dst, paint);
+        c.restore();
         Paint m = new Paint();
         m.setShader(new LinearGradient(0, y0, 0, Math.max(y0 + 1, y1), 0xFF000000, 0x00000000, Shader.TileMode.CLAMP));
         m.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN));

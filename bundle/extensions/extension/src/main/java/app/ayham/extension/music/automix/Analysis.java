@@ -12,7 +12,7 @@ import java.util.Map;
  */
 public final class Analysis {
     /** Bumped whenever the analysis changes: a saved one of another version is redone. */
-    public static final String VERSION = "ayham.2";
+    public static final String VERSION = "ayham.3";
 
     public String fileKey;
     public double durationSec = Double.NaN;
@@ -34,6 +34,15 @@ public final class Analysis {
     public double keyConfidence;
     public List<VocalWindow> vocals = new ArrayList<>();
     public boolean musicVideo;
+    /**
+     * Automix v2's evidence (the extension's host.js): the share of the low end under 60 Hz against
+     * 60-120 Hz (log ratio), the bass level over time (of its usual), the whole-song pitch profile,
+     * the pitch profile over time and the 100 ms K-weighted loudness (dB). NaN / null: unmeasured.
+     */
+    public double subBassRatio = Double.NaN;
+    public Curve bassCurve, loudnessCurve;
+    public double[] chroma;
+    public ChromaCurve chromaCurve;
     /** A stand-in for a song with no analysis (the planner's stub). */
     public boolean stub;
     public String analysisVersion = VERSION;
@@ -45,6 +54,19 @@ public final class Analysis {
     public static final class BeatSide {
         public double[] beats, downbeats;
         public double bpm, confidence;
+    }
+
+    /** Values every [step] seconds from [start]. */
+    public static final class Curve {
+        public double start, step;
+        public double[] values;
+    }
+
+    /** 12-bin pitch profiles every [step] seconds from [start] (a null frame: none there), each with its weight. */
+    public static final class ChromaCurve {
+        public double start, step;
+        public double[][] values;
+        public double[] weights;
     }
 
     public static final class VocalWindow {
@@ -75,6 +97,11 @@ public final class Analysis {
         a.keyConfidence = keyConfidence;
         a.vocals = vocals;
         a.musicVideo = musicVideo;
+        a.subBassRatio = subBassRatio;
+        a.bassCurve = bassCurve;
+        a.loudnessCurve = loudnessCurve;
+        a.chroma = chroma;
+        a.chromaCurve = chromaCurve;
         a.stub = stub;
         a.analysisVersion = analysisVersion;
         return a;
@@ -118,8 +145,57 @@ public final class Analysis {
         }
         m.put("vocals", v);
         m.put("musicVideo", musicVideo);
+        if (!Double.isNaN(subBassRatio)) m.put("subBassRatio", subBassRatio);
+        if (bassCurve != null) m.put("bassCurve", curve(bassCurve));
+        if (chroma != null) m.put("chroma", chroma);
+        if (chromaCurve != null) {
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("start", chromaCurve.start);
+            c.put("step", chromaCurve.step);
+            List<Object> frames = new ArrayList<>();
+            for (double[] f : chromaCurve.values) frames.add(f);
+            c.put("values", frames);
+            c.put("weights", chromaCurve.weights);
+            m.put("chromaCurve", c);
+        }
+        if (loudnessCurve != null) m.put("loudnessCurve", curve(loudnessCurve));
         m.put("analysisVersion", analysisVersion);
         return m;
+    }
+
+    private static Map<String, Object> curve(Curve c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("start", c.start);
+        m.put("step", c.step);
+        m.put("values", c.values);
+        return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Curve curve(Object o) {
+        if (!(o instanceof Map)) return null;
+        Map<String, Object> m = (Map<String, Object>) o;
+        Curve c = new Curve();
+        c.start = zero(Json.num(m, "start"));
+        c.step = Json.num(m, "step");
+        c.values = Json.nums(m.get("values"));
+        return c.values == null || !(c.step > 0) ? null : c;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ChromaCurve chromaCurve(Object o) {
+        if (!(o instanceof Map)) return null;
+        Map<String, Object> m = (Map<String, Object>) o;
+        if (!(m.get("values") instanceof List)) return null;
+        List<Object> frames = (List<Object>) m.get("values");
+        ChromaCurve c = new ChromaCurve();
+        c.start = zero(Json.num(m, "start"));
+        c.step = Json.num(m, "step");
+        c.values = new double[frames.size()][];
+        for (int i = 0; i < c.values.length; i++) c.values[i] = Json.nums(frames.get(i));
+        c.weights = Json.nums(m.get("weights"));
+        if (c.weights == null || c.weights.length < c.values.length || !(c.step > 0)) return null;
+        return c;
     }
 
     private static Map<String, Object> grid(LocalGrid g) {
@@ -187,6 +263,12 @@ public final class Analysis {
             }
         }
         a.musicVideo = Boolean.TRUE.equals(m.get("musicVideo"));
+        a.subBassRatio = Json.num(m, "subBassRatio");
+        a.bassCurve = curve(m.get("bassCurve"));
+        a.loudnessCurve = curve(m.get("loudnessCurve"));
+        double[] chroma = Json.nums(m.get("chroma"));
+        a.chroma = chroma != null && chroma.length == 12 ? chroma : null;
+        a.chromaCurve = chromaCurve(m.get("chromaCurve"));
         a.analysisVersion = (String) m.get("analysisVersion");
         return a;
     }

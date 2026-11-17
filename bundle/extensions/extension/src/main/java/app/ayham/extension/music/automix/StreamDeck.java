@@ -96,6 +96,15 @@ final class StreamDeck {
     // The setting and the kept downloads
 
     /** spike.properties streamDeck=1 ("Smooth hand-over"), off by default as in the extension. */
+    /** The deckClocks test flag: both clocks logged around each takeover. */
+    private static boolean clockLog() {
+        try {
+            return "1".equals(app.ayham.extension.music.features.Features.prop("deckClocks"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     static boolean on() {
         try {
             return "1".equals(app.ayham.extension.music.features.Features.prop("streamDeck"));
@@ -266,6 +275,7 @@ final class StreamDeck {
         }
         double heard = heardSec();
         if (Double.isNaN(heard) || !Double.isNaN(seekTo)) return;
+        if (logClocks && !Double.isNaN(takeAt) && Math.abs(heard - takeAt) < 2.5) logClocks(heard, p, now);
         double err = heard - p / 1000.0 - clockShift, abs = Math.abs(err);
         if (abs > SEEK_ERROR && abs < 0.3 && !Double.isNaN(takeAt) && clockShift == 0 && now - heardSince < 1500) {
             clockShift = err;
@@ -349,6 +359,34 @@ final class StreamDeck {
             retake = true;
         }
         seekTo = pos + startLag;
+    }
+
+    private final boolean logClocks = clockLog();
+    private long lastYtLogged = -1, lastYtLoggedAt, lastFrame = -1, lastFrameNs;
+
+    /**
+     * The two clocks apart, each tick within 2.5 s of the takeover: the deck's AudioTrack timestamp
+     * (framePosition at nanoTime; its rate against real time) and YT's position at elapsedRealtime
+     * (its rate too). The one that jumps by the 120-180 ms step is the one that moved.
+     */
+    private void logClocks(double heard, long p, long now) {
+        AudioTrack t = track;
+        AudioTimestamp ts = new AudioTimestamp();
+        boolean got = t != null && t.getTimestamp(ts);
+        String deck = "no timestamp";
+        if (got) {
+            double dRate = lastFrame < 0 || ts.nanoTime == lastFrameNs ? Double.NaN
+                    : (ts.framePosition - lastFrame) / (double) rate / ((ts.nanoTime - lastFrameNs) / 1e9);
+            deck = String.format(Locale.US, "frame %d @ %.3f s (x%.3f, underruns %d, head %d)", ts.framePosition, ts.nanoTime / 1e9, dRate,
+                    android.os.Build.VERSION.SDK_INT >= 24 ? t.getUnderrunCount() : -1, t.getPlaybackHeadPosition());
+            lastFrame = ts.framePosition;
+            lastFrameNs = ts.nanoTime;
+        }
+        double yRate = lastYtLogged < 0 || now == lastYtLoggedAt ? Double.NaN : (p - lastYtLogged) / (double) (now - lastYtLoggedAt);
+        lastYtLogged = p;
+        lastYtLoggedAt = now;
+        Log.i(TAG, String.format(Locale.US, "deck clocks: %+.3f s from takeover | deck %s heard %.3f | YT %d ms @ %d (x%.3f) | err %+.0f ms",
+                heard - takeAt, deck, heard, p, now, yRate, (heard - p / 1000.0) * 1000));
     }
 
     /** The song second heard now, or NaN. */

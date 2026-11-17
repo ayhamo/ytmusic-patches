@@ -658,6 +658,12 @@ final class Analyzer {
         double sum = 0;
         for (double e : a.energyCurve) sum += e;
         a.energy = sum / Math.max(1, a.energyCurve.length);
+        // Automix v2's evidence (host.js lowEnd): sub-bass, bass curve, pitch profiles, loudness
+        stage(id, "measuring the low end and keys", 0.84f);
+        long te = SystemClock.elapsedRealtime();
+        Evidence.measure(monoSpan(d, 0, dur), d.monoRate, a);
+        Log.i(TAG, String.format(Locale.US, "%s: sub-bass %.2f, chroma %s, %d loudness steps in %d ms", id, a.subBassRatio,
+                a.chroma != null ? "yes" : "no", a.loudnessCurve != null ? a.loudnessCurve.values.length : 0, SystemClock.elapsedRealtime() - te));
         d.mono = null;
 
         // the vocal mask over the opening (two windows) and the end (up to three)

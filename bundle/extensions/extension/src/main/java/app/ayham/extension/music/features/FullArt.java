@@ -235,11 +235,26 @@ final class FullArt {
         return clipMode;
     }
 
+    private static int screenW, screenH, pageTopNow;
+
+    /** Where the player page starts on the screen (px), as of the last frame. */
+    static int pageTop() {
+        return pageTopNow;
+    }
+
+    /**
+     * The seam: Metrolist's from the title, or under a tall cover's 3:4 box (its canvasTall
+     * seam, clamped to 0.3..0.85).
+     */
     static float seam() {
+        if (AnimatedCover.tallClip() && screenH > 0)
+            return Math.max(0.3f, Math.min(0.85f, screenW * 4f / 3f / screenH));
         return seam;
     }
 
+    /** The fade's start: the same span above a tall cover's seam as above the title's. */
     static float fadeStart() {
+        if (AnimatedCover.tallClip() && screenH > 0) return seam() - (seam - fadeStart);
         return fadeStart;
     }
 
@@ -425,7 +440,10 @@ final class FullArt {
         int W = decor.getWidth(), H = decor.getHeight();
         squareEnd = Math.round(pageTop + W);
         clipMode = clip;
-        float wantS = clip ? Math.max(W, seam * H) : ArtBleed.containerWidth(W, H, 1f);
+        screenW = W;
+        screenH = H;
+        pageTopNow = pageTop;
+        float wantS = clip ? Math.max(W, seam() * H) : ArtBleed.containerWidth(W, H, 1f);
         if (bannerS == 0) bannerS = wantS;
         else if (bannerS != wantS) {
             bannerS += (wantS - bannerS) * Math.min(1f, dt / 120f);
@@ -446,7 +464,7 @@ final class FullArt {
         ours[1] = y - baseY;
         ours[2] = s;
         oursSet = true;
-        if (clip) fade(move, offY, card.getHeight(), e, fadeStart * H / bannerS, seam * H / bannerS, false);
+        if (clip) fade(move, offY, card.getHeight(), e, fadeStart() * H / bannerS, seam() * H / bannerS, false);
         else {
             // YT's art gives way to the bleed's first rows (ArtBleed: Metrolist's 48-row crossfade)
             int side = Math.round(bannerS), top0 = ArtBleed.detailTop(side, side);

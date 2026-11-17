@@ -32,13 +32,34 @@ public class SpecFixturesTest {
         for (File f : pairs) {
             Map<String, Object> pair = (Map<String, Object>) Json.parse(read(f));
             Map<String, Object> golden = (Map<String, Object>) Json.parse(read(new File(spec, "automix/golden/" + f.getName())));
-            for (int version = 1; version <= 2; version++) {
+            for (int version = 1; version <= 3; version++) {
                 Map<String, Object> got = planPair(pair, version);
                 compare(f.getName() + " v" + version, golden.get("v" + version), got, diffs);
             }
         }
         for (String d : diffs) System.out.println("DIFF " + d);
-        assertTrue(diffs.size() + " differences from the golden plans (printed above)", diffs.isEmpty());
+        assertTrue(diffs.size() + " differences from the golden plans (printed above): " + (diffs.isEmpty() ? "" : diffs.get(0)), diffs.isEmpty());
+    }
+
+    /**
+     * The hard rules (the extension's PLAN.md, automix_fixtures.mjs MUST): Vaina Loca into SI NO ES
+     * CONTIGO keeps the loop under Automix v2; Stereo Love into Midnight Sun (11% apart) is never a loop.
+     */
+    @Test
+    public void automixV2KeepsTheHardRules() throws Exception {
+        File spec = specDir();
+        File[] pairs = new File(spec, "automix/pairs").listFiles((d, n) -> n.endsWith(".json"));
+        assertTrue(pairs != null && pairs.length > 0);
+        int checked = 0;
+        for (File f : pairs) {
+            String n = f.getName();
+            if (!n.startsWith("1-") && !n.startsWith("2-")) continue;
+            Object plays = planPair((Map<String, Object>) Json.parse(read(f)), 3).get("plays");
+            if (n.startsWith("1-")) assertTrue(n + " under v3 must play a loop, plays " + plays, "loop".equals(plays));
+            else assertTrue(n + " under v3 must never play a loop", !"loop".equals(plays));
+            checked++;
+        }
+        assertTrue("both rule pairs present", checked == 2);
     }
 
     private static Map<String, Object> planPair(Map<String, Object> pair, int version) {
@@ -58,8 +79,9 @@ public class SpecFixturesTest {
         sung.in = spans(b.get("sung"));
         Analysis cur = Planner.asOutgoing(from);
         Object loop;
+        Planner.LoopPlan lp = null;
         if (Planner.gridOk(cur) && Planner.gridOk(to)) {
-            Planner.LoopPlan lp = Planner.planLoopMix(cur, audio(a), to, audio(b), pos + Planner.LOOP_SETUP_SEC, sung);
+            lp = Planner.planLoopMix(version, cur, audio(a), to, audio(b), pos + Planner.LOOP_SETUP_SEC, sung);
             loop = loopJson(lp);
         } else {
             loop = one("none", "beat grid too weak");
@@ -68,8 +90,10 @@ public class SpecFixturesTest {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("pos", pos);
         m.put("earliest", earliest);
-        boolean loops = loop instanceof Map && !((Map<String, Object>) loop).containsKey("none");
-        m.put("plays", loops ? "loop" : blend.style);
+        // what plays: the loop mix when it found bars (Automix v2: and it scores over the blend)
+        Planner.Choice choice = Planner.loopOrBlend(version, blend, lp);
+        m.put("plays", choice.loop ? "loop" : blend.style);
+        if (choice.why != null) m.put("choice", choice.why);
         m.put("loop", loop);
         m.put("blend", blendJson(blend));
         return m;
@@ -137,11 +161,59 @@ public class SpecFixturesTest {
         return m;
     }
 
+    /** The plan as the extension's planner returns it: a hand-over or bridge has only its own fields. */
     private static Map<String, Object> blendJson(Planner.Plan p) {
         Map<String, Object> m = new LinkedHashMap<>();
+        if (p.handoff || p.bridge) {
+            m.put("style", p.style);
+            m.put("fallback", p.fallback);
+            m.put(p.handoff ? "handoff" : "bridge", true);
+            m.put("reason", p.reason);
+            m.put("mixOutTrackTime", p.mixOutTrackTime);
+            m.put("durationSec", p.durationSec);
+            m.put("mixInTrackTime", p.mixInTrackTime);
+            m.put("rate", p.rate);
+            m.put("bars", (double) p.bars);
+            m.put("swapDb", p.swapDb);
+            m.put("barSec", p.barSec);
+            m.put("bpm", null);
+            m.put("inBpm", null);
+            if (p.bridge) m.put("trim", trimJson(p.trim));
+            m.put("curves", curvesJson(p.curves));
+            return m;
+        }
         m.put("style", p.style);
+        if (p.shape != null) m.put("shape", p.shape);
+        if ("muffle".equals(p.shape)) m.put("muffleLead", p.muffleLead);
         m.put("fallback", p.fallback);
         m.put("reason", p.reason);
+        if (p.v3) {
+            m.put("subBassContrast", p.subBassContrast);
+            m.put("swapAt", p.swapAt);
+            m.put("swapMoved", p.swapMoved);
+            if (p.glide == null) {
+                m.put("glide", null);
+            } else {
+                Map<String, Object> g = new LinkedHashMap<>();
+                g.put("q", p.glide.q);
+                g.put("beats", (double) p.glide.beats);
+                g.put("beatOutSec", p.glide.beatOutSec);
+                m.put("glide", g);
+            }
+            if (p.harmonic == null) {
+                m.put("harmonic", null);
+            } else {
+                Map<String, Object> h = new LinkedHashMap<>();
+                h.put("score", p.harmonic.score);
+                h.put("confidence", p.harmonic.confidence);
+                h.put("keyScore", p.harmonic.keyScore);
+                h.put("chromaScore", p.harmonic.chromaScore);
+                h.put("severeClash", p.harmonic.severeClash);
+                h.put("short", p.harmonic.shortBlend);
+                m.put("harmonic", h);
+            }
+            m.put("trim", trimJson(p.trim));
+        }
         m.put("v2", p.v2);
         m.put("clash", p.clash);
         m.put("rerouted", p.rerouted);
@@ -162,6 +234,15 @@ public class SpecFixturesTest {
         m.put("outBpm", p.outBpm);
         m.put("inBpm", p.inBpm);
         m.put("curves", curvesJson(p.curves));
+        return m;
+    }
+
+    private static Map<String, Object> trimJson(Planner.Trim t) {
+        if (t == null) return null;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("diffDb", t.diffDb);
+        m.put("outDb", t.outDb);
+        m.put("inDb", t.inDb);
         return m;
     }
 

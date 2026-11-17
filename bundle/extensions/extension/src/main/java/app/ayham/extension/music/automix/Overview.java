@@ -29,6 +29,8 @@ public final class Overview {
     public boolean live, editable;
     /** Why there is no loop mix for this pair, when the search found none. */
     public String loopNone;
+    /** Automix v2: why the loop mix or the blend plays ("loop 0.24 vs blend 0.16 ..."), or null. */
+    public String choice;
     /** Work still running for this pair ("Analysing the next song: finding the beats"), or null. */
     public String waiting;
     /** How far [waiting] is, 0..1, or -1 when unknown. */
@@ -52,11 +54,17 @@ public final class Overview {
             return String.format(Locale.ROOT, "Loop mix · %d bars · %d→%d BPM · %.1f s", loop.totalBars, Math.round(loop.out.bpm), Math.round(loop.in.bpm), D);
         }
         if (provisional) return String.format(Locale.ROOT, "Fade for now · %.1f s · replanned once analysed", D);
-        if ("crossfade".equals(plan.style)) return String.format(Locale.ROOT, "Fade · %.1f s", D) + (plan.reason != null ? " · " + plan.reason : "");
+        // Automix v2 names its ways: the hand-over and bridge of a pair it can't beatmatch, the drop-in, muffle and glide
+        if ("crossfade".equals(plan.style)) {
+            return String.format(Locale.ROOT, "%s · %.1f s", plan.bridge ? "Beatless bridge" : plan.handoff ? "Hand-over" : "Fade", D)
+                    + (plan.reason != null ? " · " + plan.reason : "");
+        }
         String bpm = plan.inBpm > 0 && Math.round(plan.inBpm) != Math.round(plan.bpm)
                 ? Math.round(plan.outBpm > 0 ? plan.outBpm : plan.bpm) + "→" + Math.round(plan.inBpm) + " BPM"
                 : Math.round(plan.bpm) + " BPM";
-        return String.format(Locale.ROOT, "%s · %d bars · %s · %.1f s", "filter".equals(plan.style) ? "Filter mix" : "Blend", plan.bars, bpm, D);
+        String kind = "filter".equals(plan.style) ? "Filter mix" : "dropin".equals(plan.shape) ? "Drop-in" : "muffle".equals(plan.shape) ? "Muffle"
+                : plan.glide != null ? "Glide blend" : "Blend";
+        return String.format(Locale.ROOT, "%s · %d bars · %s · %.1f s", kind, plan.bars, bpm, D);
     }
 
     /** The outgoing song's second at mix time t, NaN while it is silent. */
@@ -66,6 +74,7 @@ public final class Overview {
             return t < x.releaseAt ? seg(x.outChanges, t) : Double.NaN;
         }
         if (t < 0) return plan.mixOutTrackTime + t;
+        if (plan.glide != null) return t <= D ? KickLock.blendClocks(plan).out.applyAsDouble(t) : Double.NaN;
         return t <= D ? plan.mixOutTrackTime + t * plan.outRate : Double.NaN;
     }
 
@@ -73,6 +82,7 @@ public final class Overview {
     public double inTrack(double t) {
         if (t < 0) return Double.NaN;
         if (x != null) return t < x.releaseAt ? seg(x.inChanges, t) : loop.in.loopEnd + (t - x.releaseAt);
+        if ("blend".equals(plan.style) && plan.glide != null) return KickLock.blendClocks(plan).in.applyAsDouble(t);
         double rate = "blend".equals(plan.style) ? plan.rate : 1;
         return t <= D ? plan.mixInTrackTime + t * rate : plan.mixInTrackTime + D * rate + (t - D);
     }

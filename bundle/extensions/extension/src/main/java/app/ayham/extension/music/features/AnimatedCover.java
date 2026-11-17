@@ -36,6 +36,12 @@ final class AnimatedCover {
     private static String playingUrl;
     private static int videoW, videoH;
     private static long lookupStart;
+    /** Metrolist's letterbox zoom (CanvasFrameSampler.detectLetterboxZoom), from the live frame. */
+    private static float zoom = 1f;
+    /** The live frame, 48 px on its longest side (Metrolist's CanvasFrameSampler), reused. */
+    private static android.graphics.Bitmap sample;
+    /** The last transform set, so an unchanged layout is not set again each frame. */
+    private static final float[] fitWas = new float[6];
 
     private AnimatedCover() {
     }
@@ -115,6 +121,7 @@ final class AnimatedCover {
         if (view.getX() != thumb.getX()) view.setX(thumb.getX());
         if (view.getY() != thumb.getY()) view.setY(thumb.getY());
         view.setZ(thumb.getZ() + 1);
+        fit(); // the banner moves and grows on its own: the video stays where Metrolist draws it
 
         // Song mode and expanded only; in video mode the thumbnail is hidden.
         int[] at = new int[2];
@@ -152,6 +159,81 @@ final class AnimatedCover {
     /** The animated cover is on the screen (the fullscreen art stays up while it plays, paused or not). */
     static boolean clipShowing() {
         return view != null && view.isShown() && view.getAlpha() > 0.5f && prepared;
+    }
+
+    /**
+     * The clip is Apple's tall (3:4) cover: Metrolist's canvasTall layout. Only that one: a Spotify
+     * canvas (9:16) or a music video fills the whole player, as in Metrolist.
+     */
+    static boolean tallClip() {
+        if (videoW == 0) return false;
+        float r = videoH / (float) videoW;
+        return r > 1.2f && r < 1.45f;
+    }
+
+    /**
+     * Where Metrolist draws the clip, px from the player page's top-left on a W x H screen: a tall
+     * cover fills fillMaxWidth().aspectRatio(3/4) at the top; anything else fills the whole player
+     * (RESIZE_MODE_ZOOM, centre-cropped). Either is scaled by the letterbox zoom about its centre.
+     */
+    static android.graphics.RectF videoRect(int W, int H) {
+        if (videoW == 0 || videoH == 0 || W == 0 || H == 0) return null;
+        float bw = W, bh = tallClip() ? W * 4f / 3f : H;
+        float sc = Math.max(bw / videoW, bh / videoH) * zoom;
+        float rw = videoW * sc, rh = videoH * sc, cx = bw / 2, cy = bh / 2;
+        return new android.graphics.RectF(cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2);
+    }
+
+    /** Metrolist's CanvasFrameSampler.detectLetterboxZoom: the zoom that takes black bars above and below off, 1..1.6. */
+    static float letterboxZoom(int[] px, int w, int h) {
+        if (w < 4 || h < 4 || isBlackRow(px, w, h / 2)) return 1f;
+        int top = 0;
+        while (top < h / 3 && isBlackRow(px, w, top)) top++;
+        int bottom = 0;
+        while (h - 1 - bottom > 2 * h / 3 && isBlackRow(px, w, h - 1 - bottom)) bottom++;
+        int min = Math.max(1, h / 16);
+        if (top < min || bottom < min) return 1f;
+        int active = h - top - bottom;
+        if (active < h / 2 || active >= h) return 1f;
+        return Math.max(1f, Math.min(1.6f, h / (float) active));
+    }
+
+    private static boolean isBlackRow(int[] px, int w, int y) {
+        int step = Math.max(1, w / 16), sum = 0, n = 0;
+        for (int x = 0; x < w; x += step, n++) {
+            int c = px[y * w + x];
+            sum += (((c >> 16) & 0xFF) * 77 + ((c >> 8) & 0xFF) * 150 + (c & 0xFF) * 29) >> 8;
+        }
+        return n > 0 && sum / n < 24;
+    }
+
+    /** A w x h size with the clip's shape, its longest side [side] px. */
+    static int[] sampleSize(int side) {
+        if (videoW == 0 || videoH == 0) return new int[]{side, side};
+        float k = side / (float) Math.max(videoW, videoH);
+        return new int[]{Math.max(1, Math.round(videoW * k)), Math.max(1, Math.round(videoH * k))};
+    }
+
+    /** Each new clip frame (Metrolist samples every one): its letterbox zoom, and the live blurred backdrop. */
+    private static void sampled() {
+        if (!clipShowing() || !view.isAvailable() || !FullArt.clipMode() || videoW == 0) return;
+        int[] sz = sampleSize(48);
+        try {
+            if (sample == null || sample.getWidth() != sz[0] || sample.getHeight() != sz[1])
+                sample = android.graphics.Bitmap.createBitmap(sz[0], sz[1], android.graphics.Bitmap.Config.ARGB_8888);
+            view.getBitmap(sample);
+        } catch (Throwable t) {
+            return;
+        }
+        int[] px = new int[sz[0] * sz[1]];
+        sample.getPixels(px, 0, sz[0], 0, 0, sz[0], sz[1]);
+        float z = letterboxZoom(px, sz[0], sz[1]);
+        if (Math.abs(z - zoom) > 0.03f) {
+            Log.i(TAG, "canvas: letterbox zoom " + zoom + " -> " + z);
+            zoom = z;
+            fit();
+        }
+        ArtBackdrop.live(px, sz[0], sz[1], tallClip());
     }
 
     /** A frame of the shown clip at w x h (the background's blurred backdrop), or null. */
@@ -231,6 +313,11 @@ final class AnimatedCover {
 
             @Override
             public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                try {
+                    sampled();
+                } catch (Throwable t) {
+                    Features.failed("canvas frame", t);
+                }
             }
         });
         return v;
@@ -329,6 +416,7 @@ final class AnimatedCover {
         String fixed = p.getProperty("canvasUrl", "").trim();
         boolean apple = "1".equals(p.getProperty("canvasApple"));
         boolean video = !"0".equals(p.getProperty("canvasVideo"));
+        boolean spotify = !"0".equals(p.getProperty("canvasSpotify"));
         lookupStart = System.currentTimeMillis();
         Log.i(TAG, "canvas: song '" + title + "' by '" + artist + "'");
         new Thread(() -> {
@@ -362,7 +450,9 @@ final class AnimatedCover {
             }
             // Metrolist's source order: the song's music video first, then Apple's animated cover
             if (fixed.isEmpty() && video && vid != null) {
-                String mvKey = "mv:" + vid, had = CanvasCache.lookup(mvKey);
+                String mvKey = "mv:" + vid, saidMv = CanvasCache.lookup(mvKey);
+                // a saved clip the cache trim has since deleted is cut again
+                final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
                 if (had != null && !had.isEmpty()) {
                     Log.i(TAG, "canvas: video loop from cache");
                     main.post(() -> {
@@ -389,9 +479,40 @@ final class AnimatedCover {
                     if (!forKey.equals(key)) return;
                 }
             }
+            // then Spotify's Canvas (Metrolist's order: video, Spotify, Apple), saved by title and artist
+            if (fixed.isEmpty() && spotify) {
+                String spKey = "sp:" + title + "|" + artist, had = CanvasCache.lookup(spKey);
+                if (had != null && !had.isEmpty() && new java.io.File(had).length() > 0) {
+                    Log.i(TAG, "canvas: spotify canvas from cache");
+                    main.post(() -> {
+                        if (forKey.equals(key)) play(had);
+                    });
+                    return;
+                }
+                if (had == null || !had.isEmpty()) {
+                    try {
+                        java.io.File f = SpotifyCanvas.find(title, artist, cacheDir);
+                        CanvasCache.put(spKey, f == null ? null : f.getAbsolutePath());
+                        if (f != null) {
+                            String path = f.getAbsolutePath();
+                            Log.i(TAG, "canvas: spotify canvas in " + (System.currentTimeMillis() - lookupStart) + " ms");
+                            main.post(() -> {
+                                if (forKey.equals(key)) play(path);
+                            });
+                            return;
+                        }
+                    } catch (Throwable t) {
+                        // a failed lookup is not saved as a miss: asked again next time
+                        Log.w(TAG, "canvas spotify: failed: " + t);
+                    }
+                    if (!forKey.equals(key)) return;
+                }
+            }
             // then Apple's, saved by title and artist (a miss for 24 h, or the clip file)
             if (fixed.isEmpty()) {
-                String hadApple = CanvasCache.lookup(songKey);
+                String saidApple = CanvasCache.lookup(songKey);
+                final String hadApple = saidApple != null && !saidApple.isEmpty() && !saidApple.contains("://")
+                        && new java.io.File(saidApple).length() == 0 ? null : saidApple;
                 if (hadApple != null) {
                     Log.i(TAG, "canvas: saved lookup: " + (hadApple.isEmpty() ? "no clip" : "clip " + new java.io.File(hadApple).getName()));
                     if (!hadApple.isEmpty()) main.post(() -> {
@@ -498,6 +619,8 @@ final class AnimatedCover {
             }
         }
         videoW = videoH = 0;
+        zoom = 1f;
+        java.util.Arrays.fill(fitWas, 0);
         prepared = false;
     }
 
@@ -508,6 +631,8 @@ final class AnimatedCover {
     private static void fit() {
         if (view == null || videoW == 0 || videoH == 0 || view.getWidth() == 0) return;
         float vw = view.getWidth(), vh = view.getHeight();
+        if (FullArt.on() && FullArt.clipMode() && FullArt.bannerSide() > 0 && metrolistFit(vw, vh)) return;
+        fitWas[4] = 0; // the card's crop: the full-screen one is set again when it comes back
         String path = playingUrl == null ? null : playingUrl.startsWith("file://") ? playingUrl.substring(7) : playingUrl;
         float[] c = VideoCanvas.cropOf(path);
         float cx = c == null ? 0.5f : c[0];
@@ -530,5 +655,35 @@ final class AnimatedCover {
         Matrix m = new Matrix();
         m.setRectToRect(src, new android.graphics.RectF(0, 0, vw, vh), Matrix.ScaleToFit.FILL);
         view.setTransform(m);
+    }
+
+    /**
+     * Full-screen art: the clip where Metrolist draws it (videoRect), seen through the banner (our
+     * view sits in YT's card, scaled up as the banner): the screen rect taken into the view's own px.
+     */
+    private static boolean metrolistFit(float vw, float vh) {
+        View root = view.getRootView();
+        android.graphics.RectF r = videoRect(root.getWidth(), root.getHeight());
+        if (r == null) return false;
+        float s = 1;
+        for (View v = view; v != null; v = v.getParent() instanceof View ? (View) v.getParent() : null) s *= v.getScaleX();
+        if (s <= 0) return false;
+        int[] at = new int[2];
+        view.getLocationOnScreen(at);
+        float top = FullArt.pageTop();
+        float l = (r.left - at[0]) / s, t = (r.top + top - at[1]) / s, w = r.width() / s, h = r.height() / s;
+        if (Math.abs(l - fitWas[0]) < 0.5f && Math.abs(t - fitWas[1]) < 0.5f && Math.abs(w - fitWas[2]) < 0.5f
+                && Math.abs(h - fitWas[3]) < 0.5f && fitWas[4] == vw && fitWas[5] == vh) return true;
+        fitWas[0] = l;
+        fitWas[1] = t;
+        fitWas[2] = w;
+        fitWas[3] = h;
+        fitWas[4] = vw;
+        fitWas[5] = vh;
+        Matrix m = new Matrix();
+        m.setRectToRect(new android.graphics.RectF(0, 0, vw, vh), new android.graphics.RectF(l, t, l + w, t + h), Matrix.ScaleToFit.FILL);
+        view.setTransform(m);
+        view.invalidate();
+        return true;
     }
 }

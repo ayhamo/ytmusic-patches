@@ -28,15 +28,17 @@ public final class Curves {
         String style = m.style;
         c.durationSec = D;
         if (m.v2 && !style.equals("crossfade")) {
-            float[][] s = Mix.djShape(style, m.clash, D, m.bpm, samples(D));
-            c.out.put("gain", points(s[1], D));
-            c.in.put("gain", points(s[0], D));
+            float[][] s = Mix.djShape(m, D, samples(D));
+            float[][] g = trimmed(m, s[0], s[1]);
+            c.out.put("gain", points(g[1], D));
+            c.in.put("gain", points(g[0], D));
             c.out.put("lowpassHz", points(s[4], D));
             c.out.put("highpassHz", points(s[3], D));
             c.in.put("highpassHz", points(s[2], D));
         } else {
-            c.out.put("gain", points(equalPower(65, false), D));
-            c.in.put("gain", points(equalPower(65, true), D));
+            float[][] g = trimmed(m, equalPower(65, true), equalPower(65, false));
+            c.out.put("gain", points(g[1], D));
+            c.in.put("gain", points(g[0], D));
             if (!style.equals("crossfade")) {
                 // the bass swaps within one bar at the midpoint
                 double mid = D / 2, bar = Math.min(Double.isNaN(m.barSec) ? 0 : m.barSec, D / 2);
@@ -75,7 +77,16 @@ public final class Curves {
             c.out.put("rate", kept.toArray(new double[0][]));
         }
         double rate = style.equals("blend") ? m.rate : 1;
-        if (Math.abs(rate - 1) > 1e-9) {
+        if (style.equals("blend") && m.glide != null) {
+            // Automix v2's glide: both songs step once per beat, the next one ends at x1.0
+            Planner.GlideSteps G = Planner.glideSteps(m.glide.q, m.glide.beats, m.glide.beatOutSec);
+            List<double[]> o = rateSteps(G.outRate, G.at), i = rateSteps(G.inRate, G.at);
+            o.add(new double[]{D, G.outRate[G.outRate.length - 1]});
+            i.add(new double[]{D, G.inRate[G.inRate.length - 1]});
+            i.add(new double[]{D, 1});
+            c.out.put("rate", o.toArray(new double[0][]));
+            c.in.put("rate", i.toArray(new double[0][]));
+        } else if (Math.abs(rate - 1) > 1e-9) {
             if (Math.abs(rate - 1) < 0.002) {
                 c.in.put("rate", new double[][]{{0, rate}, {D, rate}, {D, 1}});
             } else {
@@ -84,6 +95,36 @@ public final class Curves {
             }
         }
         return c;
+    }
+
+    private static List<double[]> rateSteps(double[] rates, double[] at) {
+        List<double[]> pts = new ArrayList<>();
+        for (int k = 0; k < rates.length; k++) {
+            if (k == 0) {
+                pts.add(new double[]{0, rates[0]});
+            } else {
+                pts.add(new double[]{at[k], rates[k - 1]});
+                pts.add(new double[]{at[k], rates[k]});
+            }
+        }
+        return pts;
+    }
+
+    /** A blend's fader with its loudness trim: the playing song from 1 to its trim, the next from its trim to 1 (automix.js trimmed). */
+    static float[][] trimmed(Planner.Plan m, float[] gIn, float[] gOut) {
+        Planner.Trim t = m.trim;
+        if (t == null || (t.outDb == 0 && t.inDb == 0)) return new float[][]{gIn, gOut};
+        double gi = Math.pow(10, t.inDb / 20), go = Math.pow(10, t.outDb / 20);
+        float[] in = new float[gIn.length], out = new float[gOut.length];
+        for (int i = 0; i < in.length; i++) {
+            double x = in.length > 1 ? i / (double) (in.length - 1) : 1, ss = x * x * (3 - 2 * x);
+            in[i] = (float) (gIn[i] * (gi + (1 - gi) * ss));
+        }
+        for (int i = 0; i < out.length; i++) {
+            double x = out.length > 1 ? i / (double) (out.length - 1) : 1, ss = x * x * (3 - 2 * x);
+            out[i] = (float) (gOut[i] * (1 + (go - 1) * ss));
+        }
+        return new float[][]{in, out};
     }
 
     /** A loop mix's curves, from its schedule (automix.js loopCurves). */

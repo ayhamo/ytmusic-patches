@@ -203,10 +203,15 @@ final class PlayerScreen {
         // box, which stays put; the mesh meets the art where it is drawn
         int artBottom = FullArt.apply(a, decor, art, sheetTop - need, Math.max(0, pageY));
         int seam = FullArt.drawnBottom() - top(mesh);
-        if (mesh.seam != seam) {
+        int bannerTop = Math.max(0, pageY) - top(mesh);
+        float e = FullArt.progress();
+        if (mesh.seam != seam || mesh.bannerTop != bannerTop || mesh.e != e) {
             mesh.seam = seam;
+            mesh.bannerTop = bannerTop;
+            mesh.e = e;
             mesh.invalidate();
         }
+        ArtBackdrop.tick(a, decor, mesh);
         catchArt(a, decor, song);
         int avail = sheetTop - artBottom;
         int extra = avail - need;
@@ -225,10 +230,21 @@ final class PlayerScreen {
             gArt += extra - spread;
         }
         int y = artBottom + gArt;
-        // the banner reaches down to the seek bar: its lower part fades out under the title and the
-        // lyric, so no empty band is left between the art and the column (the user); its sides are
-        // cropped evenly
-        FullArt.reach(y + hSong + gLyric + hLyric + gCtl, decor);
+        // Metrolist's fade bounds for an animated cover: from above the title to the artist's line
+        int[] so = new int[2], vo = new int[2];
+        song.getLocationOnScreen(so);
+        View tv = song.findViewById(id(a, "title")), av = song.findViewById(id(a, "artist"));
+        float titleTop = y, artistBottom = y + hSong;
+        if (tv != null && tv.isShown()) {
+            tv.getLocationOnScreen(vo);
+            titleTop = y + vo[1] - so[1];
+        }
+        if (av != null && av.isShown()) {
+            av.getLocationOnScreen(vo);
+            artistBottom = y + vo[1] - so[1] + av.getHeight();
+        }
+        int pageTop = Math.max(0, pageY);
+        FullArt.bounds(titleTop - pageTop, artistBottom - pageTop, decor.getHeight(), decor);
         place(song, y);
         int songEnd = y + hSong;
         y += hSong + gLyric + hLyric + gCtl;
@@ -277,6 +293,7 @@ final class PlayerScreen {
         View ar = song.findViewById(id(a, "artist"));
         tint(t, Color.WHITE);
         tint(ar, 0x8CFFFFFF);
+        whiteTimes(bar);
         dimTopIcons(a, decor);
         if (!layoutLogged) {
             layoutLogged = true;
@@ -313,11 +330,55 @@ final class PlayerScreen {
         for (Map.Entry<TextView, android.content.res.ColorStateList> e : ytColors.entrySet())
             if (e.getKey() != null && e.getValue() != null) e.getKey().setTextColor(e.getValue());
         ytColors.clear();
+        for (Map.Entry<Paint, Integer> e : ytTimeColors.entrySet()) e.getKey().setColor(e.getValue());
+        ytTimeColors.clear();
+        if (timesBar != null) timesBar.invalidate();
+        timesBar = null;
+        timePaints = null;
+    }
+
+    /** YT's time bar draws its times itself: its text paints (and their own colours, to give back). */
+    private static View timesBar;
+    private static List<Paint> timePaints;
+    private static final Map<Paint, Integer> ytTimeColors = new java.util.HashMap<>();
+
+    /** The times under the seek bar in the title's white (YT's grey is hard to read on light art). */
+    private static void whiteTimes(View bar) {
+        if (bar == null) return;
+        if (bar != timesBar) {
+            timesBar = bar;
+            timePaints = new ArrayList<>();
+            // the paints with a text size set: the default is 12 px, YT's times are 12 sp and up
+            for (Class<?> c = bar.getClass(); c != null && c != View.class; c = c.getSuperclass())
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (!Paint.class.isAssignableFrom(f.getType()) || java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    try {
+                        f.setAccessible(true);
+                        Paint pt = (Paint) f.get(bar);
+                        if (pt != null && pt.getTextSize() > 13 && !timePaints.contains(pt)) timePaints.add(pt);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            StringBuilder sb = new StringBuilder();
+            for (Paint pt : timePaints) sb.append(String.format(java.util.Locale.ROOT, " #%08X/%.0fpx", pt.getColor(), pt.getTextSize()));
+            Log.i(TAG, "time bar " + bar.getClass().getName() + ": " + timePaints.size() + " text paints" + sb);
+        }
+        boolean changed = false;
+        for (Paint pt : timePaints) {
+            if (pt.getColor() == Color.WHITE) continue;
+            if (!ytTimeColors.containsKey(pt)) ytTimeColors.put(pt, pt.getColor());
+            pt.setColor(Color.WHITE);
+            changed = true;
+        }
+        if (changed) bar.invalidate();
     }
 
     /** How bright the cast and ⋮ buttons in YT's top bar are drawn: quieter, like its audio/video switch (item 1). */
     private static final float TOP_ICONS_ALPHA = 0.55f;
     private static final List<View> dimmed = new ArrayList<>();
+    /** The automix stats line: whether it was shown last refresh, and its last text (for the log). */
+    private static boolean mixShown;
+    private static String lastMix;
 
     /** Cast and ⋮ of the player's top bar (its ⋮ is looked up next to the cast button: feed rows have one too). */
     private static void dimTopIcons(Activity a, View decor) {
@@ -431,6 +492,8 @@ final class PlayerScreen {
         stats.setGravity(Gravity.CENTER_HORIZONTAL);
         stats.setShadowLayer(dp(a, 4), 0, dp(a, 1), 0x8C000000);
         overlay.addView(stats, at(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, side + dp(a, 12)));
+        // the automix line opens the Automix overview (the extension's Automix toast does the same)
+        stats.setOnClickListener(v -> MixOverview.show(a));
 
         // lyric line (BitChord's strip): 16sp W600, its chevron drawn right after the words; opens YT's Lyrics tab
         lyricRow = new LinearLayout(a);
@@ -554,6 +617,17 @@ final class PlayerScreen {
                 b.append(mix);
                 b.setSpan(new android.text.style.ForegroundColorSpan(0x80FFFFFF), from, b.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
+            boolean hasMix = mix != null && !mix.isEmpty();
+            if (hasMix != mixShown) {
+                // the automix line coming and going, with why and where (the user saw it vanish at
+                // 0:22 into Vaina Loca; caught on the final phone pass)
+                Log.i(TAG, "automix stats line " + (hasMix ? "shown: '" + mix + "'" : "gone ("
+                        + app.ayham.extension.music.automix.Automix.noStatusWhy + "), was '" + lastMix + "'")
+                        + " at " + String.format(java.util.Locale.US, "%.1f",
+                        app.ayham.extension.music.automix.Automix.positionMs() / 1000.0) + " s");
+                mixShown = hasMix;
+            }
+            if (hasMix) lastMix = mix;
             stats.setText(b);
             stats.setVisibility(b.length() == 0 ? View.INVISIBLE : View.VISIBLE);
         } catch (Throwable e) {
@@ -659,7 +733,7 @@ final class PlayerScreen {
         float sc = 1f;
         for (View v = card; v != null; v = v.getParent() instanceof View ? (View) v.getParent() : null) sc *= v.getScaleX();
         int w = Math.round(card.getWidth() * sc), h = Math.round(Math.min(card.getHeight(), card.getWidth()) * sc);
-        h = Math.round(h * (1 - FullArt.FADE * FullArt.progress())); // as far as the fade has come
+        h = Math.round(h * (1 - 0.3f * FullArt.progress())); // above where the banner's blur starts
         int inset = w / 12;
         Rect src = new Rect(at[0] + inset, at[1] + inset, at[0] + w - inset, at[1] + h - inset);
         if (src.width() <= 0 || src.height() <= 0) return;
@@ -737,7 +811,8 @@ final class PlayerScreen {
         private final Paint shade = new Paint();
         private Bitmap now, before;
         private long fadeStart;
-        int seam;
+        int seam, bannerTop;
+        float e;
         private int shadeFor = -1;
 
         MeshView(Context c) {
@@ -761,6 +836,8 @@ final class PlayerScreen {
         @Override
         protected void onDraw(Canvas c) {
             c.drawColor(0xFF121212);
+            // Metrolist's bleed (or an animated cover's backdrop); the colour mesh until there is one
+            if (ArtBackdrop.draw(c, this, bannerTop, e)) return;
             if (now == null) return;
             float t = Math.min(1f, (SystemClock.uptimeMillis() - fadeStart) / 900f);
             if (before != null && t < 1f) draw(c, before, 255);
@@ -1511,6 +1588,8 @@ final class PlayerScreen {
     /** The "..." menu: BitChord's two art switches, then YT's own menu. */
     private static void menu(Activity a, View anchor) {
         android.widget.PopupMenu m = new android.widget.PopupMenu(a, anchor);
+        m.getMenu().add(0, 4, 0, "Automix overview");
+        m.getMenu().add(0, 5, 0, "Jump to the most replayed part");
         m.getMenu().add(0, 1, 0, "Fullscreen cover art").setCheckable(true).setChecked(Features.switchOn("fullArt"));
         m.getMenu().add(0, 2, 1, "Animated covers").setCheckable(true).setChecked(Features.switchOn("canvas"));
         m.getMenu().add(0, 3, 2, "More options");
@@ -1521,6 +1600,12 @@ final class PlayerScreen {
                     return true;
                 case 2:
                     Features.setSwitch("canvas", !item.isChecked());
+                    return true;
+                case 4:
+                    MixOverview.show(a);
+                    return true;
+                case 5:
+                    BestPart.jump(a);
                     return true;
                 default:
                     View yt = a.getWindow().getDecorView().findViewById(id(a, "contextual_menu"));

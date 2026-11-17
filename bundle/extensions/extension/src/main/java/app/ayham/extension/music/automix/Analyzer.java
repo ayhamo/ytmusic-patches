@@ -127,6 +127,32 @@ final class Analyzer {
         return status.get(id);
     }
 
+    /** Where a song's analysis is: {stage, done 0..1} (the overview's progress), or null when it isn't running. */
+    static synchronized Object[] progress(String id) {
+        String s = status.get(id);
+        if ("pending".equals(s)) return new Object[]{"waiting its turn", 0f};
+        if (!"analyzing".equals(s)) return null;
+        Object[] st = stages.get(id);
+        return st != null ? st : new Object[]{"starting", 0f};
+    }
+
+    private static final Map<String, Object[]> stages = new HashMap<>();
+
+    /** An analysis given up between stages: its song is neither playing nor next, and another waits. */
+    private static final class Superseded extends RuntimeException {
+        Superseded() {
+            super(null, null, false, false);
+        }
+    }
+
+    private static void stage(String id, String name, float done) {
+        synchronized (Analyzer.class) {
+            stages.put(id, new Object[]{name, done});
+            if (queue.isEmpty()) return;
+        }
+        if (!id.equals(Automix.currentId()) && !id.equals(Automix.nextIdNow())) throw new Superseded();
+    }
+
     static synchronized boolean busy(String id) {
         String s = status.get(id);
         return "pending".equals(s) || "analyzing".equals(s);
@@ -203,6 +229,7 @@ final class Analyzer {
                     continue;
                 }
                 status.put(id, "analyzing");
+                stages.remove(id);
             }
             long t0 = SystemClock.elapsedRealtime();
             try {
@@ -224,6 +251,12 @@ final class Analyzer {
                     }
                 }
                 Log.i(TAG, "analysis of " + id + (fresh == null ? " failed" : " ready") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
+            } catch (Superseded s) {
+                // asked for again when it plays or comes next
+                synchronized (Analyzer.class) {
+                    status.remove(id);
+                }
+                Log.i(TAG, "analysis of " + id + " dropped after " + (SystemClock.elapsedRealtime() - t0) + " ms: no longer playing or next");
             } catch (Throwable t) {
                 Log.e(TAG, "analysis of " + id + " failed", t);
                 synchronized (Analyzer.class) {
@@ -517,14 +550,19 @@ final class Analyzer {
     private static Analysis analyze(Context c, String id, Analysis known) throws Exception {
         Models.loadNative();
         long t0 = SystemClock.elapsedRealtime();
+        stage(id, "downloading", 0f);
         File file = download(c, id);
         long tDl = SystemClock.elapsedRealtime() - t0;
         //noinspection ResultOfMethodCallIgnored
         pcmDir(c).mkdirs();
         File headTmp = new File(pcmDir(c), id + ".head.part"), tailTmp = new File(pcmDir(c), id + ".tail.part");
         Decoded d;
+        boolean decoded = false;
         try {
+            // (inside the try: a dropped analysis leaves no download behind)
+            stage(id, "decoding", 0.02f);
             d = decode(file, headTmp, tailTmp);
+            decoded = true;
         } catch (TooLong e) {
             throw e; // the length won't change with another download
         } catch (IOException e) {
@@ -534,9 +572,12 @@ final class Analyzer {
             file.delete();
             file = download(c, id);
             d = decode(file, headTmp, tailTmp);
+            decoded = true;
         } finally {
-            //noinspection ResultOfMethodCallIgnored
-            file.delete();
+            // kept for the stream deck ("Smooth hand-over"), else deleted
+            if (decoded) StreamDeck.keep(c, id, file);
+            else //noinspection ResultOfMethodCallIgnored
+                file.delete();
         }
         //noinspection ResultOfMethodCallIgnored
         headTmp.renameTo(headFile(c, id));
@@ -559,7 +600,9 @@ final class Analyzer {
 
         // Beat This! over the opening and the end (59 s each)
         long tb = SystemClock.elapsedRealtime();
+        stage(id, "finding the beats", 0.22f);
         a.headBeats = Models.beats(c, monoSpan(d, 0, BEAT_WINDOW_SEC), d.monoRate, 0);
+        stage(id, "finding the beats", 0.52f);
         if (dur > BEAT_WINDOW_SEC) {
             double from = dur - BEAT_WINDOW_SEC;
             a.tailBeats = Models.beats(c, monoSpan(d, from, dur), d.monoRate, from);
@@ -571,6 +614,7 @@ final class Analyzer {
         // BitChord's native analyser: the key (and the grid when Beat This! finds none)
         long tn = SystemClock.elapsedRealtime();
         double ar = TrackFeatures.nativeSampleRate();
+        stage(id, "finding the key", 0.82f);
         JSONObject nat = new JSONObject(TrackFeatures.nativeAnalyze(resampleMono(d, ar), ar, dur));
         tn = SystemClock.elapsedRealtime() - tn;
         // the key as the extension finds it (whole-song profile correlation, strength on its scale);
@@ -617,6 +661,7 @@ final class Analyzer {
         d.mono = null;
 
         // the vocal mask over the opening (two windows) and the end (up to three)
+        stage(id, "finding the vocals", 0.85f);
         long tv = SystemClock.elapsedRealtime();
         double W = VOCAL_WINDOW_SEC;
         java.util.List<Double> starts = new java.util.ArrayList<>();

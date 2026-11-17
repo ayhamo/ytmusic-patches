@@ -12,16 +12,18 @@ import android.view.View;
 import android.view.ViewGroup;
 
 /**
- * BitChord's "Fullscreen cover art" on the BitChord screen. YT's own art (its pager container, with
- * the animated cover inside it) is scaled up so the square card fills the screen's width from the
- * very top, and its lower 42% fades into the mesh below. While nothing plays for a second (and no
+ * BitChord's "Fullscreen cover art" on the BitChord screen, laid out as Metrolist's fullscreen
+ * style. YT's own art (its pager container, with the animated cover inside it) is pinned to the
+ * very top and zoomed so its height is 60% of the screen's (1 to 1.6 times the width, sides
+ * cropped); its edge fades out where ArtBleed's blur starts, over the bleed drawn below it. An
+ * animated cover instead fills the zone down to Metrolist's seam (by the artist line) and fades
+ * out from above the title to it. While nothing plays for a second (and no
  * animated cover shows) it morphs back into the card, as BitChord's banner does. The card is
  * BitChord's too: screen width less a 30dp gutter each side, at most 560dp, and 0.86 of that while
  * paused (springing at once, no hold). Portrait and song mode only. Everything set on YT's view is given back: collapse, a sheet, switch off.
  */
 final class FullArt {
     private static final String TAG = "AyhamFullArt";
-    static final float FADE = 0.42f;
     private static final long MORPH_MS = 420, PAUSE_MS = 1000;
 
     /** 0 = YT's card, 1 = the banner. */
@@ -41,6 +43,18 @@ final class FullArt {
     private static int fadeH;
     private static boolean logged;
     private static int lastState = -1;
+    /**
+     * YT's swipe between songs hides its thumbnail for a few frames and slides its card: our layout
+     * stays and YT's card is hidden meanwhile (the backdrop holds the old art), then the new art fades
+     * in once its backdrop is ready. Longer than this is not a swipe: YT's art is given back.
+     */
+    private static final long SWIPE_HOLD_MS = 700, REVEAL_MS = 300, REVEAL_WAIT_MS = 1000;
+    private static long swipeAt, revealAt, hidAt;
+    private static float ytAlpha = 1f;
+    private static boolean hiding, sawGap, gapThisHide;
+    /** YT 9.30's art pager under the card we move: empty but for its swipe's sliding cards, kept transparent. */
+    private static View pagerHidden;
+    private static float pagerAlpha = 1f;
 
     private FullArt() {
     }
@@ -193,18 +207,45 @@ final class FullArt {
         return new float[]{k, v};
     }
 
-    /** Where the banner should reach down to (the title row's top), screen px; set after each frame. */
-    private static int reach;
-    /** How much taller than the screen's width the banner is drawn this frame, px. */
-    private static int grow;
     /** Where the banner would end as a square (its stats line sits there). */
     private static int squareEnd;
+    /** The banner's side now, px: eases between the cover's zoom and an animated cover's zone. */
+    private static float bannerS;
+    private static boolean clipMode;
+    /** Metrolist's fade bounds (PlayerScreen.kt fullscreenTransitionBounds), fractions of the screen's height from the page's top. */
+    private static float fadeStart = 0.58f, seam = 0.66f;
+    static final float TITLE_OFFSET = 0.08f, MIN_FADE_SPAN = 0.18f;
 
-    /** Set from the layout after each frame; a change draws the next one. */
-    static void reach(int y, View decor) {
-        if (y == reach) return;
-        reach = y;
+    /**
+     * Metrolist's bounds from the title's top and the artist's bottom (px from the page's top), set
+     * from the layout after each frame; a change draws the next one.
+     */
+    static void bounds(float titleTop, float artistBottom, float height, View decor) {
+        float start = Math.max(0f, Math.min(0.85f, (titleTop - height * TITLE_OFFSET) / height));
+        float end = Math.max(start, Math.min(1f, Math.max(artistBottom / height, start + MIN_FADE_SPAN)));
+        float fs = Math.max(0f, Math.min(0.75f, start));
+        float sm = Math.max(0f, Math.min(0.85f, Math.max(end, fs + 0.06f)));
+        if (Math.abs(fs - fadeStart) * height < 1 && Math.abs(sm - seam) * height < 1) return;
+        fadeStart = fs;
+        seam = sm;
         decor.postInvalidateOnAnimation();
+    }
+
+    static boolean clipMode() {
+        return clipMode;
+    }
+
+    static float seam() {
+        return seam;
+    }
+
+    static float fadeStart() {
+        return fadeStart;
+    }
+
+    /** The banner's side now, px (0 before the first frame). */
+    static float bannerSide() {
+        return bannerS;
     }
 
     static int squareBottom() {
@@ -253,6 +294,39 @@ final class FullArt {
                     + " (card " + (card == null ? "none" : card.getWidth() + "x" + card.getHeight()) + ")");
         }
 
+        // the swipe between songs: same card, its thumbnail hidden for a moment. It starts a frame or
+        // two earlier, when YT scales the card for its slide (YT never scales it otherwise)
+        boolean candidate = art != null && art == move && on && portrait && square;
+        boolean gap = candidate && !song;
+        boolean ytMoves = candidate && song && oursSet && Math.abs(move.getScaleX() - ours[2]) > 0.001f;
+        boolean swipe = gap || candidate && (swipeAt == 0 ? ytMoves : !sawGap && now - swipeAt < 150);
+        if (swipe) {
+            if (swipeAt == 0) {
+                swipeAt = now;
+                sawGap = false;
+                if (!hiding) {
+                    ytAlpha = move.getAlpha();
+                    hidAt = now;
+                    gapThisHide = false;
+                }
+                hiding = true;
+                revealAt = 0;
+                Log.i(TAG, "song swipe: YT's card hidden, our art held (" + (gap ? "thumbnail hidden" : "YT scales its card") + ")");
+                ArtBackdrop.redraw();
+            }
+            if (gap) sawGap = gapThisHide = true;
+            if (now - swipeAt < SWIPE_HOLD_MS) {
+                if (move.getAlpha() != 0f) move.setAlpha(0f);
+                decor.postInvalidateOnAnimation();
+                return drawnBox;
+            }
+        }
+        if (!swipe && swipeAt != 0) {
+            swipeAt = 0;
+            revealAt = now;
+            // YT scaled its card but no song change followed: shown again at once
+            if (!gapThisHide) hidAt = -1;
+        }
         if (art != null && (art != move || !own)) giveBack(); // another view, or a video: give back at once
         if (!own) {
             // YT's own layout: where its art ends
@@ -261,6 +335,12 @@ final class FullArt {
             drawn = Math.round(loc[1] + end.getHeight() * end.getScaleY());
             return drawn;
         }
+        if (move != pager && pagerHidden != pager) {
+            if (pagerHidden != null) pagerHidden.setAlpha(pagerAlpha);
+            pagerHidden = pager;
+            pagerAlpha = pager.getAlpha();
+            pager.setAlpha(0f);
+        } else if (move != pager && pager.getAlpha() != 0f) pager.setAlpha(0f);
         float dt = lastFrame == 0 ? 16 : Math.min(50, now - lastFrame);
         lastFrame = now;
         float target = want ? 1f : 0f;
@@ -340,12 +420,21 @@ final class FullArt {
         float cw = box * k;
         float sc = cw / card.getWidth();
         float cardLeft = boxLeft + (box - cw) / 2, cardTop = ytTop + (box - cw) / 2;
-        // ...and the banner: the screen's width from the page's top-left corner
-        squareEnd = Math.round(pageTop + decor.getWidth());
-        grow = Math.max(0, reach - squareEnd);
-        float big = (decor.getWidth() + grow) / (float) card.getWidth();
+        // ...and the banner, from the page's top, centred: the cover zoomed to 60% of the height, or an
+        // animated cover filling the zone above the seam (a square card: the larger side wins)
+        int W = decor.getWidth(), H = decor.getHeight();
+        squareEnd = Math.round(pageTop + W);
+        clipMode = clip;
+        float wantS = clip ? Math.max(W, seam * H) : ArtBleed.containerWidth(W, H, 1f);
+        if (bannerS == 0) bannerS = wantS;
+        else if (bannerS != wantS) {
+            bannerS += (wantS - bannerS) * Math.min(1f, dt / 120f);
+            if (Math.abs(wantS - bannerS) < 0.5f) bannerS = wantS;
+            else decor.postInvalidateOnAnimation();
+        }
+        float big = bannerS / card.getWidth();
         float s = sc + e * (big - sc);
-        float cardX = (1 - e) * cardLeft - e * grow / 2f, cardY = (1 - e) * cardTop + e * pageTop;
+        float cardX = (1 - e) * cardLeft + e * (W - bannerS) / 2f, cardY = (1 - e) * cardTop + e * pageTop;
         float x = cardX - s * offX, y = cardY - s * offY;
         move.setPivotX(0);
         move.setPivotY(0);
@@ -357,7 +446,12 @@ final class FullArt {
         ours[1] = y - baseY;
         ours[2] = s;
         oursSet = true;
-        fade(move, offY, card.getHeight(), e);
+        if (clip) fade(move, offY, card.getHeight(), e, fadeStart * H / bannerS, seam * H / bannerS, false);
+        else {
+            // YT's art gives way to the bleed's first rows (ArtBleed: Metrolist's 48-row crossfade)
+            int side = Math.round(bannerS), top0 = ArtBleed.detailTop(side, side);
+            fade(move, offY, card.getHeight(), e, top0 / bannerS, (top0 + ArtBleed.CROSSFADE_ROWS) / bannerS, true);
+        }
         if (radius > 0) setRadius(move, radius * (1 - e)); // the banner runs edge to edge, square
         if (!logged && (t == 1f || t == 0f)) {
             logged = true;
@@ -365,11 +459,31 @@ final class FullArt {
                     + " (YT's " + Math.round(ytW) + "px), banner x" + big + " to the width " + decor.getWidth());
         }
         drawn = Math.round(cardY + s * card.getHeight());
-        return Math.round(ytTop + box);
+        if (hiding && swipeAt == 0) {
+            // the new art fades in once its backdrop has crossfaded to it (or after a wait), never as a pop:
+            // YT's card replays its own old-to-new fade, so it comes in only once ours shows the new cover
+            long since = ArtBackdrop.readySince();
+            long from = hidAt < 0 ? now - REVEAL_MS : since >= hidAt ? Math.max(since + ArtBackdrop.CROSSFADE_MS, revealAt) : now - revealAt > REVEAL_WAIT_MS ? revealAt + REVEAL_WAIT_MS : 0;
+            float k2 = from == 0 ? 0f : Math.min(1f, (now - from) / (float) REVEAL_MS);
+            move.setAlpha(ytAlpha * k2);
+            if (k2 >= 1f) {
+                hiding = false;
+                ArtBackdrop.redraw();
+                Log.i(TAG, "song swipe: new art shown " + (now - revealAt) + " ms after the swipe");
+            } else decor.postInvalidateOnAnimation();
+        }
+        drawnBox = Math.round(ytTop + box);
+        return drawnBox;
     }
 
-    /** The card's lower 42% fades out (BitChord's DstIn mask, smootherStep), as much as the morph is done. */
-    private static void fade(View v, float top, float h, float e) {
+    private static long fadeKey;
+    private static int drawnBox;
+
+    /**
+     * The card fades out from u0 to u1 (fractions of its height: smootherStep for the bleed's
+     * crossfade, linear for Metrolist's animated cover mask), as much as the morph is done.
+     */
+    private static void fade(View v, float top, float h, float e, float u0, float u1, boolean smooth) {
         if (Build.VERSION.SDK_INT < 31) return;
         if (e == 0f) {
             // the card: no mask at all (an opaque one still costs an offscreen pass every frame)
@@ -377,20 +491,26 @@ final class FullArt {
             fadeFor = 0f;
             return;
         }
-        if (Math.abs(e - fadeFor) < 0.02f && e != 1f && e != 0f && fadeH == v.getHeight()) return;
-        if (e == fadeFor && fadeH == v.getHeight()) return;
+        u0 = Math.max(0f, Math.min(1f, u0));
+        u1 = Math.max(u0 + 0.001f, Math.min(1.001f, u1));
+        long key = Math.round(u0 * 4000) * 10000L + Math.round(u1 * 4000) + (smooth ? 1L << 40 : 0);
+        boolean same = key == fadeKey && fadeH == v.getHeight();
+        if (same && Math.abs(e - fadeFor) < 0.02f && e != 1f && e != 0f) return;
+        if (same && e == fadeFor) return;
         fadeFor = e;
         fadeH = v.getHeight();
-        int n = 17;
+        fadeKey = key;
+        int n = smooth ? 17 : 2;
         int[] colors = new int[n];
         float[] stops = new float[n];
         for (int i = 0; i < n; i++) {
             float u = i / (float) (n - 1);
             stops[i] = u;
-            float alpha = 1f - e * smoother(u);
+            float alpha = 1f - e * (smooth ? smoother(u) : u);
             colors[i] = (Math.round(alpha * 255) << 24) | 0xFFFFFF;
         }
-        float y0 = top + h * (1 - FADE), y1 = top + h;
+        // opaque above u0, faded (as far as e) below u1: the gradient clamps its end colours
+        float y0 = top + h * u0, y1 = top + h * u1;
         Shader mask = new LinearGradient(0, y0, 0, y1, colors, stops, Shader.TileMode.CLAMP);
         v.setRenderEffect(RenderEffect.createBlendModeEffect(
                 RenderEffect.createOffsetEffect(0, 0), RenderEffect.createShaderEffect(mask), BlendMode.DST_IN));
@@ -398,6 +518,13 @@ final class FullArt {
 
     /** YT's art and top bar as YT had them; a value YT changed since (a drag, a sheet) stays YT's. */
     static void giveBack() {
+        if (pagerHidden != null) {
+            pagerHidden.setAlpha(pagerAlpha);
+            pagerHidden = null;
+        }
+        if (art != null && hiding) art.setAlpha(ytAlpha);
+        hiding = false;
+        swipeAt = 0;
         if (art != null && yt != null) {
             // each value on its own: YT re-sets the card's translation on its layouts, never our scale
             boolean tx = !oursSet || Math.abs(art.getTranslationX() - ours[0]) <= 0.5f;
@@ -435,6 +562,8 @@ final class FullArt {
         t = 0f;
         kFresh = true;
         fadeFor = -1;
+        fadeKey = 0;
+        bannerS = 0;
         logged = false;
     }
 
@@ -446,6 +575,11 @@ final class FullArt {
         if (d == null) return;
         d.postInvalidateOnAnimation();
         d.postInvalidateDelayed(PAUSE_MS + 30);
+    }
+
+    /** YT's card is hidden for a song swipe (the backdrop draws the cover in its place). */
+    static boolean hiding() {
+        return hiding;
     }
 
     /** How far the banner is: 0 = YT's card, 1 = fully up. */

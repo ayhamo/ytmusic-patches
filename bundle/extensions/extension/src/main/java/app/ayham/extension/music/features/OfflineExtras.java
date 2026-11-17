@@ -130,12 +130,16 @@ final class OfflineExtras {
 
     /** The Apple motion clip, kept in files/ayham-offline (no cap) and saved against the video id. */
     private static String clip(Context c, String videoId, String title, String artist) throws Exception {
-        String url = AppleCanvas.find(title, artist);
-        if (url == null) {
+        // the shape the player shows: tall with full-screen art, else square; the other when that fails
+        String[] urls = AppleCanvas.find(title, artist, FullArt.on());
+        if (urls == null) {
             CanvasCache.put(CanvasCache.idKey(videoId), null);
             return "none (no motion art)";
         }
-        File f = url.contains(".m3u8") ? HlsClip.fetch(url, new File(c.getFilesDir(), "ayham-offline"), 720, false) : null;
+        File f = null;
+        for (String url : urls)
+            if (f == null && url != null && url.contains(".m3u8"))
+                f = HlsClip.fetch(url, new File(c.getFilesDir(), "ayham-offline"), 720, false);
         if (f == null) return "download failed";
         CanvasCache.put(CanvasCache.idKey(videoId), f.getAbsolutePath());
         return f.getName() + " (" + f.length() / 1024 + " KB)";

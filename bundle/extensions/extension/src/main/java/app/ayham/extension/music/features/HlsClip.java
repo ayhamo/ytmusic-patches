@@ -99,7 +99,7 @@ final class HlsClip {
     }
 
     /** Keep the cache under CACHE_BYTES: the least recently shown clips go first. */
-    private static void trim(File dir, File keep) {
+    static void trim(File dir, File keep) {
         File[] files = dir.listFiles();
         if (files == null) return;
         java.util.Arrays.sort(files, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));

@@ -28,6 +28,25 @@ public final class Planner {
         public int bars;
     }
 
+    /**
+     * What the Automix overview asked for one pair of songs (automix.js plan's pick): a style
+     * (loop | blend | filter | crossfade; null: Auto) and a length in bars (0: Auto).
+     */
+    public static final class Pick {
+        public String style;
+        public int bars;
+
+        public Pick(String style, int bars) {
+            this.style = style;
+            this.bars = bars;
+        }
+
+        /** A blend, filter mix or fade picked (or a length): no loop mix for this pair. */
+        public boolean noLoop() {
+            return "blend".equals(style) || "filter".equals(style) || "crossfade".equals(style) || (style == null && bars > 0);
+        }
+    }
+
     /** Sung spans of each song from synced lyrics ([start, end] seconds), or null: the vocal mask. */
     public static final class Sung {
         public double[][] out, in;
@@ -47,6 +66,8 @@ public final class Planner {
         public int bars;
         public double swapDb, barSec, bpm = Double.NaN, outBpm = Double.NaN, inBpm = Double.NaN;
         public LoopPlan loop;
+        /** What each deck does over the transition (spec/automix/plan.schema.json "curves"). */
+        public Curves curves;
 
         @Override
         public String toString() {
@@ -203,6 +224,27 @@ public final class Planner {
      */
     public static Plan plan(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
                             double pos, double earliest, Sung sung) {
+        return plan(s, fromId, toId, from, to, durationSec, pos, earliest, sung, null);
+    }
+
+    /** With the overview's pick for this pair: a length picked comes before the setting. */
+    public static Plan plan(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
+                            double pos, double earliest, Sung sung, Pick pick) {
+        if (pick != null && pick.bars > 0) {
+            Settings pinned = new Settings();
+            pinned.version = s.version;
+            pinned.keyAware = s.keyAware;
+            pinned.bars = pick.bars;
+            s = pinned;
+        }
+        Plan p = planFor(s, fromId, toId, from, to, durationSec, pos, earliest, sung, pick);
+        p.curves = Curves.blend(p);
+        return p;
+    }
+
+    private static Plan planFor(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
+                                double pos, double earliest, Sung sung, Pick pick) {
+        String picked = pick == null ? null : pick.style;
         boolean both = from != null && to != null;
         Analysis cur;
         if (both) {
@@ -216,8 +258,14 @@ public final class Planner {
         Grid fromGrid = gridOf(cur), toGrid = gridOf(next);
         if (sung == null) sung = new Sung();
 
+        if ("crossfade".equals(picked) && both) return fallback(cur, next, earliest, "picked in the overview");
         if (fromGrid == null || cur.gridConfidence < MIN_GRID_CONFIDENCE) {
             return fallback(cur, next, earliest, both ? "this song has no beat grid at its end" : "songs not analysed in time");
+        }
+        if ("filter".equals(picked)) {
+            Grid g = toGrid != null && next.gridConfidence >= MIN_GRID_CONFIDENCE ? toGrid : null;
+            return filterMix(s, cur, next, fromGrid, g, requestedBars(s, cur, next, fromGrid, toGrid != null ? toGrid.downbeatSec : 0, true), pos, earliest,
+                    "picked in the overview", sung);
         }
         if (toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE) {
             return filterMix(s, cur, next, fromGrid, null, requestedBars(s, cur, next, fromGrid, 0, true), pos, earliest, "next song has no beat grid", sung);
@@ -504,6 +552,8 @@ public final class Planner {
         public double exitBars;
         /** Set when a side has no instrumental bars. */
         public String none;
+        /** What each deck does over the loop mix (spec/automix/plan.schema.json "curves"). */
+        public Curves curves;
 
         @Override
         public String toString() {
@@ -555,6 +605,7 @@ public final class Planner {
         p.rampBars = rampBars;
         p.totalBars = (int) Math.round(totalBars);
         p.exitBars = totalBars - ENTER_BARS - rampBars;
+        p.curves = Curves.loop(p);
         return p;
     }
 

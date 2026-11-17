@@ -34,8 +34,13 @@ public class FullArtTest {
     }
 
     @Test
-    public void fadeCoversTheLowerFortyTwoPercent() {
-        assertEquals(0.42f, FullArt.FADE, 1e-6f);
+    public void animatedCoverFadeBoundsFollowMetrolist() {
+        // fallback-free bounds on the S21 FE: title at 1250, artist ending at 1400 (px from the top)
+        float H = 2340;
+        float start = (1250 - H * FullArt.TITLE_OFFSET) / H;
+        assertEquals(0.454f, start, 1e-3f);
+        // the span is at least 18% of the height: the seam is start + 0.18, under the 0.85 cap
+        assertEquals(0.634f, Math.min(0.85f, Math.max(1400 / H, start + FullArt.MIN_FADE_SPAN)), 1e-3f);
     }
 
     // BitChord's card box: min(screen - 2 x 30dp, 560dp)

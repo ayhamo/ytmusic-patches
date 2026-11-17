@@ -1,0 +1,120 @@
+package app.ayham.extension.music.automix;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import org.junit.Test;
+
+public class OverviewTest {
+    private static Planner.Plan plan(Planner.Pick pick, double inBpm) {
+        return Planner.plan(new Planner.Settings(), "a", "b", PlannerTest.song("a", 120, 200, 0.9), PlannerTest.song("b", inBpm, 180, 0.9),
+                200, 60, 60 + PlannerTest.EARLIEST_LEAD, null, pick);
+    }
+
+    // the overview's per-pair pick (automix.js plan's pick)
+
+    @Test
+    public void aFadePickedIsAPlainCrossfade() {
+        Planner.Plan p = plan(new Planner.Pick("crossfade", 0), 120);
+        assertTrue(p.fallback);
+        assertEquals("crossfade", p.style);
+        assertEquals("picked in the overview", p.reason);
+    }
+
+    @Test
+    public void aFilterPickedIsAFilterMixOfAtMostEightBars() {
+        Planner.Plan p = plan(new Planner.Pick("filter", 16), 120);
+        assertEquals("filter", p.style);
+        assertEquals("picked in the overview", p.reason);
+        assertTrue(p.bars <= Planner.FILTER_MAX_BARS);
+    }
+
+    @Test
+    public void aLengthPickedComesBeforeTheSetting() {
+        Planner.Plan auto = plan(null, 120), four = plan(new Planner.Pick(null, 4), 120);
+        assertEquals("blend", four.style);
+        assertEquals(4, four.bars);
+        assertTrue(auto.bars != 4 || auto.durationSec == four.durationSec);
+    }
+
+    @Test
+    public void onlyAPickedLoopOrAutoLeavesTheLoopMixIn() {
+        assertTrue(new Planner.Pick("blend", 0).noLoop());
+        assertTrue(new Planner.Pick("filter", 0).noLoop());
+        assertTrue(new Planner.Pick("crossfade", 0).noLoop());
+        assertTrue(new Planner.Pick(null, 8).noLoop());
+        assertFalse(new Planner.Pick("loop", 0).noLoop());
+        assertFalse(new Planner.Pick(null, 0).noLoop());
+    }
+
+    // the overview's lanes on the mix's clock (automix-overview.js lanes)
+
+    @Test
+    public void blendLanesFollowThePlan() {
+        Overview o = new Overview();
+        o.plan = plan(null, 126); // the next song faster: the playing one is brought up to its tempo
+        o.curves = o.plan.curves;
+        o.D = o.plan.durationSec;
+        Planner.Plan p = o.plan;
+        assertEquals(p.mixOutTrackTime - 2, o.outTrack(-2), 1e-9);
+        assertEquals(p.mixOutTrackTime + 3 * p.outRate, o.outTrack(3), 1e-9);
+        assertTrue(Double.isNaN(o.outTrack(o.D + 1)));
+        assertTrue(Double.isNaN(o.inTrack(-1)));
+        assertEquals(p.mixInTrackTime + 2 * p.rate, o.inTrack(2), 1e-9);
+        assertEquals(p.mixInTrackTime + o.D * p.rate + 5, o.inTrack(o.D + 5), 1e-9);
+        // the volume from the plan's curves: full, then gone
+        assertEquals(1, o.gainOut(-3), 1e-9);
+        assertEquals(0, o.gainOut(o.D + 3), 1e-9);
+        assertEquals(0, o.gainIn(-3), 1e-9);
+        assertEquals(1, o.gainIn(o.D + 3), 1e-9);
+        // a beat every 60/bpm, bars on every 4th
+        java.util.List<double[]> beats = o.beats(0, 4);
+        assertEquals(60 / p.bpm, beats.get(1)[0] - beats.get(0)[0], 1e-9);
+        assertEquals(1, beats.get(0)[1], 0);
+        assertEquals(0, beats.get(1)[1], 0);
+    }
+
+    @Test
+    public void loopLanesRepeatTheLoops() {
+        Overview o = new Overview();
+        o.loop = PlannerTest.loopPlan();
+        o.x = Planner.loopSchedule(o.loop, 0);
+        o.curves = Curves.loop(o.loop);
+        o.D = o.x.elementAt;
+        assertEquals(o.loop.out.loopStart - 1, o.outTrack(-1), 1e-9);
+        assertEquals(o.loop.out.loopStart, o.outTrack(0), 1e-9);
+        assertTrue(Double.isNaN(o.outTrack(o.x.releaseAt + 1)));
+        assertEquals(o.loop.in.loopEnd + 2, o.inTrack(o.x.releaseAt + 2), 1e-9);
+        assertEquals(1, o.gainOut(0), 1e-9);
+        assertEquals(0, o.gainOut(o.x.releaseAt), 1e-9);
+        assertEquals("loop", o.style());
+        assertTrue(o.describe().startsWith("Loop mix · " + o.loop.totalBars + " bars"));
+    }
+
+    @Test
+    public void clockReadsMinutesAndSeconds() {
+        assertEquals("0:07", Overview.clock(7.4));
+        assertEquals("3:20", Overview.clock(200));
+    }
+
+    @Test
+    public void biquadBandsSplitLowAndHigh() throws Exception {
+        // a 50 Hz tone lands in the low band; the high band stays near silent
+        double[] lp = Waves.biquad(true, 200, 22050), hp = Waves.biquad(false, 2500, 22050);
+        double l1 = 0, l2 = 0, ly1 = 0, ly2 = 0, h1 = 0, h2 = 0, hy1 = 0, hy2 = 0, lowPeak = 0, highPeak = 0;
+        for (int i = 0; i < 22050; i++) {
+            double x = Math.sin(2 * Math.PI * 50 * i / 22050.0);
+            double lo = lp[0] * x + lp[1] * l1 + lp[2] * l2 - lp[3] * ly1 - lp[4] * ly2;
+            l2 = l1; l1 = x; ly2 = ly1; ly1 = lo;
+            double hi = hp[0] * x + hp[1] * h1 + hp[2] * h2 - hp[3] * hy1 - hp[4] * hy2;
+            h2 = h1; h1 = x; hy2 = hy1; hy1 = hi;
+            if (i > 2000) {
+                lowPeak = Math.max(lowPeak, Math.abs(lo));
+                highPeak = Math.max(highPeak, Math.abs(hi));
+            }
+        }
+        assertTrue("low " + lowPeak, lowPeak > 0.9);
+        assertTrue("high " + highPeak, highPeak < 0.01);
+    }
+}

@@ -154,6 +154,16 @@ final class AnimatedCover {
         return view != null && view.isShown() && view.getAlpha() > 0.5f && prepared;
     }
 
+    /** A frame of the shown clip at w x h (the background's blurred backdrop), or null. */
+    static android.graphics.Bitmap frame(int w, int h) {
+        if (!clipShowing() || !view.isAvailable()) return null;
+        try {
+            return view.getBitmap(w, h);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private static void applyVisibility(boolean wanted, boolean music) {
         if (player != null) {
             boolean ready = prepared; // not the first frame: a clip paused before it never shows one
@@ -267,14 +277,58 @@ final class AnimatedCover {
         return null;
     }
 
+    private static final java.util.concurrent.ExecutorService aheadWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final java.util.Set<String> aheadAsked = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /**
+     * Prism's CanvasAhead: the next two songs' music-video loops, fetched one at a time on an
+     * unmetered network, 15 s after they show up next in the queue (skipping through songs asks
+     * for none), so their canvas shows from the cache as they start.
+     */
+    static void ahead(java.util.List<String[]> next) {
+        if (cacheDir == null) return;
+        for (String[] s : next) {
+            if (s[0] == null || s[1] == null || !aheadAsked.add(s[0])) continue;
+            main.postDelayed(() -> aheadWorker.execute(() -> {
+                try {
+                    android.net.ConnectivityManager cm = (android.net.ConnectivityManager) app.ayham.extension.music.automix.Automix.context()
+                            .getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+                    if (cm == null || cm.isActiveNetworkMetered()) {
+                        aheadAsked.remove(s[0]);
+                        return;
+                    }
+                    String mvKey = "mv:" + s[0];
+                    if (CanvasCache.lookup(mvKey) != null) return;
+                    boolean[] none = {false};
+                    java.io.File f = VideoCanvas.clip(s[0], s[1], s[2], cacheDir, 1080, none);
+                    if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
+                    Log.i(TAG, "canvas ahead: '" + s[1] + "' " + (f != null ? "loop cached" : none[0] ? "has no video" : "not this time"));
+                } catch (Throwable t) {
+                    aheadAsked.remove(s[0]);
+                    Log.w(TAG, "canvas ahead: '" + s[1] + "' failed: " + t);
+                }
+            }), 15_000);
+        }
+    }
+
     private static void onSong(String title, String artist) {
-        stop();
         final String forKey = key;
+        // the old clip fades out over the next art (the backdrop holds its frame meanwhile), not cut
+        if (view != null && player != null && view.getAlpha() > 0f) {
+            MediaPlayer was = player;
+            view.animate().cancel();
+            view.animate().alpha(0f).setDuration(300).withEndAction(() -> {
+                if (player == was) stop();
+            }).start();
+        } else stop();
         // the clip is sized for the art on screen (from 360p up to 1080p)
         final int artPx = view == null ? 720 : Math.max(view.getWidth(), view.getHeight());
+        // full-screen art is about 3:4: Apple's tall clip fits it, the square one the normal art
+        final boolean tall = FullArt.on();
         Properties p = Features.props();
         String fixed = p.getProperty("canvasUrl", "").trim();
         boolean apple = "1".equals(p.getProperty("canvasApple"));
+        boolean video = !"0".equals(p.getProperty("canvasVideo"));
         lookupStart = System.currentTimeMillis();
         Log.i(TAG, "canvas: song '" + title + "' by '" + artist + "'");
         new Thread(() -> {
@@ -287,19 +341,17 @@ final class AnimatedCover {
                 Log.i(TAG, "canvas: '" + title + "' skipped before lookup");
                 return;
             }
-            String songKey = title + "|" + artist;
-            String saved = null;
+            String songKey = title + "|" + artist + (tall ? "|tall" : "");
+            String saved = null, vid = null;
             if (fixed.isEmpty()) {
-                // a downloaded song's clip by its video id first (works offline), then by title and artist
-                String vid = null;
+                // a downloaded song's clip by its video id first (works offline)
                 try {
                     vid = app.ayham.extension.music.automix.Automix.currentId();
                 } catch (Throwable ignored) {
                 }
                 if (vid != null) saved = CanvasCache.lookup(CanvasCache.idKey(vid));
-                if (saved == null) saved = CanvasCache.lookup(songKey);
             }
-            if (saved != null) {
+            if (saved != null && !saved.isEmpty()) {
                 // saved lookup: a miss for 24 h, or the clip file (also offline)
                 Log.i(TAG, "canvas: saved lookup: " + (saved.isEmpty() ? "no clip" : "clip " + new java.io.File(saved).getName()));
                 final String clip = saved;
@@ -308,26 +360,76 @@ final class AnimatedCover {
                 });
                 return;
             }
+            // Metrolist's source order: the song's music video first, then Apple's animated cover
+            if (fixed.isEmpty() && video && vid != null) {
+                String mvKey = "mv:" + vid, had = CanvasCache.lookup(mvKey);
+                if (had != null && !had.isEmpty()) {
+                    Log.i(TAG, "canvas: video loop from cache");
+                    main.post(() -> {
+                        if (forKey.equals(key)) play(had);
+                    });
+                    return;
+                }
+                if (had == null) {
+                    try {
+                        boolean[] none = {false};
+                        java.io.File f = VideoCanvas.clip(vid, title, artist, cacheDir, artPx, none);
+                        if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
+                        if (f != null) {
+                            String path = f.getAbsolutePath();
+                            Log.i(TAG, "canvas: video loop in " + (System.currentTimeMillis() - lookupStart) + " ms");
+                            main.post(() -> {
+                                if (forKey.equals(key)) play(path);
+                            });
+                            return;
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "canvas video: failed: " + t);
+                    }
+                    if (!forKey.equals(key)) return;
+                }
+            }
+            // then Apple's, saved by title and artist (a miss for 24 h, or the clip file)
+            if (fixed.isEmpty()) {
+                String hadApple = CanvasCache.lookup(songKey);
+                if (hadApple != null) {
+                    Log.i(TAG, "canvas: saved lookup: " + (hadApple.isEmpty() ? "no clip" : "clip " + new java.io.File(hadApple).getName()));
+                    if (!hadApple.isEmpty()) main.post(() -> {
+                        if (forKey.equals(key)) play(hadApple);
+                    });
+                    return;
+                }
+            }
             String url = null;
+            String alt = null;
             boolean failed = false;
             try {
                 if (!fixed.isEmpty()) url = fixed;
-                else if (apple) url = AppleCanvas.find(title, artist);
+                else if (apple) {
+                    String[] found = AppleCanvas.find(title, artist, tall);
+                    if (found != null) {
+                        url = found[0];
+                        alt = found[1];
+                    }
+                }
             } catch (Throwable t) {
                 failed = true;
                 Log.w(TAG, "canvas: lookup failed: " + t);
             }
             if (url != null && url.contains(".m3u8") && forKey.equals(key)) {
-                try {
-                    java.io.File f = HlsClip.fetch(url, cacheDir, artPx);
-                    url = f == null ? null : f.getAbsolutePath();
-                    // no file is a failed download, not "no clip": not saved as a miss for 24 h
-                    if (f == null) failed = true;
-                } catch (Throwable t) {
-                    Log.w(TAG, "canvas: clip download failed: " + t);
-                    url = null;
-                    failed = true;
+                // the clip for the art's shape, else the other shape's (Prism's tall alternate)
+                java.io.File f = null;
+                for (String u : new String[]{url, alt}) {
+                    if (u == null || f != null) continue;
+                    try {
+                        f = HlsClip.fetch(u, cacheDir, artPx);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "canvas: clip download failed: " + t);
+                    }
                 }
+                url = f == null ? null : f.getAbsolutePath();
+                // no file is a failed download, not "no clip": not saved as a miss for 24 h
+                if (f == null) failed = true;
             }
             if (!failed && fixed.isEmpty() && apple && (url == null || !url.contains(".m3u8"))) CanvasCache.put(songKey, url);
             final String found = url;
@@ -399,13 +501,34 @@ final class AnimatedCover {
         prepared = false;
     }
 
-    /** Center-crop the clip into the square art. */
+    /**
+     * Crop the clip into the art: inside a music video's baked-in bars, at its judged place across
+     * the picture (the .crop sidecar); centred for anything else.
+     */
     private static void fit() {
         if (view == null || videoW == 0 || videoH == 0 || view.getWidth() == 0) return;
         float vw = view.getWidth(), vh = view.getHeight();
-        float scale = Math.max(vw / videoW, vh / videoH);
+        String path = playingUrl == null ? null : playingUrl.startsWith("file://") ? playingUrl.substring(7) : playingUrl;
+        float[] c = VideoCanvas.cropOf(path);
+        float cx = c == null ? 0.5f : c[0];
+        float ax = c == null ? 0 : c[1] * videoW, ay = c == null ? 0 : c[2] * videoH;
+        float aw = c == null ? videoW : videoW * (1 - c[1] - c[3]), ah = c == null ? videoH : videoH * (1 - c[2] - c[4]);
+        float sx, sy, sw, sh;
+        if (aw / ah > vw / vh) {
+            sh = ah;
+            sw = ah * vw / vh;
+            sx = ax + cx * (aw - sw);
+            sy = ay;
+        } else {
+            sw = aw;
+            sh = aw * vh / vw;
+            sx = ax;
+            sy = ay + (ah - sh) / 2;
+        }
+        // the view first stretches the whole frame over itself; map the chosen part onto the view
+        android.graphics.RectF src = new android.graphics.RectF(sx * vw / videoW, sy * vh / videoH, (sx + sw) * vw / videoW, (sy + sh) * vh / videoH);
         Matrix m = new Matrix();
-        m.setScale(videoW * scale / vw, videoH * scale / vh, vw / 2, vh / 2);
+        m.setRectToRect(src, new android.graphics.RectF(0, 0, vw, vh), Matrix.ScaleToFit.FILL);
         view.setTransform(m);
     }
 }

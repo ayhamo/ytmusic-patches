@@ -100,6 +100,29 @@ public class MixTest {
     }
 
     @Test
+    public void theIncomingDeckGlidesBackAsThePlansCurvesSay() {
+        Planner.Plan p = Planner.plan(new Planner.Settings(), "a", "b", PlannerTest.song("a", 120, 200, 0.9),
+                PlannerTest.song("b", 126, 180, 0.9), 200, 60, 60 + PlannerTest.EARLIEST_LEAD, null);
+        p.rate = 1.05; // the next song stretched 5% through the blend
+        Mix m = Mix.blend(p, "a", "b", 200);
+        double end = m.t0 + m.D;
+        assertEquals(1.05, m.in.rateAt(end - 0.1), 1e-9);
+        // 0.25% every 0.25 s (about 20 steps over 5 s), never a jump bigger than one step
+        double glideEnd = end + Math.ceil(Math.abs(p.rate - 1) / Mix.GLIDE_STEP) * Mix.GLIDE_STEP_SEC;
+        double prev = 1.05;
+        for (double t = end + 0.01; t < glideEnd; t += 0.25) {
+            double r = m.in.rateAt(t);
+            assertTrue(r <= prev + 1e-9 && prev - r <= Mix.GLIDE_STEP + 1e-9);
+            prev = r;
+        }
+        assertEquals(1, m.in.rateAt(glideEnd + 0.1), 1e-9);
+        // the curves the overview draws end the glide at the same time
+        double[][] glide = Curves.blend(p).in.get("rate");
+        assertEquals(glideEnd - m.t0, glide[glide.length - 1][0], 1e-9);
+        assertTrue(m.elementAt >= glideEnd);
+    }
+
+    @Test
     public void loopMixDecksWrapAndRelease() {
         Planner.LoopPlan lp = PlannerTest.loopPlan();
         Mix m = Mix.loop(lp, "a", "b", 200);

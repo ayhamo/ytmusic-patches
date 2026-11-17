@@ -121,6 +121,7 @@ public class SpecFixturesTest {
         m.put("rampBars", (double) lp.rampBars);
         m.put("exitBars", lp.exitBars);
         m.put("totalBars", (double) lp.totalBars);
+        m.put("curves", curvesJson(lp.curves));
         return m;
     }
 
@@ -160,6 +161,26 @@ public class SpecFixturesTest {
         m.put("bpm", p.bpm);
         m.put("outBpm", p.outBpm);
         m.put("inBpm", p.inBpm);
+        m.put("curves", curvesJson(p.curves));
+        return m;
+    }
+
+    private static Map<String, Object> curvesJson(Curves c) {
+        if (c == null) return null;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("durationSec", c.durationSec);
+        m.put("out", deckJson(c.out));
+        m.put("in", deckJson(c.in));
+        return m;
+    }
+
+    private static Map<String, Object> deckJson(Map<String, double[][]> deck) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (Map.Entry<String, double[][]> e : deck.entrySet()) {
+            List<Object> pts = new ArrayList<>();
+            for (double[] p : e.getValue()) pts.add(Arrays.asList(p[0], p[1]));
+            m.put(e.getKey(), pts);
+        }
         return m;
     }
 
@@ -170,12 +191,7 @@ public class SpecFixturesTest {
             if (Math.abs(w - g) > TOLERANCE) diffs.add(path + ": want " + w + ", got " + g);
         } else if (want instanceof Map && got instanceof Map) {
             Map<String, Object> w = (Map<String, Object>) want, g = (Map<String, Object>) got;
-            for (String k : w.keySet()) {
-                // the mix curves came with the spec's second version; our planner doesn't emit them
-                // yet (the first Phase 2 task ports automix.js blendCurves/loopCurves, then this goes)
-                if (k.equals("curves") && !g.containsKey(k)) continue;
-                compare(path + "." + k, w.get(k), g.get(k), diffs);
-            }
+            for (String k : w.keySet()) compare(path + "." + k, w.get(k), g.get(k), diffs);
             for (String k : g.keySet()) if (!w.containsKey(k)) diffs.add(path + "." + k + ": not in the golden plan");
         } else if (want instanceof List && got instanceof List) {
             List<Object> w = (List<Object>) want, g = (List<Object>) got;

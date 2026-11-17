@@ -70,6 +70,11 @@ public final class Features {
         cachedAt = 0;
     }
 
+    /** One spike.properties value (for the automix package), or null. */
+    public static String prop(String key) {
+        return props().getProperty(key);
+    }
+
     static synchronized Properties props() {
         long now = System.currentTimeMillis();
         if (now - cachedAt < 2000) return cachedProps;
@@ -323,6 +328,13 @@ public final class Features {
         return videoId != null && SongVersion.musicVideo(videoId);
     }
 
+    /** The next songs in the queue ({id, title, artist}): their canvas loops fetched ahead. */
+    public static void canvasAhead(java.util.List<String[]> next) {
+        Properties p = props();
+        if (!"1".equals(p.getProperty("canvas")) || "0".equals(p.getProperty("canvasVideo"))) return;
+        AnimatedCover.ahead(next);
+    }
+
     public static void lookAhead(String videoId) {
         if (videoId == null || !"1".equals(props().getProperty("autoSong"))) return;
         SongVersion.prefetch(videoId);
@@ -532,10 +544,14 @@ public final class Features {
 
     /** The second stats line: automix's status for this and the next song. */
     static String currentAutomixStats() {
-        if ("0".equals(props().getProperty("stats"))) return null;
+        if ("0".equals(props().getProperty("stats"))) {
+            app.ayham.extension.music.automix.Automix.noStatusWhy = "stats for nerds switched off";
+            return null;
+        }
         try {
             return app.ayham.extension.music.automix.Automix.status();
         } catch (Throwable t) {
+            app.ayham.extension.music.automix.Automix.noStatusWhy = "status failed: " + t;
             return null;
         }
     }

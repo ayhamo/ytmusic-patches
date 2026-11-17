@@ -12,6 +12,8 @@ import java.util.Locale;
 public final class Mix {
     /** The old song moves to our deck this long before its blend (its speed-up included). */
     public static final double HAND_LEAD = 4;
+    /** The incoming deck's glide back to x1.0 after a blend: this much speed every [GLIDE_STEP_SEC]. */
+    static final double GLIDE_STEP = 0.0025, GLIDE_STEP_SEC = 0.25;
     /** YT is asked for the next song this long before the deck needs its player. */
     public static final double NEXT_LEAD = 2.5;
     public static final double H = 0.025;
@@ -186,6 +188,11 @@ public final class Mix {
 
     /** crossfade.js djShape: AutoDJ's fader and filter curves (gIn, gOut, inHp, outHp, outLp). */
     static float[][] djShape(String style, double clashIn, double D, double bpm) {
+        return djShape(style, clashIn, D, bpm, (int) Math.max(EP, Math.min(4000, Math.ceil(D * 40))));
+    }
+
+    /** The same over [n] points (the plan's curves sample it more coarsely than the engine plays it). */
+    static float[][] djShape(String style, double clashIn, double D, double bpm, int n) {
         double clash = clamp(clashIn, 0, 1);
         double beat = bpm > 0 ? 60 / bpm : 0;
         double grid = beat > 0 ? D / beat : 0;
@@ -194,7 +201,6 @@ public final class Mix {
         double swapAt = onBar.applyAsDouble(0.5);
         java.util.function.DoubleUnaryOperator h = (p) -> clamp((p - (swapAt - w)) / w, 0, 1);
         final double S = Math.PI / 2;
-        int n = (int) Math.max(EP, Math.min(4000, Math.ceil(D * 40)));
         float[] gIn = new float[n], gOut = new float[n], inHp = new float[n], outHp = new float[n], outLp = new float[n];
         boolean filter = style.equals("filter");
         double top = filter ? glide(1200, 2400, clash) : glide(520, 950, clash);
@@ -274,7 +280,8 @@ public final class Mix {
         m.out.needTo = mixOut + (m.D + 1) * R + 1;
         m.outEnd = m.t0 + (outDuration - mixOut) / R;
 
-        // incoming: [rate] through the blend, then back to its own tempo in 8 steps 3 s apart (glideToUnity)
+        // incoming: [rate] through the blend, then back to its own tempo on our deck, 0.25% every
+        // 0.25 s (the extension's deckGlideBack, and the plan's curves): a smooth glide, not steps
         double mixIn = p.mixInTrackTime;
         List<double[]> ik = new ArrayList<>();
         ik.add(new double[]{m.t0, mixIn});
@@ -284,12 +291,17 @@ public final class Mix {
             ik.add(new double[]{it + 0.5, ip + 0.5 * rate});
             it += 0.5;
         } else {
-            for (int i = 0; i < 8; i++) {
-                double r = rate + (1 - rate) * i / 8.0;
-                it += 3;
-                ip += 3 * r;
+            int steps = (int) Math.ceil(Math.abs(rate - 1) / GLIDE_STEP);
+            double r = rate;
+            for (int i = 1; i <= steps; i++) {
+                it += GLIDE_STEP_SEC;
+                ip += GLIDE_STEP_SEC * r;
                 ik.add(new double[]{it, ip});
+                r = i == steps ? 1 : rate + (1 - rate) * i / (double) steps;
             }
+            // ...and on at x1.0 to the takeover
+            ik.add(new double[]{it + 0.5, ip + 0.5});
+            it += 0.5;
         }
         m.in.knots(ik);
         m.in.runOn = true;

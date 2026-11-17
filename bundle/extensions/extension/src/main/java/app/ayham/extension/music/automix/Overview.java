@@ -1,0 +1,141 @@
+package app.ayham.extension.music.automix;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * The Automix overview's view of one mix (crossfade.js overviewSnapshot and automix-overview.js
+ * lanes): the coming mix, or the one playing, on its own clock, 0 at its start. What each song
+ * plays at mix time t and how loud, read from the plan's curves (plan.schema.json), so it draws
+ * any engine's plan unchanged.
+ */
+public final class Overview {
+    /** Set: nothing to draw, and why (a pick for the pair can still be shown and cleared). */
+    public String why;
+    public String fromId, toId, pairKey, fromTitle, fromArtist, toTitle, toArtist;
+    public Planner.Pick pick;
+    public Planner.Plan plan;
+    public Planner.LoopPlan loop;
+    public Planner.LoopSchedule x;
+    public Curves curves;
+    /** The mix's length on its clock (a loop mix: to the handover). */
+    public double D;
+    /** Where the music is on the mix's clock (negative: before it), NaN unknown. */
+    public double at = Double.NaN;
+    /** Seconds until the decks take over (before the mix), NaN unknown. */
+    public double left = Double.NaN;
+    public double previewAt;
+    public boolean live, editable;
+    /** Why there is no loop mix for this pair, when the search found none. */
+    public String loopNone;
+    /** Work still running for this pair ("Analysing the next song: finding the beats"), or null. */
+    public String waiting;
+    /** How far [waiting] is, 0..1, or -1 when unknown. */
+    public float waitDone = -1;
+    /** The song being analysed, or null. */
+    public String waitingFor;
+    /** The plan is a stand-in fade until the analysis lands (it is planned again then). */
+    public boolean provisional;
+
+    public String style() {
+        return loop != null ? "loop" : plan.style;
+    }
+
+    public int bars() {
+        return loop != null ? loop.totalBars : plan.bars;
+    }
+
+    /** "Blend · 8 bars · 120→124 BPM · 16.0 s" (automix-overview.js describe). */
+    public String describe() {
+        if (loop != null) {
+            return String.format(Locale.ROOT, "Loop mix · %d bars · %d→%d BPM · %.1f s", loop.totalBars, Math.round(loop.out.bpm), Math.round(loop.in.bpm), D);
+        }
+        if (provisional) return String.format(Locale.ROOT, "Fade for now · %.1f s · replanned once analysed", D);
+        if ("crossfade".equals(plan.style)) return String.format(Locale.ROOT, "Fade · %.1f s", D) + (plan.reason != null ? " · " + plan.reason : "");
+        String bpm = plan.inBpm > 0 && Math.round(plan.inBpm) != Math.round(plan.bpm)
+                ? Math.round(plan.outBpm > 0 ? plan.outBpm : plan.bpm) + "→" + Math.round(plan.inBpm) + " BPM"
+                : Math.round(plan.bpm) + " BPM";
+        return String.format(Locale.ROOT, "%s · %d bars · %s · %.1f s", "filter".equals(plan.style) ? "Filter mix" : "Blend", plan.bars, bpm, D);
+    }
+
+    /** The outgoing song's second at mix time t, NaN while it is silent. */
+    public double outTrack(double t) {
+        if (x != null) {
+            if (t < 0) return loop.out.loopStart + t;
+            return t < x.releaseAt ? seg(x.outChanges, t) : Double.NaN;
+        }
+        if (t < 0) return plan.mixOutTrackTime + t;
+        return t <= D ? plan.mixOutTrackTime + t * plan.outRate : Double.NaN;
+    }
+
+    /** The incoming song's second at mix time t, NaN while it is silent. */
+    public double inTrack(double t) {
+        if (t < 0) return Double.NaN;
+        if (x != null) return t < x.releaseAt ? seg(x.inChanges, t) : loop.in.loopEnd + (t - x.releaseAt);
+        double rate = "blend".equals(plan.style) ? plan.rate : 1;
+        return t <= D ? plan.mixInTrackTime + t * rate : plan.mixInTrackTime + D * rate + (t - D);
+    }
+
+    private static double seg(List<Planner.Change> changes, double t) {
+        Planner.Change c = null;
+        for (Planner.Change ch : changes) {
+            if (ch.output <= t) c = ch;
+            else break;
+        }
+        return c != null && c.active ? c.input + (t - c.output) * c.rate : Double.NaN;
+    }
+
+    public double gainOut(double t) {
+        return value(curves.out.get("gain"), t, 1);
+    }
+
+    public double gainIn(double t) {
+        return value(curves.in.get("gain"), t, 0);
+    }
+
+    /** A curve at t: held before its first point and after its last, linear between (plan.schema.json). */
+    static double value(double[][] pts, double t, double neutral) {
+        if (pts == null || pts.length == 0) return neutral;
+        if (t <= pts[0][0]) return pts[0][1];
+        for (int i = 1; i < pts.length; i++) {
+            if (t <= pts[i][0]) {
+                double a = pts[i - 1][0], b = pts[i][0];
+                return pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * ((t - a) / Math.max(1e-6, b - a));
+            }
+        }
+        return pts[pts.length - 1][1];
+    }
+
+    /** The beats to draw between t0 and t1, {t, 1 on a bar's first beat}: the loop mix's own, else the blend's tempo. */
+    public List<double[]> beats(double t0, double t1) {
+        List<double[]> out = new ArrayList<>();
+        if (x != null) {
+            for (int k = 0; k < x.beatTimes.length; k++) out.add(new double[]{x.beatTimes[k], k % 4 == 0 ? 1 : 0});
+            return out;
+        }
+        if (!(plan.bpm > 0) || "crossfade".equals(plan.style)) return out;
+        double b = 60 / plan.bpm;
+        for (long k = (long) Math.ceil(t0 / b); k * b <= t1; k++) out.add(new double[]{k * b, ((k % 4) + 4) % 4 == 0 ? 1 : 0});
+        return out;
+    }
+
+    /** "120 BPM", "8A · F minor", "3:20" from the song's analysis. */
+    public static List<String> tags(String id) {
+        List<String> t = new ArrayList<>();
+        Analysis a = id == null || Automix.context() == null ? null : Analyzer.get(Automix.context(), id);
+        if (a == null) {
+            if (id != null && Analyzer.busy(id)) t.add("Analysing…");
+            return t;
+        }
+        if (a.bpm > 0) t.add(Math.round(a.bpm) + " BPM");
+        if (a.camelotNum > 0) t.add(a.camelotNum + "" + a.camelotLetter + (a.keyName != null && !a.keyName.isEmpty() ? " · " + a.keyName : ""));
+        if (a.durationSec > 0) t.add(clock(a.durationSec));
+        return t;
+    }
+
+    public static String clock(double s) {
+        long v = Math.max(0, Math.round(Double.isNaN(s) ? 0 : s));
+        return v / 60 + ":" + String.format(Locale.ROOT, "%02d", v % 60);
+    }
+}

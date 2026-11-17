@@ -39,7 +39,7 @@ public final class Automix {
     private Automix() {
     }
 
-    static Context context() {
+    public static Context context() {
         return app;
     }
 
@@ -121,6 +121,10 @@ public final class Automix {
         return curId;
     }
 
+    static String nextIdNow() {
+        return nextId;
+    }
+
     /** The song version lookup reads the queue too (for the next song), with or without automix. */
     public static void refreshQueue() {
         main.postDelayed(Automix::readQueue, 1500);
@@ -152,11 +156,27 @@ public final class Automix {
                     String cur = curItem == null ? null : (String) videoId.invoke(access, curItem);
                     String next = nextItem == null ? null : (String) videoId.invoke(access, nextItem);
                     curTitle = curItem == null ? null : (String) title.invoke(access, curItem);
+                    if (curItem != null) remember((String) videoId.invoke(access, curItem), curTitle, (String) artist.invoke(access, curItem));
+                    if (nextItem != null) remember((String) videoId.invoke(access, nextItem), (String) title.invoke(access, nextItem), (String) artist.invoke(access, nextItem));
                     curArtist = curItem == null ? null : (String) artist.invoke(access, curItem);
                     nextTitle = nextItem == null ? null : (String) title.invoke(access, nextItem);
                     nextArtist = nextItem == null ? null : (String) artist.invoke(access, nextItem);
                     curId = cur;
                     if (next != null && !next.equals(nextId)) Features.lookAhead(next);
+                    // the next two songs' canvas loops, fetched ahead (Prism's CanvasAhead)
+                    java.util.List<String[]> ahead = new java.util.ArrayList<>();
+                    Object[] auto = null;
+                    for (int k = 1; ahead.size() < 2 && k <= 4; k++) {
+                        Object it = items != null && current + k < items.length ? items[current + k] : null;
+                        if (it == null) {
+                            if (auto == null) auto = (Object[]) type.getMethod("patch_jamAutoplayItems").invoke(access);
+                            int ai = k - (items == null ? 0 : Math.max(0, items.length - current - 1)) - 1;
+                            it = auto != null && ai >= 0 && ai < auto.length ? auto[ai] : null;
+                        }
+                        if (it == null) break;
+                        ahead.add(new String[]{(String) videoId.invoke(access, it), (String) title.invoke(access, it), (String) artist.invoke(access, it)});
+                    }
+                    Features.canvasAhead(ahead);
                     nextId = next;
                     queueAt = SystemClock.elapsedRealtime();
                 } catch (Throwable t) {
@@ -180,6 +200,9 @@ public final class Automix {
         Planner.Plan plan;
         String shown;
         double takeover;
+        /** The song's length when planned (a skip changes it before the queue is read again). */
+        double dur;
+        boolean loopPending;
         /** The loop mix chosen for this song, or null (a blend or crossfade). */
         Planner.LoopPlan loop;
 
@@ -191,6 +214,7 @@ public final class Automix {
     private static Song amx = new Song("");
     private static volatile Engine engine;
     private static Object lastPlayer;
+    private static double lastDur, lastPos;
 
     // the loop mix, prepared once per pair in the background
     private static volatile String loopKey = "", loopState = "idle";
@@ -217,7 +241,14 @@ public final class Automix {
         }
         if (player == null) return;
         long now = SystemClock.elapsedRealtime();
-        if (player != lastPlayer || now - queueAt > 1500) {
+        double pos0 = position(player) / 1000.0, dur0 = duration(player) / 1000.0;
+        // a skip: the length changes or the position jumps back, so the queue is read now
+        boolean jumped = dur0 > 0 && (Math.abs(dur0 - lastDur) > 0.5 || pos0 < lastPos - 3);
+        if (dur0 > 0) {
+            lastDur = dur0;
+            lastPos = pos0;
+        }
+        if (player != lastPlayer || jumped || now - queueAt > 1500) {
             lastPlayer = player;
             readQueue();
         }
@@ -247,13 +278,17 @@ public final class Automix {
         Planner.Sung sung = sung(id, next);
         boolean lyricsWait = (sung.out == null && SungLyrics.pending(id)) || (sung.in == null && SungLyrics.pending(next));
         Planner.Settings s = settings();
-        Planner.Plan p = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung);
+        // the overview's pick for this pair: a blend, filter mix or fade picked means no loop mix
+        Planner.Pick pick = next == null ? null : pick(id + ">" + next);
+        boolean noLoop = pick != null && pick.noLoop();
+        Planner.Plan p = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, pick);
         // a pair is looked at again when its lyrics arrive
         String pair = id + ">" + next + "|" + (sung.out != null ? "L" : "m") + (sung.in != null ? "L" : "m");
-        if (next != null && from != null && to != null && !lyricsWait && (!pair.equals(loopKey)
+        if (!noLoop && next != null && from != null && to != null && !lyricsWait && (!pair.equals(loopKey)
                 || (loopState.equals("missing") && SystemClock.elapsedRealtime() >= loopRetryAt))) prepareLoop(id, next, from, to, pos, sung, pair);
-        boolean loopPending = lyricsWait || (pair.equals(loopKey) && (loopState.equals("loading") || loopState.equals("missing")));
-        Planner.LoopPlan lp = pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
+        boolean loopPending = !noLoop && (lyricsWait || pair.equals(loopKey) && (loopState.equals("loading") || loopState.equals("missing")));
+        Planner.LoopPlan lp = !noLoop && pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
+        amx.loopPending = loopPending;
         boolean loop = lp != null && lp.out.loopStart > pos + EARLIEST_LEAD;
         double takeover = loop ? lp.out.loopStart : p.mixOutTrackTime - Mix.HAND_LEAD - (p.style.equals("blend") ? p.rampSongSec : 0);
         String shown = loop ? lp.toString() : p.toString();
@@ -266,6 +301,7 @@ public final class Automix {
         amx.plan = p;
         amx.loop = loop ? lp : null;
         amx.takeover = takeover;
+        amx.dur = dur;
         if (!loop && (p.fallback || next == null)) return;   // Morphe's crossfade, as the extension's plain one
         if (!loop && !(p.durationSec >= 1)) return;
         if (pos < takeover - TAIL_LEAD || (loopPending && pos < takeover - 8)) return;
@@ -367,14 +403,231 @@ public final class Automix {
         return e != null && e.running() && e.loopHolding();
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // The Automix overview (the extension's automix-overview.js reads crossfade.js the same way)
+
+    private static final String KEY_PICKS = "ayham_automix_pair_picks";
+    private static final int MAX_PICKS = 300;
+    /** "a>b" → what the overview asked for that pair; oldest first. */
+    private static java.util.LinkedHashMap<String, Planner.Pick> picks;
+    private static final java.util.Map<String, String[]> names = new java.util.LinkedHashMap<String, String[]>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(java.util.Map.Entry<String, String[]> e) {
+            return size() > 20;
+        }
+    };
+
+    private static void remember(String id, String title, String artist) {
+        if (id == null || title == null) return;
+        synchronized (names) {
+            names.put(id, new String[]{title, artist});
+        }
+    }
+
+    /** {title, artist} of a song seen in the queue, or null. */
+    public static String[] names(String id) {
+        if (id == null) return null;
+        synchronized (names) {
+            return names.get(id);
+        }
+    }
+
+    private static java.util.LinkedHashMap<String, Planner.Pick> picks() {
+        if (picks != null) return picks;
+        picks = new java.util.LinkedHashMap<>();
+        if (app == null) return picks;
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(prefs(app).getString(KEY_PICKS, "{}"));
+            for (java.util.Iterator<String> it = o.keys(); it.hasNext(); ) {
+                String k = it.next();
+                org.json.JSONObject v = o.getJSONObject(k);
+                String style = v.isNull("style") ? null : v.optString("style", null);
+                picks.put(k, new Planner.Pick(style, v.optInt("bars", 0)));
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "pair picks unreadable", t);
+        }
+        return picks;
+    }
+
+    /** The overview's pick for a pair ("a>b"), or null: Auto. */
+    public static Planner.Pick pick(String pairKey) {
+        return picks().get(pairKey);
+    }
+
+    /**
+     * A pick for a pair (style null and bars 0: Auto, the pick removed), kept for the next time
+     * the pair plays. The pair playing now is planned again, unless its mix has begun.
+     */
+    public static void setPairPick(String pairKey, String style, int bars) {
+        java.util.LinkedHashMap<String, Planner.Pick> m = picks();
+        m.remove(pairKey);
+        if (style != null || bars > 0) m.put(pairKey, new Planner.Pick(style, bars));
+        while (m.size() > MAX_PICKS) m.remove(m.keySet().iterator().next());
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            for (java.util.Map.Entry<String, Planner.Pick> e : m.entrySet()) {
+                org.json.JSONObject v = new org.json.JSONObject();
+                v.put("style", e.getValue().style == null ? org.json.JSONObject.NULL : e.getValue().style);
+                v.put("bars", e.getValue().bars);
+                o.put(e.getKey(), v);
+            }
+            if (app != null) prefs(app).edit().putString(KEY_PICKS, o.toString()).apply();
+        } catch (Throwable t) {
+            Log.w(TAG, "pair picks not saved", t);
+        }
+        Log.i(TAG, "overview pick for " + pairKey + ": " + (style == null ? "auto" : style) + ", " + (bars > 0 ? bars + " bars" : "auto length"));
+        // planned afresh (an armed mix, not started yet, is dropped for the new plan)
+        if (pairKey.equals(curId + ">" + nextId)) {
+            Engine e = engine;
+            if (e != null && e.running() && !e.tookOverOnce()) e.abort("replanned", false);
+            if (!amx.state.equals("mixing")) {
+                amx.state = "idle";
+                amx.shown = null;
+            }
+        }
+    }
+
+    /** The playing song jumps to [sec] (the overview's preview: just before the mix). */
+    public static boolean seekTo(double sec) {
+        try {
+            Object p = PlayerTap.current();
+            if (!(p instanceof app.ayham.extension.music.features.SeekAccess)) return false;
+            ((app.ayham.extension.music.features.SeekAccess) p).ayham_seekTo(Math.round(sec * 1000));
+            Log.i(TAG, String.format(Locale.US, "overview preview: jump to %.1f s", sec));
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static double curDur() {
+        try {
+            Object p = PlayerTap.current();
+            return p == null ? -1 : duration(p) / 1000.0;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** The coming mix, or the one playing, for the overview (crossfade.js overviewSnapshot). */
+    public static Overview overview() {
+        Overview o = new Overview();
+        if (!enabled()) {
+            o.why = "Automix is off";
+            return o;
+        }
+        Engine e = engine;
+        boolean live = e != null && e.running() && e.tookOverOnce();
+        String id = curId, next = nextId;
+        if (!live && id == null) {
+            o.why = "Nothing is playing";
+            return o;
+        }
+        Planner.Plan plan = null;
+        Planner.LoopPlan loop = null;
+        if (live) {
+            plan = e.m.plan;
+            loop = e.m.loopPlan;
+            o.fromId = e.m.outId;
+            o.toId = e.m.inId;
+        } else {
+            Song s = amx;
+            if (next == null || next.equals(id)) {
+                o.why = "Nothing queued after this song";
+                return o;
+            }
+            if (id.equals(s.id) && s.shown != null && !"done".equals(s.state) && (!(s.dur > 0) || Math.abs(s.dur - curDur()) < 0.5)) {
+                loop = s.loop;
+                plan = loop == null ? s.plan : null;
+            }
+            o.fromId = id;
+            o.toId = next;
+        }
+        o.pairKey = o.fromId + ">" + o.toId;
+        o.pick = pick(o.pairKey);
+        if (!live) {
+            Object[] pf = Analyzer.progress(o.fromId), pt = Analyzer.progress(o.toId);
+            if (pf != null || pt != null) {
+                Object[] pr = pf != null ? pf : pt;
+                o.waiting = "Analysing " + (pf != null ? "this song" : "the next song") + ": " + pr[0];
+                o.waitDone = (Float) pr[1];
+                o.waitingFor = pf != null ? o.fromId : o.toId;
+            } else if (o.fromId.equals(id) && amx.loopPending) {
+                o.waiting = "Looking for a loop mix";
+                o.waitDone = -1;
+            }
+        }
+        if (plan == null && loop == null) {
+            o.why = live ? "A plain crossfade is playing" : "Planning the mix…";
+            return o;
+        }
+        o.live = live;
+        o.plan = plan;
+        o.loop = loop;
+        if (loop != null) {
+            o.x = Planner.loopSchedule(loop, 0);
+            o.D = o.x.elementAt;
+            o.curves = loop.curves;
+        } else {
+            o.D = plan.durationSec;
+            o.curves = plan.curves;
+        }
+        String[] a = names(o.fromId), b = names(o.toId);
+        if (a != null) {
+            o.fromTitle = a[0];
+            o.fromArtist = a[1];
+        }
+        if (b != null) {
+            o.toTitle = b[0];
+            o.toArtist = b[1];
+        }
+        double start = loop != null ? loop.out.loopStart : plan.mixOutTrackTime;
+        double takeover = loop != null ? loop.out.loopStart : plan.mixOutTrackTime - Mix.HAND_LEAD - ("blend".equals(plan.style) ? plan.rampSongSec : 0);
+        if (live) {
+            double t = e.mixNow();
+            o.at = Double.isNaN(t) ? Double.NaN : t - e.m.t0;
+        } else {
+            try {
+                Object player = PlayerTap.current();
+                double pos = player == null ? -1 : position(player) / 1000.0;
+                if (pos >= 0) {
+                    o.at = pos - start;
+                    o.left = takeover - pos;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        o.editable = !live && o.fromId.equals(id);
+        // a fade planned because the analysis isn't there yet, with time left for it: only for now
+        o.provisional = !live && loop == null && plan.fallback && o.waiting != null && o.waitingFor != null
+                && (Double.isNaN(o.left) || o.left > TAIL_LEAD);
+        o.previewAt = loop != null ? start - Mix.HAND_LEAD - 8 : start - Mix.HAND_LEAD - (TAIL_LEAD + 3 + plan.rampSongSec);
+        if (loopKey.startsWith(o.pairKey + "|")) {
+            Planner.LoopPlan lp = loopPlan;
+            if ("ready".equals(loopState) && lp != null && lp.none != null) o.loopNone = lp.none;
+        }
+        return o;
+    }
+
+    /** Why [status] last returned null (the final phone pass looks for the line vanishing, item 6). */
+    public static volatile String noStatusWhy;
+
     /**
      * Automix's stats-for-nerds line, as BitChord's (CrossfadeController describeAutomix): the mix
      * running now, else the one planned for this song, else both songs' analysis.
      */
     public static String status() {
-        if (!enabled()) return null;
+        if (!enabled()) {
+            noStatusWhy = "automix switched off";
+            return null;
+        }
         String id = curId, next = nextId;
-        if (id == null) return null;
+        if (id == null) {
+            noStatusWhy = "no current song known";
+            return null;
+        }
+        noStatusWhy = null;
         Engine e = engine;
         if (e != null && e.running() && e.tookOverOnce()) {
             Mix m = e.m;
@@ -389,8 +642,8 @@ public final class Automix {
         } catch (Throwable t) {
             player = null;
         }
-        double pos = player == null ? -1 : position(player) / 1000.0;
-        if (id.equals(s.id) && next != null && pos >= 0 && !"done".equals(s.state)) {
+        double pos = player == null ? -1 : position(player) / 1000.0, dur = player == null ? -1 : duration(player) / 1000.0;
+        if (id.equals(s.id) && next != null && pos >= 0 && Math.abs(dur - s.dur) < 0.5 && !"done".equals(s.state)) {
             double in = Math.max(0, s.takeover - pos);
             if (s.loop != null) return "Automix · loop mix in " + (int) Math.ceil(in) + " s · " + describeLoop(s.loop);
             Planner.Plan p = s.plan;

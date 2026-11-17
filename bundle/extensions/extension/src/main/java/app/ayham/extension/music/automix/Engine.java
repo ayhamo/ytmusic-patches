@@ -56,6 +56,8 @@ final class Engine {
 
     static float gate(Object player, float volume) {
         if (!selfCall && player != null) ytAsked.put(player, volume);
+        // the stream deck plays this song: YT's player stays silent under it
+        if (player != null && StreamDeck.mutes(player)) return 0f;
         if (!holding) return volume;
         return player == released ? volume : 0f;
     }
@@ -97,6 +99,9 @@ final class Engine {
     private final List<Long> errs = new ArrayList<>();
     private long lastSeekCheck;
     private String inIdSeen;
+    /** The incoming song's stream deck (lining up silently during the mix), and whether it took the handover. */
+    private StreamDeck deck;
+    private boolean deckTook, deckReleased;
 
     private static Biquad[] chain() {
         return new Biquad[]{new Biquad(Biquad.LOWSHELF, SR, 250), new Biquad(Biquad.HIGHSHELF, SR, 4000),
@@ -431,6 +436,13 @@ final class Engine {
                 }
             }
         }
+        // the stream deck playing the outgoing song lets go where the decks take over (set ahead of
+        // its write-ahead; it fades out over 25 ms at that song second)
+        if (!tookOver && !deckReleased && mix >= -0.3) {
+            deckReleased = true;
+            StreamDeck a = StreamDeck.audible();
+            if (a != null && a.player == outPlayer) a.release(m.takeoverSong);
+        }
         if (!tookOver && mix >= -0.012) {
             tookOver = true;
             holding = true;
@@ -478,9 +490,20 @@ final class Engine {
         // A nudge ends (silent) within 1 s, then the speed settles 300 ms.
         boolean speedSettled = nudgeUntil == 0 && SystemClock.elapsedRealtime() - speedSetAt >= 300;
         if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null
-                && ((aligned && speedSettled && mix >= m.elementAt - 0.3) || mix >= Math.min(m.elementAt + 8, deadline))) {
+                && ((aligned && speedSettled && mix >= m.elementAt - 0.3
+                        // the stream deck lines up (silently) after the last nudge: up to 3 s for it
+                        && (deck == null || deck.inStep() || mix >= m.elementAt + 3))
+                    || mix >= Math.min(m.elementAt + 8, deadline))) {
             handoverAt = mix + 0.3;
             LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
+            // the stream deck takes the song from here when it is in step (YT stays silent), else YT does
+            if (deck != null && deck.inStep()) {
+                deck.takeAt(m.in.trackAt(handoverAt));
+                deckTook = true;
+            } else if (deck != null) {
+                deck.handBack("not in step by the handover");
+                deck = null;
+            }
         }
         if (!handedOver && !Double.isNaN(handoverAt) && mix >= handoverAt - 0.0125) {
             handedOver = true;
@@ -539,6 +562,7 @@ final class Engine {
         }
         inPlayer = player;
         setVolume(player, 0f);
+        deck = StreamDeck.follow(Automix.context(), m.inId, player);
         settleUntil = 0;
         nudgeUntil = 0;
         errs.clear();
@@ -615,6 +639,7 @@ final class Engine {
         holding = false;
         released = null;
         if (inPlayer != null && setSpeed != 1) speed(inPlayer, 1f);
+        if (deck != null && !(ok && deckTook)) deck.handBack("the mix ended without it");
         if (!started) {
             LoopMixRenderer.nativeDestroy(hOut);
             LoopMixRenderer.nativeDestroy(hIn);
@@ -669,9 +694,10 @@ final class Engine {
         long now = SystemClock.elapsedRealtime();
         double want = m.in.trackAt(mix);
         float base = (float) m.in.rateAt(mix);
-        // while the incoming deck still loops, the player (silent) runs on to where the deck will be
-        // once the loop lets go, not round the loop with it (the extension's trackAt(tk - 1.5))
-        if (m.in.loopB > m.in.loopA && mix < m.elementAt) {
+        // until the takeover the player (silent) runs at its own speed to where the deck will be
+        // then: not round the deck's loop, and not step by step through its glide back to x1.0
+        // (each speed change re-plans YT's audio; the extension's trackAt(tk - 1.5))
+        if (mix < m.elementAt) {
             base = (float) m.in.rateAt(m.elementAt);
             want = m.in.trackAt(m.elementAt) - (m.elementAt - mix) * base;
         }
@@ -791,6 +817,7 @@ final class Engine {
     }
 
     static void speed(Object player, float s) {
+        StreamDeck.ytSpeed(player, s);
         try {
             player.getClass().getMethod("patch_setPlaybackParameters", float.class, float.class).invoke(player, s, 1f);
         } catch (Throwable t) {

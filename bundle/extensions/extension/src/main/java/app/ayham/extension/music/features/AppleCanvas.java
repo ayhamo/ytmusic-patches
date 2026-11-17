@@ -37,10 +37,19 @@ final class AppleCanvas {
     private AppleCanvas() {
     }
 
-    /** Off the main thread. */
-    static String find(String title, String artist) throws Exception {
+    /**
+     * Off the main thread. The clip to show and the other shape's ({preferred, alternate or null}):
+     * the tall 3:4 one first when [tall] (full-screen art), else the square one; null when none.
+     * Prism's rules: every credited artist must match, compilation albums are skipped for the next
+     * hit, and without a token or a hit the public album page is read instead.
+     */
+    static String[] find(String title, String artist, boolean tall) throws Exception {
         String bearer = token();
-        if (bearer == null) throw new IllegalStateException("no Apple token"); // an error, not a miss: not saved
+        if (bearer == null) {
+            String[] page = applePage(artist, title, tall);
+            if (page != null) return page;
+            throw new IllegalStateException("no Apple token"); // an error, not a miss: not saved
+        }
         Log.i(TAG, "canvas: token ok (" + bearer.length() + " chars)");
         String store = Locale.getDefault().getCountry().length() == 2
                 ? Locale.getDefault().getCountry().toLowerCase(Locale.ROOT) : "us";
@@ -51,49 +60,102 @@ final class AppleCanvas {
         JSONArray hits = songs == null ? null : songs.optJSONArray("data");
         if (hits == null) {
             Log.i(TAG, "canvas: no Apple songs for '" + term + "' in store " + store);
-            return null;
+            return applePage(artist, title, tall);
         }
         Log.i(TAG, "canvas: " + hits.length() + " Apple hits for '" + term + "' in store " + store);
 
-        JSONObject best = null;
-        int bestScore = MIN_SCORE - 1;
+        // every hit that passes, best first
+        java.util.List<JSONObject> passing = new java.util.ArrayList<>();
+        java.util.List<Integer> scores = new java.util.ArrayList<>();
         for (int i = 0; i < hits.length(); i++) {
-            int s = score(hits.getJSONObject(i).getJSONObject("attributes"), title, artist);
-            if (s > bestScore) {
-                bestScore = s;
-                best = hits.getJSONObject(i);
+            int sc = score(hits.getJSONObject(i).getJSONObject("attributes"), title, artist);
+            if (sc < MIN_SCORE) continue;
+            int at = 0;
+            while (at < scores.size() && scores.get(at) >= sc) at++;
+            passing.add(at, hits.getJSONObject(i));
+            scores.add(at, sc);
+        }
+        if (passing.isEmpty()) Log.i(TAG, "canvas: no Apple hit scored " + MIN_SCORE + "+ for '" + title + "'");
+        int albumsRead = 0;
+        for (int k = 0; k < passing.size() && albumsRead < 3; k++) {
+            JSONObject best = passing.get(k);
+            JSONObject attrs = best.getJSONObject("attributes");
+            String[] urls = motion(attrs.optJSONObject("editorialVideo"), tall);
+            if (urls != null) return urls;
+            String albumId = null;
+            JSONObject rel = best.optJSONObject("relationships");
+            if (rel != null && rel.optJSONObject("albums") != null) {
+                JSONArray d = rel.getJSONObject("albums").optJSONArray("data");
+                if (d != null && d.length() > 0) albumId = d.getJSONObject(0).optString("id", null);
             }
+            if (albumId == null) {
+                Matcher m = Pattern.compile("/album/[^?]*/(\\d+)").matcher(attrs.optString("url"));
+                if (m.find()) albumId = m.group(1);
+            }
+            Log.i(TAG, "canvas: hit '" + attrs.optString("name") + "' by " + attrs.optString("artistName")
+                    + " (score " + scores.get(k) + "), album " + albumId + " / " + attrs.optString("albumName"));
+            if (albumId == null || albumId.startsWith("pl.")) continue;
+            albumsRead++;
+            JSONObject album = new JSONObject(get(AMP + store + "/albums/" + albumId + "?extend=editorialVideo", bearer))
+                    .getJSONArray("data").getJSONObject(0).getJSONObject("attributes");
+            if (compilation(album.optString("name"))) {
+                Log.i(TAG, "canvas: album '" + album.optString("name") + "' is a compilation, next hit");
+                continue;
+            }
+            String[] clip = motion(album.optJSONObject("editorialVideo"), tall);
+            Log.i(TAG, "canvas: album '" + album.optString("name") + "' " + (clip == null ? "has no motion art" : "has motion art"));
+            if (clip != null) return clip;
         }
-        if (best == null) {
-            Log.i(TAG, "canvas: no Apple hit scored " + MIN_SCORE + "+ for '" + title + "'");
-            return null;
-        }
-        JSONObject attrs = best.getJSONObject("attributes");
-        String url = motion(attrs.optJSONObject("editorialVideo"));
-        if (url != null) return url;
+        return passing.isEmpty() ? applePage(artist, title, tall) : null;
+    }
 
-        String albumId = null;
-        JSONObject rel = best.optJSONObject("relationships");
-        if (rel != null && rel.optJSONObject("albums") != null) {
-            JSONArray d = rel.getJSONObject("albums").optJSONArray("data");
-            if (d != null && d.length() > 0) albumId = d.getJSONObject(0).optString("id", null);
+    /**
+     * Prism's applePage: the iTunes search for the album (named [album], often the single's title)
+     * by every credited artist, and the motion clips in its public page's markup.
+     */
+    private static String[] applePage(String artist, String album, boolean tall) {
+        try {
+            JSONArray results = new JSONObject(get("https://itunes.apple.com/search?media=music&entity=album&limit=5&term="
+                    + URLEncoder.encode(artist + " " + album, "UTF-8"), null)).optJSONArray("results");
+            if (results == null) return null;
+            String want = norm(album.replaceAll("\\s*[(\\[].*?[)\\]]", ""));
+            if (want.isEmpty()) return null;
+            for (int i = 0; i < results.length(); i++) {
+                JSONObject r = results.getJSONObject(i);
+                String name = norm(r.optString("collectionName").replaceAll("\\s*[(\\[].*?[)\\]]", ""));
+                if (compilation(r.optString("collectionName")) || !(name.equals(want) || name.startsWith(want + " "))) continue;
+                boolean all = true;
+                for (String w : artists(artist)) {
+                    boolean found = false;
+                    for (String g : artists(r.optString("artistName"))) found |= g.equals(w);
+                    all &= found;
+                }
+                if (!all) continue;
+                String page = r.optString("collectionViewUrl").replaceAll("\\?.*", "");
+                if (page.isEmpty()) return null;
+                String html = get(page, null).replace("\\u002F", "/").replace("\\/", "/");
+                String square = grab(html, "motionDetailSquare"), tallUrl = grab(html, "motionDetailTall");
+                if (square == null) square = grab(html, "motionSquareVideo1x1");
+                if (tallUrl == null) tallUrl = grab(html, "motionTallVideo3x4");
+                Log.i(TAG, "canvas: album page '" + r.optString("collectionName") + "': " + (square != null || tallUrl != null ? "motion art" : "none"));
+                return pair(square, tallUrl, tall);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "canvas: album page failed: " + t);
         }
-        if (albumId == null) {
-            Matcher m = Pattern.compile("/album/[^?]*/(\\d+)").matcher(attrs.optString("url"));
-            if (m.find()) albumId = m.group(1);
-        }
-        Log.i(TAG, "canvas: best '" + attrs.optString("name") + "' by " + attrs.optString("artistName")
-                + " (score " + bestScore + "), album " + albumId + " / " + attrs.optString("albumName"));
-        if (albumId == null || albumId.startsWith("pl.")) return null;
-        JSONObject album = new JSONObject(get(AMP + store + "/albums/" + albumId + "?extend=editorialVideo", bearer))
-                .getJSONArray("data").getJSONObject(0).getJSONObject("attributes");
-        if (compilation(album.optString("name"))) return null;
-        JSONObject ev = album.optJSONObject("editorialVideo");
-        Log.i(TAG, "canvas: editorialVideo " + (ev == null ? "missing, attribute keys " + album.names()
-                : ev.toString().substring(0, Math.min(600, ev.toString().length()))));
-        String clip = motion(ev);
-        Log.i(TAG, "canvas: album '" + album.optString("name") + "' " + (clip == null ? "has no motion art" : "has motion art"));
-        return clip;
+        return null;
+    }
+
+    private static String grab(String html, String key) {
+        Matcher m = Pattern.compile("\"" + key + "\"\\s*:\\s*\\{[^}]*?\"video\"\\s*:\\s*\"(https://[^\"]+?\\.m3u8)\"").matcher(html);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private static String[] pair(String square, String tallUrl, boolean tall) {
+        String first = tall ? (tallUrl != null ? tallUrl : square) : (square != null ? square : tallUrl);
+        if (first == null) return null;
+        String other = first.equals(square) ? tallUrl : square;
+        return new String[]{first, other};
     }
 
     private static int score(JSONObject a, String title, String artist) {
@@ -134,9 +196,15 @@ final class AppleCanvas {
         return false;
     }
 
-    private static String motion(JSONObject video) {
+    private static String[] motion(JSONObject video, boolean tall) {
         if (video == null) return null;
-        for (String key : new String[]{"motionDetailSquare", "motionSquareVideo1x1", "motionDetailRaw", "motionDetailTall", "motionTallVideo3x4"}) {
+        String square = link(video, "motionDetailSquare", "motionSquareVideo1x1", "motionDetailRaw");
+        String tallUrl = link(video, "motionDetailTall", "motionTallVideo3x4");
+        return pair(square, tallUrl, tall);
+    }
+
+    private static String link(JSONObject video, String... keys) {
+        for (String key : keys) {
             JSONObject asset = video.optJSONObject(key);
             if (asset == null) continue;
             for (String f : new String[]{"video", "videoUrl", "hlsUrl", "url"}) {

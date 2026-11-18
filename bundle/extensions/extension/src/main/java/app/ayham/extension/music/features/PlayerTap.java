@@ -13,6 +13,9 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 
+import app.ayham.extension.music.addons.AddonPlayback;
+import app.ayham.extension.music.addons.Quality;
+
 /**
  * YT's players, captured from their constructors, and the stats line: the audio format YT's ExoPlayer is
  * decoding. Players (`ctb`, the class Morphe gives ExoPlayerAccess) are captured from their
@@ -31,6 +34,33 @@ public final class PlayerTap {
     private PlayerTap() {
     }
 
+    /**
+     * Players we build ourselves (the addon player) are not YT's: drop them from the captured list so
+     * Automix, the stats line and the volume gate never read or act on them.
+     */
+    private static final Map<Object, Boolean> ours = new IdentityHashMap<>();
+
+    public static void markOurs(Object player) {
+        synchronized (players) {
+            ours.put(player, Boolean.TRUE);
+            for (int i = players.size() - 1; i >= 0; i--) {
+                if (players.get(i).get() == player) players.remove(i);
+            }
+        }
+    }
+
+    public static void forget(Object player) {
+        synchronized (players) {
+            ours.remove(player);
+        }
+    }
+
+    public static boolean isOurs(Object player) {
+        synchronized (players) {
+            return ours.containsKey(player);
+        }
+    }
+
     /** Injection point: end of every constructor of YT's ExoPlayer class. */
     public static void capturePlayer(Object player) {
         synchronized (players) {
@@ -46,6 +76,9 @@ public final class PlayerTap {
     private static void poll() {
         try {
             String line = line();
+            // addon audio ended: its line goes, even when YT's player has none to show yet
+            if (line == null && addonLine) line = "";
+            if (line != null) addonLine = fromAddon;
             if (line != null && !line.equals(last)) {
                 last = line;
                 Log.i(TAG, "stats: " + line);
@@ -58,9 +91,19 @@ public final class PlayerTap {
     }
 
     private static String line() throws Exception {
+        Object[] q = AddonPlayback.now();
+        badge = (Quality.Badge) q[0];
+        fromAddon = q[1] != null;
+        if (fromAddon) return (String) q[1];
         Object player = current();
         if (player == null) return null;
-        Object format = path == null ? search(player) : follow(player, path);
+        Object format;
+        if (path == null) {
+            format = search(player);
+            if (format != null) path = lastFound;
+        } else {
+            format = follow(player, path);
+        }
         if (format == null) {
             path = null;
             return null;
@@ -98,6 +141,29 @@ public final class PlayerTap {
     }
 
     /** Breadth-first over app (obfuscated) fields, depth 5, remembering the path to an audio Format. */
+    /** The audio Format a player (YT's or ours) is decoding, or null. */
+    public static Object audioFormat(Object player) throws Exception {
+        List<Field> known = ourPath;
+        Object f = known == null ? null : follow(player, known);
+        if (f != null) return f;
+        ourPath = null;
+        f = search(player);
+        if (f != null) ourPath = lastFound;
+        return f;
+    }
+
+    private static volatile List<Field> ourPath;
+    /** The stats line on screen is the addon's; the last line() came from the addon. */
+    private static boolean addonLine, fromAddon;
+    /** The field path of the last search's find. */
+    private static List<Field> lastFound;
+    private static volatile Quality.Badge badge = Quality.Badge.NONE;
+
+    /** The quality badge for addon audio (NONE when YT's own audio plays). */
+    public static Quality.Badge badge() {
+        return badge;
+    }
+
     private static Object search(Object root) throws Exception {
         long start = System.currentTimeMillis();
         Map<Object, Boolean> seen = new IdentityHashMap<>();
@@ -121,7 +187,7 @@ public final class PlayerTap {
                         List<Field> np = new ArrayList<>(p);
                         np.add(f);
                         if (isAudioFormat(v)) {
-                            path = np;
+                            lastFound = np;
                             Log.i(TAG, "stats: audio format at " + describePath(np) + " (" + visited + " objects, "
                                     + (System.currentTimeMillis() - start) + " ms)");
                             return v;

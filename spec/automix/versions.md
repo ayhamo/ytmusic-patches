@@ -7,6 +7,13 @@ This lists every place the code branches on the version (`version === 2` in
 "Original" (version 1) is BitChord web's automix, the one the plan calls "Web".
 "Advanced" (version 2, "Advanced AutoDJ") adds ideas from the BitChord phone app.
 
+**Now (end of Phase 3):** the user picks between two engines. **Classic** is
+version 2 (Advanced's planning and sound shape; the loop code is shared, so it
+plays Web's loops). **Automix v2** is version 3 (below). Original is retired: a
+saved version 1 plays Classic, and the golden files hold only versions 2 and 3.
+Version 1's code paths stay until the code audit. The tables below are the
+record of how Original and Advanced differed.
+
 ## Shared by both (no choice to make)
 
 | Part | Behaviour |

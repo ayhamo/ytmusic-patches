@@ -426,7 +426,7 @@ public final class Mix {
             }
         }
 
-        String name = p.v3 ? "Automix v2" : m.v2 ? "Advanced AutoDJ" : "Automix";
+        String name = p.v3 ? "Automix v2" : m.v2 ? "Automix Classic" : "Automix";
         String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : p.glide != null ? " · glide" : "";
         m.title = p.style.equals("blend") ? name + kind : p.style.equals("filter") ? name + " · filter mix"
                 : p.handoff ? "Automix v2 · hand-over" : p.bridge ? "Automix v2 · beatless bridge" : "Automix · crossfade";

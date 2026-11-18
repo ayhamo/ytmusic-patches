@@ -1,0 +1,503 @@
+package app.ayham.extension.music.addons;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import java.io.IOException;
+import java.net.SocketTimeoutException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.Test;
+
+import app.ayham.extension.music.automix.Json;
+
+/**
+ * The client against fake addons (no network, a fake clock): the extension's
+ * scripts/addon_client_tests.mjs, plus the phone's own rules (one browser User-Agent, https only).
+ * Addons live under https://h.example/{name}/tok3n-{name}/...
+ */
+public class AddonClientTest {
+    interface Route {
+        AddonClient.Response answer(String kind, String id, String query);
+    }
+
+    static final class Hit {
+        final String name, kind, id, query;
+        final Map<String, String> headers;
+        final int timeoutMs;
+
+        Hit(String name, String kind, String id, String query, Map<String, String> headers, int timeoutMs) {
+            this.name = name;
+            this.kind = kind;
+            this.id = id;
+            this.query = query;
+            this.headers = headers;
+            this.timeoutMs = timeoutMs;
+        }
+    }
+
+    private long now = 1_000_000;
+    private final List<Long> sleeps = new ArrayList<>();
+    private final List<String> logs = new ArrayList<>();
+    private final List<Hit> hits = new ArrayList<>();
+    private final Map<String, Map<String, Route>> addons = new HashMap<>();
+    private final Map<String, Long> fileBytes = new HashMap<>();
+
+    private final AddonClient.Transport transport = r -> {
+        String rest = r.url.substring("https://h.example/".length());
+        String query = "";
+        int q = rest.indexOf('?');
+        if (q >= 0) {
+            query = rest.substring(q);
+            rest = rest.substring(0, q);
+        }
+        String[] parts = rest.split("/", -1);
+        String name = parts[0], kind = parts.length > 2 ? parts[2] : "", id = parts.length > 3 ? parts[3] : null;
+        hits.add(new Hit(name, kind, id, query, new LinkedHashMap<>(r.headers), r.timeoutMs));
+        if (kind.equals("file")) {
+            Map<String, String> h = new HashMap<>();
+            Long size = fileBytes.get(id);
+            h.put("content-range", "bytes 0-0/" + (size != null ? size : 30_000_000L));
+            h.put("content-length", "1");
+            return new AddonClient.Response(206, h, "x");
+        }
+        Map<String, Route> b = addons.containsKey(name) ? addons.get(name) : Collections.<String, Route>emptyMap();
+        Route route = b.get(kind);
+        if (route != null) return route.answer(kind, id, query);
+        if (kind.equals("manifest.json")) return json(200, "{\"id\":\"mock." + name + "\",\"name\":\"Mock " + name + "\",\"version\":\"1\",\"resources\":[\"search\",\"stream\"],\"settings\":[]}");
+        return json(404, "{\"detail\":\"nope\"}");
+    };
+
+    private AddonClient client() {
+        return new AddonClient(transport, () -> now, ms -> {
+            sleeps.add(ms);
+            now += ms;
+        }, logs::add);
+    }
+
+    static AddonClient.Response json(int status, String body) {
+        return new AddonClient.Response(status, new HashMap<String, String>(), body);
+    }
+
+    static AddonClient.Response json(int status, String body, String retryAfter) {
+        Map<String, String> h = new HashMap<>();
+        h.put("retry-after", retryAfter);
+        return new AddonClient.Response(status, h, body);
+    }
+
+    static String base(String name) {
+        return "https://h.example/" + name + "/tok3n-" + name;
+    }
+
+    static String fileUrl(String name, String id) {
+        return base(name) + "/file/" + id;
+    }
+
+    static String row(String id, String extra) {
+        return "{\"id\":\"" + id + "\",\"title\":\"Blinding Lights\",\"artist\":\"The Weeknd\",\"duration\":200,\"album\":\"After Hours\"" + extra + "}";
+    }
+
+    static String tracks(String... rows) {
+        return "{\"tracks\":[" + String.join(",", rows) + "]}";
+    }
+
+    static TrackMatcher.Target song() {
+        TrackMatcher.Target t = new TrackMatcher.Target();
+        t.title = "Blinding Lights";
+        t.artist = "The Weeknd";
+        t.durationSec = 200.0;
+        t.album = "After Hours";
+        return t;
+    }
+
+    private void addon(String name, String kind, Route r) {
+        if (!addons.containsKey(name)) addons.put(name, new HashMap<String, Route>());
+        addons.get(name).put(kind, r);
+    }
+
+    private List<Hit> hitsOf(String name, String kind) {
+        List<Hit> out = new ArrayList<>();
+        for (Hit h : hits) if (h.name.equals(name) && (kind == null || h.kind.equals(kind))) out.add(h);
+        return out;
+    }
+
+    private static List<AddonClient.Addon> list(String... names) {
+        List<AddonClient.Addon> out = new ArrayList<>();
+        for (String n : names) out.add(new AddonClient.Addon(base(n)));
+        return out;
+    }
+
+    private static String kind(Runnable r) {
+        try {
+            r.run();
+            return "ok";
+        } catch (AddonError e) {
+            return e.kind;
+        }
+    }
+
+    // ---- request shape (§1) ----
+
+    @Test
+    public void searchSendsSettingsQualityTitleArtistQAndOnlyTwoHeaders() {
+        addon("params", "manifest.json", (k, id, q) -> json(200, "{\"id\":\"p\",\"name\":\"P\",\"resources\":[\"search\",\"stream\"],\"settings\":["
+                + "{\"key\":\"region\",\"default\":\"eu\"},{\"key\":\"atmos\",\"default\":true},"
+                + "{\"key\":\"quality\",\"default\":\"hires\",\"options\":[{\"value\":\"max\",\"label\":\"MAX\"},{\"value\":\"hires\",\"label\":\"HiRes\"},{\"value\":\"high\",\"label\":\"AAC (320kbps)\"}]}]}"));
+        addon("params", "search", (k, id, q) -> json(200, tracks(row("a", ""))));
+        AddonClient c = client();
+        Protocol.Manifest man = c.manifest(base("params"));
+        AddonClient.Addon a = new AddonClient.Addon(base("params"));
+        a.tier = Pick.LOSSLESS;
+        c.search(a, song(), "Blinding Lights The Weeknd", man);
+        Hit h = hitsOf("params", "search").get(0);
+        assertEquals("?region=eu&atmos=false&quality=max&title=Blinding%20Lights&artist=The%20Weeknd&q=Blinding%20Lights%20The%20Weeknd", h.query);
+        assertEquals(Arrays.asList("Accept", "User-Agent"), new ArrayList<>(h.headers.keySet()));
+        assertEquals(Protocol.USER_AGENT, h.headers.get("User-Agent"));
+        assertEquals("application/json", h.headers.get("Accept"));
+        assertEquals(45000, h.timeoutMs);
+    }
+
+    // ---- caching (§6) ----
+
+    @Test
+    public void searchesAndManifestsAreCachedTenMinutes() {
+        addon("plain", "search", (k, id, q) -> json(200, tracks(row("a", ""))));
+        AddonClient c = client();
+        Protocol.Manifest man = c.manifest(base("plain"));
+        AddonClient.Addon a = new AddonClient.Addon(base("plain"));
+        for (int i = 0; i < 3; i++) c.search(a, song(), "shared query", man);
+        assertEquals(1, hitsOf("plain", "search").size());
+        c.manifest(base("plain"));
+        assertEquals(1, hitsOf("plain", "manifest.json").size());
+        now += 10 * 60_000 + 1;
+        c.search(a, song(), "shared query", man);
+        c.manifest(base("plain"));
+        assertEquals(2, hitsOf("plain", "search").size());
+        assertEquals(2, hitsOf("plain", "manifest.json").size());
+    }
+
+    // ---- statuses (§5) ----
+
+    @Test
+    public void a429WaitsRetryAfterThenAnswers() {
+        final int[] n = {0};
+        addon("busy", "search", (k, id, q) -> ++n[0] <= 1 ? json(429, "{}", "0.5") : json(200, tracks(row("a", ""))));
+        AddonClient c = client();
+        List<Object> rows = c.search(new AddonClient.Addon(base("busy")), song(), "q", c.manifest(base("busy")));
+        assertEquals(1, rows.size());
+        assertEquals(Collections.singletonList(500L), sleeps);
+    }
+
+    @Test
+    public void threeTimes429IsDownAfterTwoRetries() {
+        addon("flooded", "search", (k, id, q) -> json(429, "{}"));
+        AddonClient c = client();
+        Protocol.Manifest man = c.manifest(base("flooded"));
+        try {
+            c.search(new AddonClient.Addon(base("flooded")), song(), "q", man);
+            throw new AssertionError("answered");
+        } catch (AddonError e) {
+            assertEquals("down", e.kind);
+            assertEquals("rate limited (429)", e.getMessage());
+        }
+        assertEquals(3, hitsOf("flooded", "search").size());
+        assertEquals(Arrays.asList(500L, 1000L), sleeps);   // 500 ms << attempt without Retry-After
+    }
+
+    @Test
+    public void statusKinds() {
+        addon("e404", "search", (k, id, q) -> json(404, "{}"));
+        addon("e500", "search", (k, id, q) -> json(503, "{}"));
+        addon("e401", "search", (k, id, q) -> json(401, "{}"));
+        addon("blank", "search", (k, id, q) -> json(200, "  "));
+        addon("errfield", "search", (k, id, q) -> json(200, "{\"error\":\"quota\"}"));
+        addon("notjson", "search", (k, id, q) -> json(200, "<html>"));
+        String[][] want = {{"e404", "miss"}, {"e500", "down"}, {"e401", "error"}, {"blank", "error"}, {"errfield", "miss"}, {"notjson", "error"}};
+        for (final String[] w : want) {
+            final AddonClient c = client();
+            final Protocol.Manifest man = c.manifest(base(w[0]));
+            assertEquals(w[0], w[1], kind(() -> c.search(new AddonClient.Addon(base(w[0])), song(), "q", man)));
+        }
+        addon("nomanifest", "manifest.json", (k, id, q) -> json(404, "{}"));
+        assertEquals("a manifest 404 is an error", "error", kind(() -> client().manifest(base("nomanifest"))));
+        AddonClient.Transport slow = r -> {
+            throw new SocketTimeoutException("Read timed out");
+        };
+        AddonClient c = new AddonClient(slow, () -> now, ms -> { }, null);
+        try {
+            c.manifest(base("x"));
+            throw new AssertionError("answered");
+        } catch (AddonError e) {
+            assertEquals("down", e.kind);
+            assertEquals("timed out", e.getMessage());
+        }
+    }
+
+    // ---- discovery (§2) ----
+
+    @Test
+    public void discovery() {
+        AddonClient.Discovered d = client().discover(base("plain") + "/manifest.json");
+        assertEquals(base("plain"), d.base);
+        assertEquals("Mock plain", d.manifest.name);
+        assertEquals("mock.plain", client().discover(base("plain")).manifest.id);
+
+        addon("nomanifest", "manifest.json", (k, id, q) -> json(404, "{}"));
+        addon("nomanifest", "search", (k, id, q) -> json(200, "{\"tracks\":[]}"));
+        Protocol.Manifest stand = client().discover(base("nomanifest")).manifest;
+        assertEquals(Arrays.asList("search", "stream"), stand.resources);
+        assertEquals("h.example", stand.name);
+
+        addon("refuses", "manifest.json", (k, id, q) -> json(403, "{\"detail\":\"This app is not supported by Mock.\"}"));
+        try {
+            client().discover(base("refuses"));
+            throw new AssertionError("found");
+        } catch (AddonError e) {
+            assertEquals("refused (403): This app is not supported by Mock.", e.getMessage());
+        }
+    }
+
+    // ---- the whole path ----
+
+    private void good(String name, String rowsJson) {
+        addon(name, "search", (k, id, q) -> json(200, rowsJson));
+        addon(name, "stream", (k, id, q) -> {
+            if (id.equals("hls")) return json(200, "{\"url\":\"https://cdn/x.m3u8\",\"format\":\"aac\"}");
+            if (id.equals("atmosstream")) return json(200, "{\"url\":\"" + fileUrl("good", id) + "\",\"codec\":\"eac3_joc\"}");
+            return json(200, "{\"url\":\"" + fileUrl("good", id) + "\",\"format\":\"flac\",\"quality\":\"Hi-Res\",\"codec\":\"flac\"}");
+        });
+    }
+
+    @Test
+    public void resolvePassesOverADownAddonAndRefusesBadRows() {
+        addon("down", "manifest.json", (k, id, q) -> json(500, "{}"));
+        good("good", tracks(row("atmos", ",\"isAtmosOnly\":true"), row("cut", ""), row("hls", ""), row("atmosstream", ""), row("fine", "")));
+        fileBytes.put("cut", 700_000L);
+        AddonClient.Opened got = client().resolve(song(), list("down", "good"), null);
+        assertEquals("server error (500)", got.tried.get(0).why);
+        List<String> rest = new ArrayList<>();
+        for (AddonClient.Tried t : got.tried.subList(1, got.tried.size())) rest.add(t.row + ": " + t.why);
+        assertEquals(Arrays.asList("cut: file holds at most 28 s", "hls: hls (not played yet)", "atmosstream: atmos"), rest);
+        assertEquals("no addon has it", got.none);
+    }
+
+    @Test
+    public void resolveFindsItAndNeverShowsTheToken() {
+        addon("down", "manifest.json", (k, id, q) -> json(500, "{}"));
+        good("good2", tracks(row("atmos", ",\"isAtmos\":true"), row("fine", "")));
+        AddonClient c = client();
+        AddonClient.Opened got = c.resolve(song(), list("down", "good2"), null);
+        assertNull(got.none);
+        assertEquals("h.example", got.addon.host);
+        assertEquals("fine", got.row.id);
+        assertEquals("flac", got.stream.codec);
+        assertFalse(logs.isEmpty());
+        StringBuilder seen = new StringBuilder(String.join("\n", logs));
+        for (AddonClient.Tried t : got.tried) seen.append(t.addon).append(t.why);
+        seen.append(c.health().keySet());
+        for (AddonClient.Health h : c.health().values()) seen.append(h.last);
+        assertFalse(seen.toString(), seen.toString().contains("tok3n"));
+        Hit probe = hitsOf("good", "file").get(hitsOf("good", "file").size() - 1);
+        assertEquals("bytes=0-0", probe.headers.get("Range"));
+        assertEquals("identity", probe.headers.get("Accept-Encoding"));
+        assertEquals(Protocol.USER_AGENT, probe.headers.get("User-Agent"));
+        assertEquals(4000, probe.timeoutMs);
+    }
+
+    @Test
+    public void threeFailuresPutAnAddonToRest() {
+        addon("down", "manifest.json", (k, id, q) -> json(500, "{}"));
+        good("good2", tracks(row("fine", "")));
+        AddonClient c = client();
+        for (int i = 0; i < 3; i++) c.resolve(song(), list("down"), null);
+        int n = hitsOf("down", null).size();
+        AddonClient.Opened got = c.resolve(song(), list("down", "good2"), null);
+        assertEquals("resting after failures", got.tried.get(0).why);
+        assertEquals(n, hitsOf("down", null).size());
+        now += 2 * 60_000 + 1;
+        c.resolve(song(), list("down"), null);
+        assertEquals("asked again after its rest", n + 1, hitsOf("down", null).size());
+    }
+
+    @Test
+    public void aStream404FallsBackToTheRowsStreamUrl() {
+        addon("withfallback", "search", (k, id, q) -> json(200, tracks(row("a", ",\"streamURL\":\"" + fileUrl("withfallback", "a") + "\""))));
+        addon("withfallback", "stream", (k, id, q) -> json(404, "{}"));
+        AddonClient.Opened got = client().resolve(song(), list("withfallback"), null);
+        assertEquals(fileUrl("withfallback", "a"), got.stream.url);
+    }
+
+    // ---- §4a stream limits, the look-ahead, the stream's own headers ----
+
+    @Test
+    public void lookAheadIsSearchOnlyAndStreamsAreLimited() {
+        addon("limited", "search", (k, id, q) -> json(200, tracks(row("a", ""))));
+        addon("limited", "stream", (k, id, q) -> json(200, "{\"url\":\"" + fileUrl("limited", id)
+                + "\",\"format\":\"flac\",\"codec\":\"flac\",\"headers\":{\"X-Token\":\"abc\",\"User-Agent\":\"BitChord\",\"bad header\":\"x\",\"obj\":{}}}"));
+        AddonClient c = client();
+        Protocol.Manifest man = c.manifest(base("limited"));
+        AddonClient.FindResult f = c.find(song(), list("limited"), null);
+        assertEquals(1, f.found.size());
+        assertEquals("a", f.found.get(0).rows.get(0).id);
+        assertEquals("find: no /stream call", 0, hitsOf("limited", "stream").size());
+        assertEquals("h.example", f.found.get(0).addon.host);
+
+        AddonClient.Opened got = c.open(f.found, song(), null, null);
+        assertEquals("a", got.row.id);
+        assertEquals(1, hitsOf("limited", "stream").size());
+        Map<String, String> want = new LinkedHashMap<>();
+        want.put("X-Token", "abc");
+        want.put("User-Agent", "BitChord");
+        assertEquals(want, got.stream.headers);
+        Hit probe = hitsOf("limited", "file").get(0);
+        assertEquals("abc", probe.headers.get("X-Token"));
+        assertEquals("our agent replaces the addon's", Protocol.USER_AGENT, probe.headers.get("User-Agent"));
+        assertEquals("bytes=0-0", probe.headers.get("Range"));
+        assertEquals("identity", probe.headers.get("Accept-Encoding"));
+
+        final AddonClient.Addon a = new AddonClient.Addon(base("limited"));
+        List<String> out = new ArrayList<>();
+        for (final String id : new String[]{"b", "c", "d", "e", "f"}) out.add(kind(() -> c.stream(a, row(id), man)));
+        assertEquals("5 a minute, the first above counts", Arrays.asList("ok", "ok", "ok", "ok", "limit"), out);
+        assertEquals("a cached answer costs nothing", "ok", kind(() -> c.stream(a, row("b"), man)));
+        assertTrue(c.streamWait(a, man) > 0);
+        now += 61_000;
+        assertEquals("a minute later, free again", "ok", kind(() -> c.stream(a, row("g"), man)));
+        assertEquals(0, c.health().get("h.example").fails);
+    }
+
+    @Test
+    public void a429OnStreamIsNotRetriedAndTeachesTheCount() {
+        final int[] n = {0};
+        addon("streams429", "stream", (k, id, q) -> ++n[0] >= 3 ? json(429, "{}", "30") : json(200, "{\"url\":\"" + fileUrl("streams429", id) + "\",\"codec\":\"flac\"}"));
+        final AddonClient c = client();
+        final Protocol.Manifest man = c.manifest(base("streams429"));
+        final AddonClient.Addon a = new AddonClient.Addon(base("streams429"));
+        List<String> r = new ArrayList<>();
+        for (String id : new String[]{"a", "b", "c"}) {
+            try {
+                c.stream(a, row(id), man);
+                r.add("ok");
+            } catch (AddonError e) {
+                r.add(e.getMessage());
+            }
+        }
+        assertEquals(Arrays.asList("ok", "ok", "stream limit (429), 2/min from now on"), r);
+        assertEquals(3, hitsOf("streams429", "stream").size());
+        assertTrue(sleeps.isEmpty());
+        assertEquals("closed until Retry-After", 30_000, c.streamWait(a, man));
+        now += 31_000;
+        assertEquals("limit", kind(() -> c.stream(a, row("d"), man)));
+        assertEquals("the learnt 2 a minute holds", "limit", kind(() -> c.stream(a, row("e"), man)));
+        assertEquals(3, hitsOf("streams429", "stream").size());
+    }
+
+    @Test
+    public void theManifestsOwnLimits() {
+        addon("ownlimits", "manifest.json", (k, id, q) -> json(200,
+                "{\"id\":\"o\",\"name\":\"O\",\"resources\":[\"search\",\"stream\"],\"limits\":{\"streamsPerMinute\":30,\"uncachedPerHour\":2,\"cachedMarker\":\"fromCache\"}}"));
+        addon("ownlimits", "stream", (k, id, q) -> json(200, "{\"url\":\"" + fileUrl("ownlimits", id) + "\",\"codec\":\"flac\",\"fromCache\":" + id.startsWith("c") + "}"));
+        final AddonClient c = client();
+        final Protocol.Manifest man = c.manifest(base("ownlimits"));
+        assertEquals(30, man.limits.streamsPerMinute);
+        assertEquals(2, man.limits.uncachedPerHour);
+        assertEquals("fromCache", man.limits.cachedMarker);
+        final AddonClient.Addon a = new AddonClient.Addon(base("ownlimits"));
+        List<String> r = new ArrayList<>();
+        for (final String id : new String[]{"u1", "c1", "c2", "u2", "u3"}) r.add(kind(() -> c.stream(a, row(id), man)));
+        assertEquals(Arrays.asList("ok", "ok", "ok", "ok", "limit"), r);
+    }
+
+    @Test
+    public void bitchordAuthIsUnsupportedNotAFailure() {
+        addon("official", "manifest.json", (k, id, q) -> json(200, "{\"id\":\"x\",\"name\":\"X\",\"resources\":[\"search\",\"stream\"],\"bitchordAuth\":true}"));
+        try {
+            client().discover(base("official"));
+            throw new AssertionError("found");
+        } catch (AddonError e) {
+            assertEquals(Protocol.NEEDS_OFFICIAL, e.getMessage());
+        }
+        AddonClient c = client();
+        int n0 = hitsOf("official", null).size();
+        c.resolve(song(), list("official"), null);
+        AddonClient.Opened got = c.resolve(song(), list("official"), null);
+        assertEquals(Protocol.NEEDS_OFFICIAL, got.tried.get(0).why);
+        assertEquals("manifest cached, nothing else asked", n0 + 1, hitsOf("official", null).size());
+        assertNull(c.health().get("h.example"));
+    }
+
+    @Test
+    public void allowDownloadsZeroBlocksDownloadsOnly() {
+        addon("nodl", "manifest.json", (k, id, q) -> json(200, "{\"id\":\"n\",\"name\":\"N\",\"resources\":[\"search\",\"stream\"],\"allowDownloads\":0}"));
+        good("nodl", tracks(row("fine", "")));
+        AddonClient c = client();
+        AddonClient.Options dl = new AddonClient.Options();
+        dl.forDownload = true;
+        AddonClient.FindResult f = c.find(song(), list("nodl"), dl);
+        assertTrue(f.found.isEmpty());
+        assertEquals("no downloads", f.tried.get(0).why);
+        assertEquals(0, hitsOf("nodl", "search").size());
+        assertEquals("playback may still use it", 1, c.find(song(), list("nodl"), null).found.size());
+    }
+
+    @Test
+    public void downloadsRefuseLossyAt256OrUnder() {
+        addon("lossy", "search", (k, id, q) -> json(200, tracks(row("a", ""))));
+        addon("lossy", "stream", (k, id, q) -> json(200, "{\"url\":\"" + fileUrl("lossy", id) + "\",\"format\":\"AAC\",\"bitrate\":256}"));
+        AddonClient.Options dl = new AddonClient.Options();
+        dl.forDownload = true;
+        AddonClient.Opened got = client().resolve(song(), list("lossy"), dl);
+        assertEquals("no addon has it", got.none);
+        assertEquals("lossy at 256 kbps or under", got.tried.get(0).why);
+    }
+
+    @Test
+    public void plainHttpIsRefusedAndNothingIsSent() {
+        final AddonClient c = client();
+        assertEquals("error", kind(() -> c.manifest("http://localhost:8080/tok")));
+        assertEquals("error", kind(() -> c.discover("http://127.0.0.1:9/tok/manifest.json")));
+        assertEquals("error", kind(() -> c.manifest("http://h.example/plain/tok3n-plain")));
+        assertTrue(hits.isEmpty());
+        // a stream link that isn't https is passed over
+        addon("cleartext", "search", (k, id, q) -> json(200, tracks(row("a", ""))));
+        addon("cleartext", "stream", (k, id, q) -> json(200, "{\"url\":\"http://cdn.example/x.flac\",\"codec\":\"flac\"}"));
+        AddonClient.Opened got = c.resolve(song(), list("cleartext"), null);
+        assertEquals("not https", got.tried.get(0).why);
+    }
+
+    @Test
+    public void networkFailureMessagesAreScrubbed() {
+        AddonClient.Transport broken = r -> {
+            throw new IOException("failed to connect to " + r.url);
+        };
+        AddonClient c = new AddonClient(broken, () -> now, ms -> { }, logs::add);
+        AddonClient.Opened got = c.resolve(song(), list("x"), null);
+        assertEquals("network: failed to connect to h.example", got.tried.get(0).why);
+        assertFalse(String.join("\n", logs).contains("tok3n"));
+    }
+
+    private static Pick.Row row(String id) {
+        Map<String, Object> raw = new HashMap<>();
+        raw.put("id", id);
+        raw.put("title", "t");
+        return Pick.rowOf(raw);
+    }
+
+    @Test
+    public void streamAnswersReadAsJson() {
+        Protocol.Stream s = Protocol.readStream(Json.parse("{\"url\":\"https://cdn/x.flac\",\"codec\":\"FLAC\",\"sampleRate\":\"44.1\",\"bitDepth\":16}"), null);
+        assertEquals("flac", s.codec);
+        assertEquals(44100, s.sampleRate, 1e-9);
+        assertEquals(16, s.bitDepth, 0);
+        assertNotNull(s.headers);
+    }
+}

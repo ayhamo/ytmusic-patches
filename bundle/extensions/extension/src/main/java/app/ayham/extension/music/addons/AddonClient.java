@@ -1,0 +1,578 @@
+package app.ayham.extension.music.addons;
+
+import java.io.IOException;
+import java.net.SocketTimeoutException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import app.ayham.extension.music.automix.Json;
+
+/**
+ * The addon client (spec/addons/protocol.md): BitChord-compatible addons, asked in the user's
+ * priority order for a YouTube Music song. A port of the extension's src/addons/client.js with
+ * the I/O behind {@link Transport} (the real one is {@link HttpTransport}) and the time behind
+ * {@link StreamLimits.Clock}, so all of it runs in JVM tests. Calls block: use a background thread.
+ *
+ *   find(target, addons, opt)  search and pick only, no /stream: safe for the look-ahead (§8)
+ *   open(found, target, opt)   /stream and the probe, just before the song is needed
+ *   resolve(...)               find, then open
+ *
+ * Addon links hold their owner's token: every log line, error and health entry shows the host only.
+ */
+public final class AddonClient {
+    /** One GET. Throws IOException on a network failure (SocketTimeoutException when the call timed out). */
+    public interface Transport {
+        Response get(Protocol.Request request) throws IOException;
+    }
+
+    public interface Sleeper {
+        void sleep(long ms) throws InterruptedException;
+    }
+
+    public interface Log {
+        void log(String line);
+    }
+
+    public static final class Response {
+        public final int status;
+        /** Header names in lower case. */
+        public final Map<String, String> headers;
+        public final String body;
+
+        public Response(int status, Map<String, String> headers, String body) {
+            this.status = status;
+            this.headers = headers == null ? new HashMap<String, String>() : headers;
+            this.body = body == null ? "" : body;
+        }
+    }
+
+    /** An addon in the user's list: its link (holds the token), the user's lossless pick, the tier wanted. */
+    public static final class Addon {
+        public String base;
+        public String quality;
+        public String tier;
+        public String name;
+        /** The host only: safe to show. */
+        public String host;
+
+        public Addon(String base) {
+            this.base = base;
+        }
+
+        Addon copy() {
+            Addon a = new Addon(base);
+            a.quality = quality;
+            a.tier = tier;
+            a.name = name;
+            a.host = host;
+            return a;
+        }
+    }
+
+    public static final class Options {
+        public double slackSec = 5;
+        public String tier = Pick.LOSSLESS;
+        /** Downloads: ±2 s, addons with allowDownloads only, lossy files over 256 kbps only (§8). */
+        public boolean forDownload;
+    }
+
+    /** Why an addon or a row was passed over. Never holds a link. */
+    public static final class Tried {
+        public final String addon, row, why;
+        public final List<Pick.Refusal> refused;
+
+        Tried(String addon, String row, String why, List<Pick.Refusal> refused) {
+            this.addon = addon;
+            this.row = row;
+            this.why = why;
+            this.refused = refused;
+        }
+    }
+
+    public static final class Found {
+        public final Addon addon;
+        public final List<Pick.Row> rows;
+
+        Found(Addon addon, List<Pick.Row> rows) {
+            this.addon = addon;
+            this.rows = rows;
+        }
+    }
+
+    public static final class FindResult {
+        public final List<Found> found = new ArrayList<>();
+        public final List<Tried> tried = new ArrayList<>();
+    }
+
+    /** The row to play and its stream, or none (with why) when no addon has it. */
+    public static final class Opened {
+        public Addon addon;
+        public Pick.Row row;
+        public Protocol.Stream stream;
+        public String none;
+        public List<Tried> tried;
+    }
+
+    public static final class Discovered {
+        public final String base;
+        public final Protocol.Manifest manifest;
+
+        Discovered(String base, Protocol.Manifest manifest) {
+            this.base = base;
+            this.manifest = manifest;
+        }
+    }
+
+    public static final class Health {
+        public int fails;
+        public long coolUntil;
+        long rest = REST_MS;
+        public String last = "";
+        public Long ms;
+
+        Health copy() {
+            Health h = new Health();
+            h.fails = fails;
+            h.coolUntil = coolUntil;
+            h.rest = rest;
+            h.last = last;
+            h.ms = ms;
+            return h;
+        }
+    }
+
+    static final long TTL_MANIFEST = 10 * 60_000L, TTL_SEARCH = 10 * 60_000L, TTL_STREAM = 5 * 60_000L;
+    static final int CACHE_MAX = 128;
+    static final int RETRIES_429 = 2;
+    // health: this many failures in a row (not misses) put an addon to rest, 2 min doubling to 30 min
+    static final int FAILS_TO_REST = 3;
+    static final long REST_MS = 2 * 60_000L, REST_MAX_MS = 30 * 60_000L;
+
+    private final Transport transport;
+    private final StreamLimits.Clock clock;
+    private final Sleeper sleeper;
+    private final Log log;
+    private final StreamLimits limits;
+    private boolean allowLocalHttp;
+
+    private static final class Entry {
+        final long until;
+        final Object value;
+
+        Entry(long until, Object value) {
+            this.until = until;
+            this.value = value;
+        }
+    }
+
+    private final LinkedHashMap<String, Entry> cache = new LinkedHashMap<>();
+    private final Map<String, Long> quietUntil = new HashMap<>();
+    private final Map<String, Health> healthOf = new LinkedHashMap<>();
+
+    public AddonClient(Transport transport, StreamLimits.Clock clock, Sleeper sleeper, Log log) {
+        this.transport = transport;
+        this.clock = clock;
+        this.sleeper = sleeper;
+        this.log = log == null ? line -> { } : log;
+        this.limits = new StreamLimits(clock);
+    }
+
+    /** The real thing: HttpURLConnection, the wall clock, Thread.sleep. */
+    public static AddonClient create(Log log) {
+        return new AddonClient(new HttpTransport(), System::currentTimeMillis, Thread::sleep, log);
+    }
+
+    /** Debug only: allow plain http to the device itself (a mock addon running on the phone). Never in a release. */
+    public AddonClient allowLocalHttp(boolean allow) {
+        this.allowLocalHttp = allow;
+        return this;
+    }
+
+    private long now() {
+        return clock.nowMs();
+    }
+
+    // ---- cache (§6) ----
+
+    private synchronized Object cached(String key) {
+        Entry e = cache.get(key);
+        if (e == null) return null;
+        if (e.until < now()) {
+            cache.remove(key);
+            return null;
+        }
+        return e.value;
+    }
+
+    private synchronized void remember(String key, Object value, long ttl) {
+        cache.remove(key);
+        cache.put(key, new Entry(now() + ttl, value));
+        Iterator<String> it = cache.keySet().iterator();
+        while (cache.size() > CACHE_MAX && it.hasNext()) {
+            it.next();
+            it.remove();
+        }
+    }
+
+    // ---- one GET of JSON (§1, §5) ----
+
+    Object getJson(String base, String url, boolean manifest, boolean retry429) {
+        if (!Protocol.allowed(url, allowLocalHttp)) throw new AddonError("error", "https only");
+        for (int attempt = 0; ; attempt++) {
+            Long quiet;
+            synchronized (this) {
+                quiet = quietUntil.get(base);
+            }
+            long wait = (quiet != null ? quiet : 0) - now();
+            if (wait > 0) sleep(wait);
+            Response r;
+            try {
+                r = transport.get(Protocol.api(url));
+            } catch (SocketTimeoutException e) {
+                throw new AddonError("down", "timed out");
+            } catch (IOException e) {
+                throw new AddonError("down", "network: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
+            }
+            if (r.status == 429) {
+                Double ra = Js.num(r.headers.get("retry-after"));
+                double ms = Math.min(8000, Math.max(500, ra != null ? ra * 1000 : 500 << attempt));
+                synchronized (this) {
+                    quietUntil.put(base, now() + (long) ms);
+                }
+                if (!retry429 || attempt >= RETRIES_429) throw new AddonError("down", "rate limited (429)", 429, ra);
+                continue;
+            }
+            if (r.status == 404) throw new AddonError(manifest ? "error" : "miss", "not found (404)", 404, null);
+            if (r.status >= 500) throw new AddonError("down", "server error (" + r.status + ")", r.status, null);
+            if (r.status >= 400) {
+                String detail = "";
+                try {
+                    Object j = Json.parse(r.body);
+                    if (j instanceof Map) detail = Js.text(((Map<?, ?>) j).get("detail"));
+                    if (detail.length() > 120) detail = detail.substring(0, 120);
+                } catch (RuntimeException notJson) {
+                    detail = "";
+                }
+                throw new AddonError("error", "refused (" + r.status + ")" + (detail.isEmpty() ? "" : ": " + detail), r.status, null);
+            }
+            if (Js.blank(r.body)) throw new AddonError("error", "empty answer", r.status, null);
+            try {
+                return Json.parse(Js.trim(r.body));
+            } catch (RuntimeException e) {
+                throw new AddonError("error", "not JSON", r.status, null);
+            }
+        }
+    }
+
+    private void sleep(long ms) {
+        try {
+            sleeper.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AddonError("down", "interrupted");
+        }
+    }
+
+    // ---- manifest and discovery (§2) ----
+
+    public Protocol.Manifest manifest(String base) {
+        String key = "m|" + base;
+        Object hit = cached(key);
+        if (hit != null) return (Protocol.Manifest) hit;
+        Protocol.Manifest m = Protocol.readManifest(getJson(base, Protocol.manifestUrl(base), true, true));
+        if (m == null) throw new AddonError("error", "not an addon manifest");
+        remember(key, m, TTL_MANIFEST);
+        return m;
+    }
+
+    /** §2: an addon from a pasted link. An addon that needs the official BitChord app is refused. */
+    public Discovered discover(String pasted) {
+        String raw = Js.trim(Js.text(pasted)).replaceAll("/+$", "");
+        String base = Protocol.baseOf(raw);
+        Protocol.Url u = Protocol.parse(raw);
+        if (u == null) throw new AddonError("error", "not a link");
+        if (!Protocol.allowed(raw, allowLocalHttp)) throw new AddonError("error", "https only");
+        String[] tries = u.path.toLowerCase(java.util.Locale.ROOT).endsWith(".json")
+                ? new String[]{raw, Protocol.manifestUrl(base)} : new String[]{Protocol.manifestUrl(raw), raw};
+        AddonError last = null;
+        for (String t : tries) {
+            try {
+                Object j = getJson(base, t, true, true);
+                if (Protocol.looksLikeManifest(j)) {
+                    Protocol.Manifest m = Protocol.readManifest(j);
+                    if (m != null && m.needsOfficial) throw new AddonError("error", Protocol.NEEDS_OFFICIAL);
+                    if (m != null) {
+                        remember("m|" + base, m, TTL_MANIFEST);
+                        return new Discovered(base, m);
+                    }
+                }
+            } catch (AddonError e) {
+                if (Protocol.NEEDS_OFFICIAL.equals(e.getMessage())) throw e;
+                last = keepReason(last, e);   // (a 403's reason beats a later 404)
+            }
+        }
+        try {   // last resort: a search answers
+            Object j = getJson(base, base + "/search?q=music", false, true);
+            if (j instanceof Map && ((Map<?, ?>) j).get("tracks") instanceof List) {
+                Protocol.Manifest m = new Protocol.Manifest();
+                m.id = base;
+                m.name = Protocol.redact(base);
+                m.version = "";
+                m.resources.add("search");
+                m.resources.add("stream");
+                m.usable = true;
+                m.allowDownloads = true;
+                remember("m|" + base, m, TTL_MANIFEST);
+                return new Discovered(base, m);
+            }
+        } catch (AddonError e) {
+            last = keepReason(last, e);
+        }
+        throw last != null ? last : new AddonError("error", "no addon there");
+    }
+
+    private static AddonError keepReason(AddonError last, AddonError e) {
+        return last != null && (last.status == null || last.status != 404) ? last : e;
+    }
+
+    // ---- search (§3) ----
+
+    /** The addon's rows for a query (first 15, cached 10 min). */
+    @SuppressWarnings("unchecked")
+    public List<Object> search(Addon addon, TrackMatcher.Target target, String query, Protocol.Manifest man) {
+        String url = Protocol.searchUrl(addon.base, Protocol.paramsFor(man, addon.tier, addon.quality), target, query);
+        String key = "s|" + url;
+        Object hit = cached(key);
+        if (hit != null) return (List<Object>) hit;
+        Object j = getJson(addon.base, url, false, true);
+        Map<String, Object> m = j instanceof Map ? (Map<String, Object>) j : new HashMap<String, Object>();
+        if (Js.truthy(m.get("error"))) {
+            String e = Js.text(m.get("error"));
+            throw new AddonError("miss", e.length() > 120 ? e.substring(0, 120) : e);
+        }
+        List<Object> rows = new ArrayList<>();
+        if (m.get("tracks") instanceof List) {
+            List<Object> tracks = (List<Object>) m.get("tracks");
+            for (int i = 0; i < tracks.size() && i < Pick.MAX_ROWS; i++) rows.add(tracks.get(i));
+        }
+        remember(key, rows, TTL_SEARCH);
+        return rows;
+    }
+
+    // ---- stream (§4, §4a) ----
+
+    /** How long until this addon takes another /stream call (0: now). */
+    public long streamWait(Addon addon, Protocol.Manifest man) {
+        return limits.waitMs(Protocol.baseOf(addon.base), man.limits);
+    }
+
+    /** /stream for a row: cached 5 min (a cached answer costs nothing), else within the §4a budget. */
+    public Protocol.Stream stream(Addon addon, Pick.Row row, Protocol.Manifest man) {
+        String url = Protocol.streamUrl(addon.base, row.id, Protocol.paramsFor(man, addon.tier, addon.quality));
+        String key = "t|" + url;
+        Object hit = cached(key);
+        if (hit != null) return (Protocol.Stream) hit;
+        long wait = limits.tryStart(addon.base, man.limits);
+        if (wait > 0) throw new AddonError("limit", "stream limit, free in " + (long) Math.ceil(wait / 1000.0) + " s");
+        Protocol.Stream s;
+        try {
+            s = Protocol.readStream(getJson(addon.base, url, false, false), man.limits.cachedMarker);
+            limits.answered(addon.base, s.cached);
+        } catch (AddonError e) {
+            if (e.status != null && e.status == 429) {
+                int perMinute = limits.rateLimited(addon.base, e.retryAfterSec);
+                throw new AddonError("limit", "stream limit (429), " + perMinute + "/min from now on");
+            }
+            if (!"miss".equals(e.kind) || row.streamURL == null) throw e;
+            Map<String, Object> fallback = new HashMap<>();
+            fallback.put("url", row.streamURL);
+            s = Protocol.readStream(fallback, null);
+        }
+        remember(key, s, TTL_STREAM);
+        return s;
+    }
+
+    /** §7: Range bytes=0-0 (4 s): the file must hold the whole song. Unmeasurable is not refused. */
+    public Pick.Verdict probe(String url, String tier, Double kbps, Double songSec, double slackSec, Map<String, String> headers) {
+        try {
+            Response r = transport.get(Protocol.probe(url, headers));
+            if (r.status >= 400) return new Pick.Verdict(false, "stream answered " + r.status, null);
+            Pick.Head head = new Pick.Head();
+            head.status = r.status;
+            head.contentRange = r.headers.get("content-range");
+            head.contentLength = r.headers.get("content-length");
+            return Pick.probeVerdict(head, tier, kbps, songSec, slackSec);
+        } catch (IOException e) {
+            return new Pick.Verdict(true, null, null);
+        }
+    }
+
+    // ---- health ----
+
+    private synchronized void note(String base, Boolean ok, String last, Long ms) {
+        Health h = healthOf.get(base);
+        if (h == null) {
+            h = new Health();
+            healthOf.put(base, h);
+        }
+        if (Boolean.TRUE.equals(ok)) {
+            h.fails = 0;
+            h.rest = REST_MS;
+        } else if (Boolean.FALSE.equals(ok) && ++h.fails >= FAILS_TO_REST) {
+            h.coolUntil = now() + h.rest;
+            h.rest = Math.min(REST_MAX_MS, h.rest * 2);
+            h.fails = 0;
+        }
+        h.last = last;
+        if (ms != null) h.ms = ms;
+    }
+
+    private synchronized boolean resting(String base) {
+        Health h = healthOf.get(base);
+        return h != null && h.coolUntil > now();
+    }
+
+    /** Each addon's health, keyed by host (never the link). */
+    public synchronized Map<String, Health> health() {
+        Map<String, Health> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Health> e : healthOf.entrySet()) out.put(Protocol.redact(e.getKey()), e.getValue().copy());
+        return out;
+    }
+
+    private void failed(String base, String host, RuntimeException e, long t0, List<Tried> tried) {
+        String kind = e instanceof AddonError ? ((AddonError) e).kind : "error";
+        String why = Protocol.scrub(e.getMessage() != null ? e.getMessage() : e.toString());
+        note(base, "miss".equals(kind) ? null : Boolean.FALSE, why, now() - t0);
+        tried.add(new Tried(host, null, why, null));
+        log.log("addons: " + host + ": " + why);
+    }
+
+    // ---- the look-ahead and the opening (§8) ----
+
+    /** Search and pick only, every addon in priority order. No /stream calls: safe for the next song. */
+    public FindResult find(TrackMatcher.Target target, List<Addon> addons, Options opt) {
+        if (opt == null) opt = new Options();
+        FindResult out = new FindResult();
+        for (Addon a : addons) {
+            Addon addon = a.copy();
+            if (addon.tier == null) addon.tier = opt.tier;
+            addon.base = Protocol.baseOf(a.base);
+            String host = Protocol.redact(addon.base);
+            if (resting(addon.base)) {
+                out.tried.add(new Tried(host, null, "resting after failures", null));
+                continue;
+            }
+            long t0 = now();
+            try {
+                Protocol.Manifest man = manifest(addon.base);
+                if (man.needsOfficial) {
+                    out.tried.add(new Tried(host, null, Protocol.NEEDS_OFFICIAL, null));
+                    continue;
+                }
+                if (!man.usable) {
+                    out.tried.add(new Tried(host, null, "no search", null));
+                    continue;
+                }
+                if (opt.forDownload && !man.allowDownloads) {
+                    out.tried.add(new Tried(host, null, "no downloads", null));
+                    continue;
+                }
+                Pick.Choice choice = new Pick.Choice();
+                for (String q : TrackMatcher.queries(target)) {
+                    choice = Pick.rowsToOpen(search(addon, target, q, man), target, opt.slackSec, opt.forDownload);
+                    if (!choice.open.isEmpty()) break;
+                }
+                note(addon.base, true, choice.open.isEmpty() ? "no match" : "ok", now() - t0);
+                if (choice.open.isEmpty()) {
+                    out.tried.add(new Tried(host, null, "no match", choice.refused));
+                    continue;
+                }
+                addon.name = man.name;
+                addon.host = host;
+                out.found.add(new Found(addon, choice.open));
+            } catch (RuntimeException e) {
+                failed(addon.base, host, e, t0, out.tried);
+            }
+        }
+        return out;
+    }
+
+    /** Just before the song is needed: /stream and the probe, row by row, addon by addon. */
+    public Opened open(List<Found> found, TrackMatcher.Target target, Options opt, List<Tried> tried) {
+        if (opt == null) opt = new Options();
+        if (tried == null) tried = new ArrayList<>();
+        for (Found f : found) {
+            Addon addon = f.addon;
+            long t0 = now();
+            try {
+                Protocol.Manifest man = manifest(addon.base);
+                for (Pick.Row row : f.rows) {
+                    Protocol.Stream s;
+                    try {
+                        s = stream(addon, row, man);
+                    } catch (AddonError e) {
+                        if (!"miss".equals(e.kind)) throw e;
+                        s = Protocol.Stream.miss(e.getMessage());
+                    }
+                    if (s.miss != null) {
+                        tried.add(new Tried(addon.host, row.id, Protocol.scrub(s.miss), null));
+                        continue;
+                    }
+                    if (!"file".equals(s.transport)) {
+                        tried.add(new Tried(addon.host, row.id, s.transport + " (not played yet)", null));
+                        continue;
+                    }
+                    if (!Protocol.allowed(s.url, allowLocalHttp)) {
+                        tried.add(new Tried(addon.host, row.id, "not https", null));
+                        continue;
+                    }
+                    if (opt.forDownload && !Protocol.goodForDownload(s)) {
+                        tried.add(new Tried(addon.host, row.id, "lossy at 256 kbps or under", null));
+                        continue;
+                    }
+                    Pick.Verdict p = probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
+                            target.durationSec, opt.forDownload ? Pick.DOWNLOAD_SLACK_SEC : opt.slackSec, s.headers);
+                    if (!p.ok) {
+                        tried.add(new Tried(addon.host, row.id, p.why, null));
+                        continue;
+                    }
+                    note(addon.base, true, "ok", now() - t0);
+                    log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id + ", "
+                            + (s.codec != null ? s.codec : "?")
+                            + (s.sampleRate != null && s.sampleRate != 0 ? " " + Js.number(s.sampleRate / 1000) + " kHz" : "")
+                            + (s.bitDepth != null && s.bitDepth != 0 ? "/" + Js.number(s.bitDepth) : ""));
+                    Opened o = new Opened();
+                    o.addon = new Addon(addon.base);
+                    o.addon.name = man.name;
+                    o.addon.host = addon.host;
+                    o.row = row;
+                    o.stream = s;
+                    o.tried = tried;
+                    return o;
+                }
+            } catch (AddonError e) {
+                if ("limit".equals(e.kind)) {   // not a fault
+                    tried.add(new Tried(addon.host, null, e.getMessage(), null));
+                    continue;
+                }
+                failed(addon.base, addon.host, e, t0, tried);
+            } catch (RuntimeException e) {
+                failed(addon.base, addon.host, e, t0, tried);
+            }
+        }
+        Opened none = new Opened();
+        none.none = "no addon has it";
+        none.tried = tried;
+        return none;
+    }
+
+    /** The first addon, in priority order, with a row that opens and passes the probe. */
+    public Opened resolve(TrackMatcher.Target target, List<Addon> addons, Options opt) {
+        FindResult f = find(target, addons, opt);
+        return open(f.found, target, opt, f.tried);
+    }
+}

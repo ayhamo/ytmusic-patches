@@ -174,6 +174,10 @@ public final class Features {
                 rewrapCurrentResolver();
                 startLyricsPoll();
                 EqPresets.register(appContext);
+                // Phase 4 debug: the Direct-mode spike, only with directSpike=1 in spike.properties
+                if ("1".equals(readProps().getProperty("directSpike"))) {
+                    app.ayham.extension.music.addons.DirectSpike.register(appContext);
+                }
                 if ("1".equals(readProps().getProperty("batchB"))) {
                     NativeCheck.start(appContext, readProps().getProperty("batchBVideo"));
                 }

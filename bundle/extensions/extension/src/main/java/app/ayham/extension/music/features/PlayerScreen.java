@@ -604,6 +604,7 @@ final class PlayerScreen {
                 long[] z = app.ayham.extension.music.automix.Automix.zone();
                 if (durationMs > 0 || z != null) zone.set(z, durationMs);
             }
+            zone.badge(PlayerTap.badge());
             AudioManager am = (AudioManager) a.getSystemService(Context.AUDIO_SERVICE);
             volume.setValue(am.getStreamVolume(AudioManager.STREAM_MUSIC));
             refreshLine(a);
@@ -969,6 +970,88 @@ final class PlayerScreen {
             label.setShadowLayer(4 * c.getResources().getDisplayMetrics().density, 0, c.getResources().getDisplayMetrics().density, 0x8C000000);
         }
 
+        // ---- the quality badge (BitChord's LosslessOrStats), where "Mixing" goes when no mix runs ----
+        private app.ayham.extension.music.addons.Quality.Badge badge = app.ayham.extension.music.addons.Quality.Badge.NONE;
+        private final Paint badgeText = new Paint(Paint.ANTI_ALIAS_FLAG), glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private android.graphics.Path wave;
+        private final long badgeStart = android.os.SystemClock.uptimeMillis();
+
+        void badge(app.ayham.extension.music.addons.Quality.Badge b) {
+            if (b == null || b == badge) return;
+            Log.i(TAG, "quality badge: " + (b == app.ayham.extension.music.addons.Quality.Badge.NONE ? "none" : b.label()));
+            badge = b;
+            invalidate();
+        }
+
+        private void drawBadge(Canvas canvas, float d, float cy) {
+            app.ayham.extension.music.addons.Quality.Badge b = badge;
+            if (b == app.ayham.extension.music.addons.Quality.Badge.NONE) return;
+            long t = android.os.SystemClock.uptimeMillis() - badgeStart;
+            if (badgeText.getTextSize() == 0 || badgeText.getTypeface() == null) {
+                badgeText.setTextSize(12.5f * getResources().getDisplayMetrics().scaledDensity);
+                badgeText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                badgeText.setShadowLayer(4 * d, 0, d, 0x8C000000);
+            }
+            if (wave == null) {
+                wave = new android.graphics.Path();
+                for (float[] poly : app.ayham.extension.music.addons.Quality.wave()) {
+                    wave.moveTo(poly[0], poly[1]);
+                    for (int i = 2; i < poly.length; i += 2) wave.lineTo(poly[i], poly[i + 1]);
+                    wave.close();
+                }
+            }
+            String text = b.label();
+            boolean shimmer = b.shimmers();
+            boolean headphones = b == app.ayham.extension.music.addons.Quality.Badge.HIGH_QUALITY;
+            float gw = headphones ? 13 * d : 15 * d, gh = headphones ? 13 * d : 8 * d, gap = 4 * d;
+            float tw = badgeText.measureText(text);
+            float x0 = getWidth() / 2f - (gw + gap + tw) / 2f;
+            // "Upgrading Quality" breathes 1 → 0.4 → 1 (900 ms each way): a wait, not a result
+            float alpha = 1f;
+            if (b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) {
+                float ph = (t % 1800) / 900f;
+                float k = ph <= 1 ? ph : 2 - ph;
+                k = k * k * (3 - 2 * k);
+                alpha = 1f - 0.6f * k;
+            }
+            int glyphAlpha = Math.round(255 * alpha * (shimmer ? 0.7f : 0.45f));
+            glyph.setColor((glyphAlpha << 24) | 0xFFFFFF);
+            glyph.setShadowLayer(4 * d, 0, d, 0x8C000000);
+            canvas.save();
+            if (headphones) {
+                float s = gw / 24f;
+                canvas.translate(x0, cy - gh / 2);
+                canvas.scale(s, s);
+                glyph.setStyle(Paint.Style.STROKE);
+                glyph.setStrokeWidth(2f);
+                canvas.drawArc(new android.graphics.RectF(4, 3, 20, 19), 180, 180, false, glyph);
+                glyph.setStyle(Paint.Style.FILL);
+                canvas.drawRoundRect(new android.graphics.RectF(3, 12, 9, 21), 2, 2, glyph);
+                canvas.drawRoundRect(new android.graphics.RectF(15, 12, 21, 21), 2, 2, glyph);
+            } else {
+                canvas.translate(x0, cy - gh / 2);
+                canvas.scale(gw / app.ayham.extension.music.addons.Quality.WAVE_W, gh / app.ayham.extension.music.addons.Quality.WAVE_H);
+                glyph.setStyle(Paint.Style.FILL);
+                canvas.drawPath(wave, glyph);
+            }
+            canvas.restore();
+            float tx = x0 + gw + gap, ty = cy - (badgeText.descent() + badgeText.ascent()) / 2;
+            badgeText.setTextAlign(Paint.Align.LEFT);
+            if (shimmer) {
+                // BitChord's ShimmerText: white at 0.55, a band of full white 0.6 of the width wide
+                // sweeping across every 3 s
+                float band = tw * 0.6f, centre = -band + (t % 3000) / 3000f * (tw + 2 * band);
+                badgeText.setShader(new LinearGradient(tx + centre - band, 0, tx + centre + band, 0,
+                        new int[]{0x8CFFFFFF, 0xFFFFFFFF, 0x8CFFFFFF}, null, Shader.TileMode.CLAMP));
+                badgeText.setColor(Color.WHITE);
+            } else {
+                badgeText.setShader(null);
+                badgeText.setColor((Math.round(255 * alpha * 0.45f) << 24) | 0xFFFFFF);
+            }
+            canvas.drawText(text, tx, ty, badgeText);
+            if (shimmer || b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) postInvalidateOnAnimation();
+        }
+
         void set(long[] z, long durationMs) {
             long f = z == null ? -1 : z[0];
             long d = z == null || z[1] <= 0 ? durationMs : z[1];
@@ -1037,6 +1120,7 @@ final class PlayerScreen {
             base = -1;
             mixStart = -1;
             showYts();
+            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 12 * d);
             if (running) postInvalidateDelayed(100); // the decks get onto YT's clock in a moment
             if (from < 0 || dur <= 0 || from >= dur) return;
             float x = left + (right - left) * from / dur;

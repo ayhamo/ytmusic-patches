@@ -33,6 +33,8 @@ public class SpecFixturesTest {
             Map<String, Object> pair = (Map<String, Object>) Json.parse(read(f));
             Map<String, Object> golden = (Map<String, Object>) Json.parse(read(new File(spec, "automix/golden/" + f.getName())));
             for (int version = 1; version <= 3; version++) {
+                // the goldens hold only the versions the extension still plays (2 and 3 since Phase 3)
+                if (!golden.containsKey("v" + version)) continue;
                 Map<String, Object> got = planPair(pair, version);
                 compare(f.getName() + " v" + version, golden.get("v" + version), got, diffs);
             }

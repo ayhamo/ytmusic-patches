@@ -55,6 +55,7 @@ final class Engine {
     }
 
     static float gate(Object player, float volume) {
+        if (player != null && app.ayham.extension.music.features.PlayerTap.isOurs(player)) return volume; // our addon player
         if (!selfCall && player != null) ytAsked.put(player, volume);
         // the stream deck plays this song: YT's player stays silent under it
         if (player != null && StreamDeck.mutes(player)) return 0f;

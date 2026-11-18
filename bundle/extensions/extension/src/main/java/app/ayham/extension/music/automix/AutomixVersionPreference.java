@@ -6,9 +6,10 @@ import android.preference.Preference;
 import android.util.AttributeSet;
 
 /**
- * The settings' Automix lists, as in the extension's popup. "Automix version" (Original AutoDJ /
- * Advanced AutoDJ): the key-clash toggle works only in Advanced AutoDJ, so it is greyed out (its
- * setting kept) under Original. "Blend length" (Auto / Up to N bars). The entries are set here, by key.
+ * The settings' Automix lists, as in the extension's popup. "Automix version" (Classic / Automix v2
+ * (test); Original is retired and a saved 1 shows as Classic): the key-clash toggle is Classic's own,
+ * so it is greyed out (its setting kept) under Automix v2, which always checks keys. "Blend length"
+ * (Auto / Up to N bars). The entries are set here, by key.
  */
 @SuppressWarnings("deprecation")
 public class AutomixVersionPreference extends ListPreference {
@@ -42,8 +43,8 @@ public class AutomixVersionPreference extends ListPreference {
                     "Up to 16 bars (BitChord web default)", "Up to 32 bars"});
             setEntryValues(new CharSequence[]{"auto", "4", "8", "16", "32"});
         } else {
-            setEntries(new CharSequence[]{"Original AutoDJ", "Advanced AutoDJ", "Automix v2 (test)"});
-            setEntryValues(new CharSequence[]{"1", "2", "3"});
+            setEntries(new CharSequence[]{"Classic", "Automix v2 (test)"});
+            setEntryValues(new CharSequence[]{"2", "3"});
         }
     }
 
@@ -88,6 +89,8 @@ public class AutomixVersionPreference extends ListPreference {
 
     @Override
     public void setValue(String value) {
+        // Original (1) is retired: a saved 1 is Classic
+        if (Automix.KEY_VERSION.equals(getKey()) && !"3".equals(value)) value = "2";
         super.setValue(value);
         keyAware(value);
     }
@@ -97,7 +100,7 @@ public class AutomixVersionPreference extends ListPreference {
         try {
             if (getPreferenceManager() == null) return;
             Preference p = getPreferenceManager().findPreference(Automix.KEY_KEY_AWARE);
-            if (p != null) p.setEnabled("2".equals(value) || "3".equals(value));
+            if (p != null) p.setEnabled(!"3".equals(value));
         } catch (Throwable ignored) {
         }
     }

@@ -169,14 +169,14 @@ val playerFeaturesPatch = patch(
                     appendChild("$AUTOMIX.AutomixVersionPreference") {
                         setAttribute("android:key", "ayham_automix_version")
                         setAttribute("android:title", "Automix version")
-                        setAttribute("android:summary", "%s. Original: BitChord web's automix, a gentle bass and treble cross, equal-power fade. Advanced: plus the BitChord phone's ideas: a blend point where the two songs don't sing over each other, a quick bass swap at the middle, the old song's highs fading while the new one opens up, blends that end where the music ends, the next song never more than a quarter in. Automix v2 (test): Advanced with Orchard's rules: up to 4%% apart one song is sped up, 4-8%% both glide to meet; further apart, or with clashing bass styles, a beatless bridge or a straight hand-over; a blend both songs would sing over becomes a drop-in or a muffle.")
-                        setAttribute("android:defaultValue", "1")
+                        setAttribute("android:summary", "%s. Classic: BitChord's automix with the phone's ideas: a blend point where the two songs don't sing over each other, a quick bass swap at the middle, the old song's highs fading while the new one opens up, blends that end where the music ends, the next song never more than a quarter in. Automix v2 (test): Classic with Orchard's rules: up to 4%% apart one song is sped up, 4-8%% both glide to meet; further apart, or with clashing bass styles, a beatless bridge or a straight hand-over; a blend both songs would sing over becomes a drop-in or a muffle, and keys are always checked.")
+                        setAttribute("android:defaultValue", "2")
                         setAttribute("android:dependency", "ayham_automix_enabled")
                     }
                     appendChild("SwitchPreference") {
                         setAttribute("android:key", "ayham_automix_key_aware")
                         setAttribute("android:title", "Shorter blend when keys clash")
-                        setAttribute("android:summary", "Advanced AutoDJ only. Two songs in keys that don't go together get a short blend (2 bars, about 4-6 s) so the out-of-tune moment is brief. Keys that go together (the same, relative major/minor, a neighbour on the Camelot wheel) keep the normal length.")
+                        setAttribute("android:summary", "Classic only (Automix v2 always checks keys). Two songs in keys that don't go together get a short blend (2 bars, about 4-6 s) so the out-of-tune moment is brief. Keys that go together (the same, relative major/minor, a neighbour on the Camelot wheel) keep the normal length.")
                         setAttribute("android:defaultValue", "false")
                     }
                     appendChild("$AUTOMIX.AutomixVersionPreference") {

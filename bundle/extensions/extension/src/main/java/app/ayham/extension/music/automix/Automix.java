@@ -60,8 +60,9 @@ public final class Automix {
     static Planner.Settings settings() {
         SharedPreferences p = prefs(app);
         Planner.Settings s = new Planner.Settings();
-        String v = p.getString(KEY_VERSION, "1");
-        s.version = "3".equals(v) ? 3 : "2".equals(v) ? 2 : 1;
+        // Original (1) is retired like on the PC: a saved 1 plays Classic (2); version 1's code stays for the audit
+        String v = p.getString(KEY_VERSION, "2");
+        s.version = "3".equals(v) ? 3 : 2;
         s.keyAware = p.getBoolean(KEY_KEY_AWARE, false);
         String bars = p.getString(KEY_BARS, "auto");
         try {

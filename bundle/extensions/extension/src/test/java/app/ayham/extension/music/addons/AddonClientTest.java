@@ -499,4 +499,21 @@ public class AddonClientTest {
         assertEquals(16, s.bitDepth, 0);
         assertNotNull(s.headers);
     }
+
+    private static String quality(String settingsJson, String tier) {
+        List<String[]> p = Protocol.paramsFor(Protocol.readSettings(Json.parse(settingsJson)), tier, null);
+        return p.get(p.size() - 1)[1];
+    }
+
+    @Test
+    public void qualityTiersHiResAndCd() {
+        // the extension's addon_client_tests (90574a6): Hi-Res and CD by name, never a lossy option
+        String kbps = "[{\"key\":\"quality\",\"options\":[{\"value\":\"LOSSLESS\",\"label\":\"FLAC\"},{\"value\":\"HIGH\",\"label\":\"AAC 320 kbps\"},{\"value\":\"LOW\",\"label\":\"AAC 96 kbps\"}]}]";
+        assertEquals("Hi-Res never takes \"96 kbps\"", "LOSSLESS", quality(kbps, Pick.HIRES));
+        String tidal = "[{\"key\":\"quality\",\"options\":[{\"value\":\"LOSSLESS\",\"label\":\"Lossless\"},{\"value\":\"HI_RES_LOSSLESS\",\"label\":\"Max\"}]}]";
+        assertEquals("Hi-Res finds HI_RES_LOSSLESS", "HI_RES_LOSSLESS", quality(tidal, Pick.HIRES));
+        String rate = "[{\"key\":\"quality\",\"options\":[{\"value\":\"a\",\"label\":\"FLAC 44.1 kHz\"},{\"value\":\"b\",\"label\":\"FLAC 96 kHz\"}]}]";
+        assertEquals("Hi-Res by sample rate with its unit", "b", quality(rate, Pick.HIRES));
+        assertEquals("CD by 44.1 kHz", "a", quality(rate, Pick.CD));
+    }
 }

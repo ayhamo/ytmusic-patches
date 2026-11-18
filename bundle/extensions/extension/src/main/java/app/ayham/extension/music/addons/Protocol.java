@@ -251,6 +251,11 @@ public final class Protocol {
 
     private static final Pattern LOW_QUALITY = Pattern.compile("low|96|128|min", Pattern.CASE_INSENSITIVE);
     private static final Pattern HIGH_QUALITY = Pattern.compile("high|320|normal|standard", Pattern.CASE_INSENSITIVE);
+    /** Hi-Res and CD by name; sample rates only with their unit, so "96 kbps" is never Hi-Res. */
+    private static final Pattern WANT_HIRES = Pattern.compile("hi[" + Js.WS + "_-]?res|24[" + Js.WS + "-]?bit|(192|176\\.4|96|88\\.2)[" + Js.WS + "]*k[" + Js.WS + "]*hz", Pattern.CASE_INSENSITIVE);
+    private static final Pattern WANT_CD = Pattern.compile("\\bcd\\b|16[" + Js.WS + "-]?bit|44\\.1[" + Js.WS + "]*k[" + Js.WS + "]*hz", Pattern.CASE_INSENSITIVE);
+    /** Lossy options never count as Hi-Res or CD. */
+    private static final Pattern LOSSY = Pattern.compile("kbps|mp3|aac|opus|vorbis|\\bogg\\b", Pattern.CASE_INSENSITIVE);
 
     /**
      * §1: each declared setting's default in order, atmos=false in place of a declared atmos
@@ -271,12 +276,30 @@ public final class Protocol {
             }
             if (s.def != null) out.add(new String[]{s.key, Js.text(s.def)});
         }
-        String quality = tier;
+        Pattern want = tier.equals(Pick.HIRES) ? WANT_HIRES : tier.equals(Pick.CD) ? WANT_CD : null;
+        // tiers: LOSSLESS (the addon's best: its first option), HIRES, CD, HIGH, LOW
+        String quality = want != null ? Pick.LOSSLESS : tier;
         if (q != null && !q.options.isEmpty()) {
             List<String> vals = new ArrayList<>();
             for (Option o : q.options) vals.add(Js.text(o.value));
             if (tier.equals(Pick.LOSSLESS)) {
                 quality = picked != null && vals.contains(picked) ? picked : vals.get(0);
+            } else if (want != null) {
+                // Hi-Res or CD: the option that names it, else (CD) one called "lossless", else the first
+                quality = null;
+                for (int i = 0; quality == null && i < vals.size(); i++) {
+                    String v = vals.get(i), l = Js.text(q.options.get(i).label);
+                    if (!LOSSY.matcher(v).find() && !LOSSY.matcher(l).find() && (want.matcher(v).find() || want.matcher(l).find())) quality = v;
+                }
+                if (quality == null && tier.equals(Pick.CD)) {
+                    for (String v : vals) {
+                        if (v.toLowerCase(Locale.ROOT).equals("lossless")) {
+                            quality = v;
+                            break;
+                        }
+                    }
+                }
+                if (quality == null) quality = vals.get(0);
             } else {
                 Pattern re = tier.equals(Pick.LOW) ? LOW_QUALITY : HIGH_QUALITY;
                 quality = null;
@@ -287,9 +310,13 @@ public final class Protocol {
                     }
                 }
                 for (int i = 0; quality == null && i < vals.size(); i++) {
-                    if (re.matcher(vals.get(i)).find() || re.matcher(q.options.get(i).label).find()) quality = vals.get(i);
+                    if (re.matcher(vals.get(i)).find() || re.matcher(Js.text(q.options.get(i).label)).find()) quality = vals.get(i);
                 }
-                if (quality == null) quality = vals.get(0);
+                // Low with no low option: the high one, else the last (addons list it as the smallest)
+                for (int i = 0; quality == null && tier.equals(Pick.LOW) && i < vals.size(); i++) {
+                    if (HIGH_QUALITY.matcher(vals.get(i)).find() || HIGH_QUALITY.matcher(Js.text(q.options.get(i).label)).find()) quality = vals.get(i);
+                }
+                if (quality == null) quality = tier.equals(Pick.LOW) ? vals.get(vals.size() - 1) : vals.get(0);
             }
         }
         out.add(new String[]{"quality", quality});

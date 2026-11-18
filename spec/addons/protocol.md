@@ -19,9 +19,10 @@ Headers:
 Every search and stream request carries these query parameters, percent-encoded, in this order:
 1. Each declared setting default, `key=default`.
 2. `quality=`:
-   - lossless tier: the user's pick if the manifest still lists it, else the first option;
-   - other tiers: an exact option match, else the first option containing `low|96|128|min` (LOW) or `high|320|normal|standard` (HIGH), else the first option;
-   - no quality setting declared: the tier name `LOSSLESS`, `HIGH` or `LOW`.
+   - lossless tier (the best): the user's pick if the manifest still lists it, else the first option;
+   - Hi-Res or CD tier **(ours)**: the first option whose value or label names it (`hi-res`, `24-bit`, `192 k`, `96 k`; `CD`, `16-bit`, `44.1`), else (CD) an option called `lossless`, else the first option;
+   - other tiers: an exact option match, else the first option containing `low|96|128|min` (LOW) or `high|320|normal|standard` (HIGH), else the first option (LOW: else the HIGH one, else the last option **(ours)**);
+   - no quality setting declared: the tier name `LOSSLESS`, `HIGH` or `LOW` (Hi-Res and CD send `LOSSLESS`).
    This overrides any declared quality default.
 3. `atmos=`: not sent. The extension and the phone app play stereo **(ours)**. An addon that declares an `atmos` setting (NullBeat: a toggle, default true) gets `atmos=false` in its place, overriding the default **(ours)**.
 
@@ -163,6 +164,10 @@ These rules, and the tier, kbps, probe, parameter, stream-answer and base-URL re
   - the take-over hands the new song from the incoming deck to the addon deck at the schedule's song position.
   - Filters that are part of the graph at rest (the player's and the tail's high- and low-pass) rest at 0 Hz and Nyquist, which pass the samples through unchanged, and the mix's filter curves end there. 20 Hz / 20 kHz still filtered every song (measured −15 to −30 dB residuals).
   - The loop decks and a glide stretch time, so what they play is the file's sound, not its samples.
-- Phone (decided 2026-11-17): Direct with the offset first. Resolve and fit happen during the previous song (the look-ahead above, then OPEN and the fit before the hand-over). ExoPlayer plays the addon file clipped at `offsetSec`, so its position equals YouTube's time; a negative offset gets a silence prefix of `−offsetSec`. Its level is YouTube's normalisation gain applied as a sample gain, times the source gain (`offset-map.md`, Level). The deck is used only for a mid-song upgrade (a file that arrives after the song started): the race plus silent audition, same recording within the slack, worth swapping (lossless, or at least +96 kbps), at least 20 s left. Reason: the emulator's deck clock problems.
+- Phone (as built, phone commit 5f16dfe): its own media3 player plays the addon file, with YouTube's player muted underneath as the clock. Resolve and fit happen during the previous song (the look-ahead above, then OPEN and the fit before the hand-over).
+  - Clock: the media3 player locks to YouTube's position through `StepClock` (file position = YouTube's time + `offsetSec`); when it drifts or YouTube seeks, it re-locks silently.
+  - Start: a prepared song starts on the addon file from 0. A song started cold (nothing prepared) plays on YouTube first while the file is resolved, fitted and silently locked (measured about 3.6–4.3 s after opening), then upgrades mid-song with the crossfade in.
+  - Hand-over: a 200 ms crossfade in from YouTube to the addon file; a 30 ms crossfade out back to YouTube (on a failure or a hand-back).
+  - Level: YouTube's normalisation gain times the source gain (`offset-map.md`, Level), applied as the player's volume. ExoPlayer's volume is at most 1, so on the phone the level is capped at 0 dB: it only cuts, never boosts (PC can boost up to +6 dB, true peak kept at or under −1 dBTP).
 - PC stays deck-only (above).
 - Downloads (phone only): only addons with `allowDownloads` not false; a lossy row must be over 256 kbps.

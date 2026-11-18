@@ -23,6 +23,8 @@ public final class Pick {
     static final double PREVIEW_MAX_SEC = 35, PREVIEW_SONG_SEC = 45;   // (Mornye) a clip this short of a longer song
 
     public static final String LOSSLESS = "LOSSLESS", HIGH = "HIGH", LOW = "LOW";
+    /** Quality tiers asked of an addon (Protocol.paramsFor): Hi-Res or CD by name; LOSSLESS is its best. */
+    public static final String HIRES = "HIRES", CD = "CD";
 
     /** An addon's search row, its fields read leniently. */
     public static final class Row extends TrackMatcher.Candidate {
@@ -69,7 +71,7 @@ public final class Pick {
         public String contentLength;
     }
 
-    private static final Pattern LOSSLESS_TEXT = Pattern.compile("flac|alac|wav|hi-?res|(16|24)[" + Js.WS + "-]?bit|lossless");
+    private static final Pattern LOSSLESS_TEXT = Pattern.compile("flac|alac|wav|hi[" + Js.WS + "_-]?res|(16|24)[" + Js.WS + "-]?bit|lossless");
     private static final Pattern LOW_TEXT = Pattern.compile(Js.B0 + "low" + Js.B1 + "|128|96|64");
     private static final Pattern HIGH_TEXT = Pattern.compile("320|mp3|aac|opus|high");
     static final Pattern ATMOS = Pattern.compile("atmos|dolby|eac3[_-]?joc|ec-?3", Pattern.CASE_INSENSITIVE);

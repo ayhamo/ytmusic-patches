@@ -67,8 +67,10 @@ final class SpotifyCanvas {
         long start = System.currentTimeMillis();
         File part = new File(dir, out.getName() + ".part");
         HttpURLConnection h = open(url);
+        boolean done = false;
+        // a failed download is an error (not saved as "no canvas"), and leaves no .part behind
         try (InputStream in = h.getInputStream(); OutputStream o = new FileOutputStream(part)) {
-            if (h.getResponseCode() != 200) return null;
+            if (h.getResponseCode() != 200) throw new java.io.IOException("canvas download: HTTP " + h.getResponseCode());
             byte[] b = new byte[65536];
             int n;
             long total = 0;
@@ -77,8 +79,10 @@ final class SpotifyCanvas {
                 if (total > 30L * 1024 * 1024) throw new java.io.IOException("canvas over 30 MB");
                 o.write(b, 0, n);
             }
+            done = true;
         } finally {
             h.disconnect();
+            if (!done && part.exists() && !part.delete()) Log.w(TAG, "canvas: could not delete " + part.getName());
         }
         if (!part.renameTo(out)) return null;
         HlsClip.trim(dir, out);

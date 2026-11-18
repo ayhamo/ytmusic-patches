@@ -434,7 +434,9 @@ final class AnimatedCover {
             if (fixed.isEmpty()) {
                 // a downloaded song's clip by its video id first (works offline)
                 try {
-                    vid = app.ayham.extension.music.automix.Automix.currentId();
+                    // only when the queue already names this song (it can lag a song behind)
+                    vid = app.ayham.extension.music.automix.Automix.currentIdFor(title);
+                    if (vid == null) app.ayham.extension.music.automix.Automix.refreshQueue();
                 } catch (Throwable ignored) {
                 }
                 if (vid != null) saved = CanvasCache.lookup(CanvasCache.idKey(vid));
@@ -464,6 +466,12 @@ final class AnimatedCover {
                     try {
                         boolean[] none = {false};
                         java.io.File f = VideoCanvas.clip(vid, title, artist, cacheDir, artPx, none);
+                        // still this song: a clip cut while the queue moved on is not saved under its id
+                        if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
+                            Log.i(TAG, "canvas: the queue moved on while cutting: not saved");
+                            if (f != null && !f.delete()) Log.w(TAG, "canvas: could not delete " + f.getName());
+                            return;
+                        }
                         if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
                         if (f != null) {
                             String path = f.getAbsolutePath();
@@ -628,13 +636,27 @@ final class AnimatedCover {
      * Crop the clip into the art: inside a music video's baked-in bars, at its judged place across
      * the picture (the .crop sidecar); centred for anything else.
      */
+    private static String cropFor, cardFit;
+    private static float[] crop;
+
     private static void fit() {
         if (view == null || videoW == 0 || videoH == 0 || view.getWidth() == 0) return;
         float vw = view.getWidth(), vh = view.getHeight();
         if (FullArt.on() && FullArt.clipMode() && FullArt.bannerSide() > 0 && metrolistFit(vw, vh)) return;
+        if (fitWas[4] != 0) cardFit = null; // coming back from the full-screen fit: set the card's again
         fitWas[4] = 0; // the card's crop: the full-screen one is set again when it comes back
         String path = playingUrl == null ? null : playingUrl.startsWith("file://") ? playingUrl.substring(7) : playingUrl;
-        float[] c = VideoCanvas.cropOf(path);
+        // runs on every pre-draw: the crop file is read once per clip, and an unchanged fit is not set
+        // again (setTransform redraws, which would call this again)
+        if (!java.util.Objects.equals(path, cropFor)) {
+            cropFor = path;
+            crop = VideoCanvas.cropOf(path);
+            cardFit = null;
+        }
+        String fitKey = path + "|" + vw + "x" + vh + "|" + videoW + "x" + videoH;
+        if (fitKey.equals(cardFit)) return;
+        cardFit = fitKey;
+        float[] c = crop;
         float cx = c == null ? 0.5f : c[0];
         float ax = c == null ? 0 : c[1] * videoW, ay = c == null ? 0 : c[2] * videoH;
         float aw = c == null ? videoW : videoW * (1 - c[1] - c[3]), ah = c == null ? videoH : videoH * (1 - c[2] - c[4]);

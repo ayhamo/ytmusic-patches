@@ -156,6 +156,8 @@ final class ArtBackdrop {
             int side = Math.min(src.getWidth(), src.getHeight());
             Bitmap sq = Bitmap.createBitmap(src, (src.getWidth() - side) / 2, (src.getHeight() - side) / 2, side, side);
             if (side > 1200) sq = Bitmap.createScaledBitmap(sq, 1200, 1200, true);
+            // a square software bitmap comes back as YT's own one, which YT may recycle under us
+            if (sq == bmp) sq = sq.copy(Bitmap.Config.ARGB_8888, false);
             return sq;
         } catch (Throwable t) {
             Log.w(TAG, "cover copy failed (" + d.getClass().getName() + ")", t);

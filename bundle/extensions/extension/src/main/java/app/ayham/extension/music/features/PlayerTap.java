@@ -234,7 +234,8 @@ public final class PlayerTap {
             String codec = codecLabel(h[3]);
             int bitrate = Integer.parseInt(h[5]);
             int channels = Integer.parseInt(t[0]);
-            int rate = Integer.parseInt(t[1]);
+            // this media3 prints [channels, -1, sampleRate]: the rate is the last field
+            int rate = Integer.parseInt(t[t.length - 1]);
             // BitChord's stream line: codec · sample rate · bitrate · channels (no itag)
             StringBuilder b = new StringBuilder(codec);
             if (rate > 0) b.append(" · ").append(String.format(java.util.Locale.ROOT, "%.1f kHz", rate / 1000f));

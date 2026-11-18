@@ -103,6 +103,8 @@ final class Engine {
     /** The incoming song's stream deck (lining up silently during the mix), and whether it took the handover. */
     private StreamDeck deck;
     private boolean deckTook, deckReleased;
+    /** The outgoing song's deck, let go for this mix's takeover. */
+    private StreamDeck releasedDeck;
 
     private static Biquad[] chain() {
         return new Biquad[]{new Biquad(Biquad.LOWSHELF, SR, 250), new Biquad(Biquad.HIGHSHELF, SR, 4000),
@@ -442,7 +444,10 @@ final class Engine {
         if (!tookOver && !deckReleased && mix >= -0.3) {
             deckReleased = true;
             StreamDeck a = StreamDeck.audible();
-            if (a != null && a.player == outPlayer) a.release(m.takeoverSong);
+            if (a != null && a.player == outPlayer) {
+                a.release(m.takeoverSong);
+                releasedDeck = a;
+            }
         }
         if (!tookOver && mix >= -0.012) {
             tookOver = true;
@@ -641,6 +646,12 @@ final class Engine {
         released = null;
         if (inPlayer != null && setSpeed != 1) speed(inPlayer, 1f);
         if (deck != null && !(ok && deckTook)) deck.handBack("the mix ended without it");
+        // the outgoing deck was let go for a takeover that never came: it stops now and YT's
+        // player (no longer muted by it) gets its volume back
+        if (releasedDeck != null && !tookOver) {
+            releasedDeck.cancelRelease();
+            if (outPlayer != null) restoreVolume(outPlayer);
+        }
         if (!started) {
             LoopMixRenderer.nativeDestroy(hOut);
             LoopMixRenderer.nativeDestroy(hIn);

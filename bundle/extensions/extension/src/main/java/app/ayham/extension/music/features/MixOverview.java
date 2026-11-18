@@ -62,6 +62,19 @@ final class MixOverview {
     private static final long FRAME_MS = 50;
 
     private static Dialog dialog;
+    private static Activity owner;
+
+    /** Drops the dialog and its views, so they don't keep the activity alive. */
+    private static void forget() {
+        dialog = null;
+        owner = null;
+        sub = msg = clock = note = preview = workText = null;
+        songsRow = work = null;
+        workBar = null;
+        view = null;
+        java.util.Arrays.fill(styleChips, null);
+        java.util.Arrays.fill(barChips, null);
+    }
     private static TextView sub, msg, clock, note, preview;
     private static LinearLayout songsRow, work;
     private static android.widget.ProgressBar workBar;
@@ -78,7 +91,10 @@ final class MixOverview {
     }
 
     static void show(Activity a) {
+        // a dialog of an activity that was destroyed while it showed never gets its dismiss
+        if (dialog != null && owner != null && owner.isDestroyed()) forget();
         if (dialog != null && dialog.isShowing()) return;
+        owner = a;
         Log.i(TAG, "overview opened");
         Dialog d = new Dialog(a);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -189,7 +205,7 @@ final class MixOverview {
             w.getAttributes().y = dp(a, 24);
         }
         d.setOnDismissListener(x -> {
-            if (dialog == d) dialog = null;
+            if (dialog == d) forget();
             Log.i(TAG, "overview closed");
         });
         dialog = d;
@@ -275,13 +291,17 @@ final class MixOverview {
         if ("loop".equals(st) || "crossfade".equals(st)) b = 0;
         if ("filter".equals(st) && b > FILTER_MAX_BARS) b = FILTER_MAX_BARS;
         Automix.setPairPick(s.pairKey, st, b);
-        view.sig = "";
+        if (view != null) view.sig = "";
     }
 
     /** Each frame while open (20 a second): what the mix is now. */
     private static void frame() {
         Dialog d = dialog;
         if (d == null || !d.isShowing()) return;
+        if (owner != null && owner.isDestroyed()) {
+            forget();
+            return;
+        }
         try {
             render(Automix.overview());
         } catch (Throwable t) {

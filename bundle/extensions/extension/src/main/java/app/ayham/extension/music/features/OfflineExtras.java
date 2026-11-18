@@ -137,10 +137,16 @@ final class OfflineExtras {
             return "none (no motion art)";
         }
         File f = null;
-        for (String url : urls)
-            if (f == null && url != null && url.contains(".m3u8"))
+        Exception last = null;
+        for (String url : urls) {
+            if (f != null || url == null || !url.contains(".m3u8")) continue;
+            try {
                 f = HlsClip.fetch(url, new File(c.getFilesDir(), "ayham-offline"), 720, false);
-        if (f == null) return "download failed";
+            } catch (Exception e) {
+                last = e; // the other shape is still tried
+            }
+        }
+        if (f == null) return "download failed" + (last == null ? "" : " (" + last.getMessage() + ")");
         CanvasCache.put(CanvasCache.idKey(videoId), f.getAbsolutePath());
         return f.getName() + " (" + f.length() / 1024 + " KB)";
     }

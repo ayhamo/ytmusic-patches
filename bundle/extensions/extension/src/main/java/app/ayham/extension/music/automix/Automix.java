@@ -123,6 +123,16 @@ public final class Automix {
         return curId;
     }
 
+    /**
+     * The current song's id, only when the queue's title for it is [title]: the queue is read on
+     * Automix's tick, so with Automix off it can still name the song before.
+     */
+    public static String currentIdFor(String title) {
+        String id = curId, t = curTitle;
+        if (id == null || t == null || title == null) return null;
+        return t.trim().equalsIgnoreCase(title.trim()) ? id : null;
+    }
+
     static String nextIdNow() {
         return nextId;
     }

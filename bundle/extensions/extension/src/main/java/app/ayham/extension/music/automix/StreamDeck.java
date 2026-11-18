@@ -211,6 +211,14 @@ final class StreamDeck {
         if (current == this) current = null;
     }
 
+    /** The mix it was released for ended before its takeover: fade out from what is heard now. */
+    void cancelRelease() {
+        if (!"released".equals(state)) return;
+        double now = heardSec();
+        releaseAt = Double.isNaN(now) ? 0 : now;
+        Log.i(TAG, "stream deck: the mix it was released for ended: fades out now");
+    }
+
     /** Fades out at once and gives YT's player its volume back. */
     void handBack(String why) {
         if (!"following".equals(state) && !"loading".equals(state)) return;
@@ -244,6 +252,11 @@ final class StreamDeck {
         if (!"following".equals(state) && !"loading".equals(state)) return;
         main.postDelayed(this::tick, SERVO_MS);
         long now = SystemClock.elapsedRealtime();
+        // switched off: Automix stops reading the queue, so the song check below would go stale
+        if (!Automix.enabled()) {
+            handBack("automix switched off");
+            return;
+        }
         if (!id.equals(Automix.currentId()) && Automix.currentId() != null && !id.equals(Automix.nextIdNow())) {
             handBack("the song is gone");
             return;
@@ -556,6 +569,12 @@ final class StreamDeck {
             Log.w(TAG, "stream deck failed", t);
             main.post(() -> handBack("the deck could not play the audio (" + t.getMessage() + ")"));
         } finally {
+            // closed before the track was built (a hand-back while loading): close() never saw it
+            if ("closed".equals(state)) {
+                AudioTrack t = track;
+                track = null;
+                releaseTrack(t);
+            }
             ex.release();
             if (codec != null) {
                 try {
@@ -567,19 +586,27 @@ final class StreamDeck {
         }
     }
 
+    /** Stops and frees a deck's track, and the preset's equalizer on its session. */
+    private static void releaseTrack(AudioTrack t) {
+        if (t == null) return;
+        try {
+            app.ayham.extension.music.features.EqPresets.releaseDeck(t.getAudioSessionId());
+        } catch (Throwable ignored) {
+        }
+        try {
+            t.pause();
+            t.flush();
+            t.release();
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void close() {
         String was = state;
         state = "closed";
         AudioTrack t = track;
         track = null;
-        if (t != null) {
-            try {
-                t.pause();
-                t.flush();
-                t.release();
-            } catch (Throwable ignored) {
-            }
-        }
+        releaseTrack(t);
         if (!"released".equals(was) && !"handed-back".equals(was) && current == this) current = null;
     }
 }

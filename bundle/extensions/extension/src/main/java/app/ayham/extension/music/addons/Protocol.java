@@ -63,7 +63,7 @@ public final class Protocol {
         if (colon >= 0 && authority.indexOf(']', colon) < 0) {
             host = authority.substring(0, colon);
             port = authority.substring(colon + 1);
-            if (!port.matches("[0-9]*")) return null;
+            if (!port.matches("[0-9]{0,5}")) return null;
             if (!port.isEmpty()) port = String.valueOf(Integer.parseInt(port));
         }
         host = host.toLowerCase(Locale.ROOT);

@@ -21,12 +21,24 @@ import java.util.Map;
 public final class HttpTransport implements AddonClient.Transport {
     /** A JSON answer bigger than this is not an addon's. */
     private static final int MAX_BODY = 8 << 20;
+    private static final java.util.concurrent.ScheduledExecutorService WATCHDOG =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "addon-http-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
 
     @Override
     public AddonClient.Response get(Protocol.Request r) throws IOException {
         long deadline = System.currentTimeMillis() + r.timeoutMs;
         HttpURLConnection c = open(r);
+        // the whole call, redirects included, ends at the deadline: connect and header reads each
+        // get their own timeout, so a watchdog drops the connection when the time is up
+        final HttpURLConnection conn = c;
+        java.util.concurrent.ScheduledFuture<?> watchdog = WATCHDOG.schedule(conn::disconnect, r.timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
         try {
+            c.connect();
+            c.setReadTimeout((int) Math.max(1, deadline - System.currentTimeMillis()));
             int status = c.getResponseCode();
             Map<String, String> headers = new HashMap<>();
             for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
@@ -52,7 +64,11 @@ public final class HttpTransport implements AddonClient.Transport {
                 in.close();
             }
             return new AddonClient.Response(status, headers, new String(body.toByteArray(), StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            if (System.currentTimeMillis() >= deadline) throw new SocketTimeoutException("timed out");
+            throw e;
         } finally {
+            watchdog.cancel(false);
             c.disconnect();
         }
     }

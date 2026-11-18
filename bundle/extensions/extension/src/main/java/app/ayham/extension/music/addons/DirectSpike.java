@@ -88,7 +88,7 @@ public final class DirectSpike {
                     t.durationSec = dur > 0 ? (double) dur : null;
                     long t0 = System.currentTimeMillis();
                     AddonPlayback.upgrading(true);
-                    AddonClient c = AddonClient.create(line -> Log.i(TAG, line));
+                    AddonClient c = client();
                     AddonClient.Opened o = c.resolve(t, addons, new AddonClient.Options());
                     AddonPlayback.upgrading(false);
                     addonName = o.addon == null ? null : o.addon.name;
@@ -120,6 +120,14 @@ public final class DirectSpike {
         }, "direct-spike").start();
     }
 
+    private static AddonClient client;
+
+    /** One client for every broadcast: its stream limits and 429 lessons carry over. */
+    private static synchronized AddonClient client() {
+        if (client == null) client = AddonClient.create(line -> Log.i(TAG, line));
+        return client;
+    }
+
     private static boolean mp3Index;
     private static int warmMs;
     private static int prerollMs;
@@ -139,7 +147,7 @@ public final class DirectSpike {
             } else {
                 data = cms.getConstructor().newInstance();
                 cms.getField("b").set(data, Protocol.USER_AGENT);
-                cms.getField("e").setBoolean(data, true);
+                // cross-protocol redirects stay off (field e): https only, never down to http
                 Field g = cms.getDeclaredField("g");
                 g.setAccessible(true);
                 Method set = cnf.getMethod("c", String.class, String.class);
@@ -153,6 +161,7 @@ public final class DirectSpike {
             Object factory = dme.getConstructor(cmj, dvy).newInstance(data, ext);
             Object p = crg.getMethod("a").invoke(crg.getConstructor(Context.class).newInstance(ctx));
             app.ayham.extension.music.features.PlayerTap.markOurs(p);
+            player = p; // from here on release() frees it, also when a step below fails
             Object mib = cdv.getConstructor().newInstance();
             cdv.getField("b").set(mib, Uri.parse(url));
             Object src = dme.getMethod("a", ceg).invoke(factory, cdv.getMethod("a").invoke(mib));
@@ -253,6 +262,7 @@ public final class DirectSpike {
             }, secs * 1000L + 300);
         } catch (Throwable t) {
             Log.e(TAG, "play failed", t);
+            release();
         }
     }
 

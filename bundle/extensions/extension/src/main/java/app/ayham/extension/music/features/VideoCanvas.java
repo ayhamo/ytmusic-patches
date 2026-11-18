@@ -41,7 +41,7 @@ final class VideoCanvas {
     }
 
     /** The loop file for the song, or null (none, or not this time). [noVideo] is set when the song has no usable video. */
-    static File clip(String songId, String songTitle, String artist, File dir, int artPx, boolean[] noVideo) throws Exception {
+    static synchronized File clip(String songId, String songTitle, String artist, File dir, int artPx, boolean[] noVideo) throws Exception {
         long t0 = System.currentTimeMillis();
         String[] video = findVideo(songTitle, artist);
         if (video == null) {
@@ -124,6 +124,7 @@ final class VideoCanvas {
                 }
                 Log.i(TAG, "canvas video: the part flashes, trying another");
                 start = next[0] / 1000;
+                end = start + CLIP_SEC; // the window moved: its end with it
             }
         }
         double from = cut(f, start, end, canvas, out); // the loop starts on the key frame at or before [start]
@@ -384,20 +385,20 @@ final class VideoCanvas {
 
     static double[] heatmap(String videoId) {
         if (heats.containsKey(videoId)) return heats.get(videoId);
-        double[] h = fetchHeatmap(videoId);
-        heats.put(videoId, h);
-        return h;
-    }
-
-    private static double[] fetchHeatmap(String videoId) {
         try {
-            JSONObject body = new JSONObject().put("videoId", videoId).put("context", new JSONObject().put("client",
-                    new JSONObject().put("clientName", "WEB").put("clientVersion", "2.20251101.01.00").put("hl", "en").put("gl", "US")));
-            return heatmapOf(post(WEB_NEXT, body, "Mozilla/5.0", "https://www.youtube.com"));
+            double[] h = fetchHeatmap(videoId);
+            heats.put(videoId, h); // an answer without a curve is remembered; a failed fetch is not
+            return h;
         } catch (Throwable t) {
             Log.w(TAG, "canvas video: no most-replayed curve: " + t);
             return null;
         }
+    }
+
+    private static double[] fetchHeatmap(String videoId) throws Exception {
+        JSONObject body = new JSONObject().put("videoId", videoId).put("context", new JSONObject().put("client",
+                new JSONObject().put("clientName", "WEB").put("clientVersion", "2.20251101.01.00").put("hl", "en").put("gl", "US")));
+        return heatmapOf(post(WEB_NEXT, body, "Mozilla/5.0", "https://www.youtube.com"));
     }
 
     static double[] heatmapOf(JSONObject next) {

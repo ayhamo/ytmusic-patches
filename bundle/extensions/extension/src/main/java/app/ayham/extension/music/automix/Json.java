@@ -31,10 +31,20 @@ public final class Json {
         while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
     }
 
+    /** Nesting so far: a body of "[[[[..." from an addon must not overflow the stack. */
+    private int depth;
+    private static final int MAX_DEPTH = 64;
+
     private Object value() {
         char c = s.charAt(i);
-        if (c == '{') return object();
-        if (c == '[') return array();
+        if (c == '{' || c == '[') {
+            if (++depth > MAX_DEPTH) throw new IllegalArgumentException("nested deeper than " + MAX_DEPTH + " at " + i);
+            try {
+                return c == '{' ? object() : array();
+            } finally {
+                depth--;
+            }
+        }
         if (c == '"') return string();
         if (s.startsWith("true", i)) { i += 4; return Boolean.TRUE; }
         if (s.startsWith("false", i)) { i += 5; return Boolean.FALSE; }

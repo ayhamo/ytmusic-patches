@@ -17,6 +17,13 @@ public class PlayerTapTest {
     }
 
     @Test
+    public void thisMedia3sThreeFieldTail() {
+        // YT Music 9.30.53 prints [channels, -1, sampleRate] (seen on the emulator)
+        assertEquals("Opus · 48.0 kHz · 175 kbps · Stereo",
+                PlayerTap.describe("Format(251, null, null, audio/opus, opus, 175000, en, [-1, -1, -1.0, null], [2, -1, 48000])"));
+    }
+
+    @Test
     public void aacMonoAndOtherCodecs() {
         assertEquals("AAC · 44.1 kHz · 128 kbps · Mono",
                 PlayerTap.describe("Format(140, null, null, audio/mp4a-latm, mp4a.40.2, 128000, null, [-1, -1, -1.0, null], [1, 44100])"));

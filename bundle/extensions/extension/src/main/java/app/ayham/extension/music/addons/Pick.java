@@ -18,6 +18,7 @@ public final class Pick {
 
     static final int MAX_ROWS = 15;          // rows kept for matching
     static final int MAX_OPEN = 3;           // rows opened (stream asked, probed, fitted)
+    static final int MAX_OPEN_ATMOS = 1;     // Atmos rows opened, ahead of the stereo ones (the phone's switch): 1 + 3 stays in the 5 /stream a minute
     static final double PREFER_SEC = 3;      // rows this close in length go first
     static final double DOWNLOAD_SLACK_SEC = 2;
     static final double PREVIEW_MAX_SEC = 35, PREVIEW_SONG_SEC = 45;   // (Mornye) a clip this short of a longer song
@@ -25,6 +26,8 @@ public final class Pick {
     public static final String LOSSLESS = "LOSSLESS", HIGH = "HIGH", LOW = "LOW";
     /** Quality tiers asked of an addon (Protocol.paramsFor): Hi-Res or CD by name; LOSSLESS is its best. */
     public static final String HIRES = "HIRES", CD = "CD";
+    /** Dolby Atmos (the phone's switch): an Atmos stream's tier, and the Atmos download's (asks for the best). */
+    public static final String DOLBY = "ATMOS";
 
     /** An addon's search row, its fields read leniently. */
     public static final class Row extends TrackMatcher.Candidate {
@@ -48,6 +51,8 @@ public final class Pick {
     public static final class Choice {
         /** At most 3 rows, best first. */
         public final List<Row> open = new ArrayList<>();
+        /** Atmos rows that match (atmosOk only), at most 1, best first: tried before the stereo ones. */
+        public final List<Row> atmos = new ArrayList<>();
         /** In the order the rules refused them. */
         public final List<Refusal> refused = new ArrayList<>();
     }
@@ -133,6 +138,14 @@ public final class Pick {
      * slackSec: the user's length slack (default 5, clamped to 0-10); forDownload: ±2 s instead.
      */
     public static Choice rowsToOpen(List<?> raws, TrackMatcher.Target target, double slackSec, boolean forDownload) {
+        return rowsToOpen(raws, target, slackSec, forDownload, false);
+    }
+
+    /**
+     * atmosOk (the phone's Dolby Atmos switch, a decoder on the phone): Atmos rows are not refused
+     * but matched by the same rules into Choice.atmos (ours, phone only; the extension stays stereo).
+     */
+    public static Choice rowsToOpen(List<?> raws, TrackMatcher.Target target, double slackSec, boolean forDownload, boolean atmosOk) {
         Choice out = new Choice();
         double slack = forDownload ? DOWNLOAD_SLACK_SEC : Math.min(10, Math.max(0, slackSec));
         Double song = target.durationSec != null && target.durationSec > 0 ? target.durationSec : null;   // 0: unknown
@@ -144,13 +157,21 @@ public final class Pick {
             }
         }
         // Atmos (another mix than YouTube's) and previews first
-        List<Row> usable = new ArrayList<>();
+        List<Row> usable = new ArrayList<>(), atmos = new ArrayList<>();
         for (Row r : rows) {
             boolean preview = r.durationSec != null && song != null && r.durationSec <= PREVIEW_MAX_SEC && song > PREVIEW_SONG_SEC;
-            String why = r.atmos ? "atmos" : preview ? "preview" : null;
+            String why = r.atmos && !atmosOk ? "atmos" : preview ? "preview" : null;
             if (why != null) out.refused.add(new Refusal(r.id, why));
+            else if (r.atmos) atmos.add(r);
             else usable.add(r);
         }
+        out.open.addAll(matched(usable, target, song, slack, out.refused, MAX_OPEN));
+        out.atmos.addAll(matched(atmos, target, song, slack, out.refused, MAX_OPEN_ATMOS));
+        return out;
+    }
+
+    /** The rows that are this song, best first (at most max); the others go to refused. */
+    private static List<Row> matched(List<Row> usable, TrackMatcher.Target target, Double song, double slack, List<Refusal> refused, int max) {
         // ISRC first (ours, from Mornye): an equal ISRC is the same recording, whatever the titles say
         String want = isrcOf(target.isrc);
         List<Row> byIsrc = new ArrayList<>(), rest = new ArrayList<>();
@@ -164,13 +185,13 @@ public final class Pick {
             t.durationSec = null;
         }
         List<Row> matched = TrackMatcher.ranked(rest, t);
-        for (Row r : rest) if (!containsSame(matched, r)) out.refused.add(new Refusal(r.id, "not this song"));
+        for (Row r : rest) if (!containsSame(matched, r)) refused.add(new Refusal(r.id, "not this song"));
         List<Row> ok = new ArrayList<>();
         List<Row> all = new ArrayList<>(byIsrc);
         all.addAll(matched);
         for (Row r : all) {
             if (r.durationSec != null && song != null && Math.abs(r.durationSec - song) > slack) {
-                out.refused.add(new Refusal(r.id, "length"));
+                refused.add(new Refusal(r.id, "length"));
                 continue;
             }
             ok.add(r);
@@ -179,8 +200,7 @@ public final class Pick {
         List<Row> ordered = new ArrayList<>();
         for (Row r : ok) if (near(r, song)) ordered.add(r);
         for (Row r : ok) if (!near(r, song)) ordered.add(r);
-        for (int i = 0; i < ordered.size() && i < MAX_OPEN; i++) out.open.add(ordered.get(i));
-        return out;
+        return ordered.size() > max ? new ArrayList<>(ordered.subList(0, max)) : ordered;
     }
 
     public static Choice rowsToOpen(List<?> raws, TrackMatcher.Target target) {

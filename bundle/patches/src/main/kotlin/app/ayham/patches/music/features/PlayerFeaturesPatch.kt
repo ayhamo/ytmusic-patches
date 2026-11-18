@@ -222,6 +222,13 @@ val playerFeaturesPatch = patch(
                         setAttribute("android:defaultValue", "5")
                         setAttribute("android:dependency", "ayham_addons")
                     }
+                    appendChild("SwitchPreference") {
+                        setAttribute("android:key", "ayham_addon_atmos")
+                        setAttribute("android:title", "Dolby Atmos")
+                        setAttribute("android:summary", "Where an addon has a song in Dolby Atmos, that version plays (on phones with a Dolby decoder), lined up with YouTube's audio like the others. Atmos is its own mix, so it can sound different from YouTube's. Also an Atmos choice in the download popup. Off: stereo only (songs downloaded in Atmos still play in Atmos).")
+                        setAttribute("android:defaultValue", "false")
+                        setAttribute("android:dependency", "ayham_addons")
+                    }
                 }
                 }
                 log.info("Features: settings row added to $name")

@@ -276,4 +276,33 @@ public class OffsetFitTest {
         assertEquals(0.002735721180215478, r.next(), 0);
         assertEquals(0.5274470399599522, r.next(), 0);
     }
+
+    // ---- guided (ours: the phone's Dolby Atmos, placed by a stereo file's offset) ----
+
+    /** Another mix of the song: YouTube's audio with a second part laid over it. */
+    private static float[] otherMix(double shiftSec) {
+        float[] y = yt(), o = scale(song(9, SEC), -3), m = new float[y.length];
+        for (int i = 0; i < y.length; i++) m[i] = 0.6f * y[i] + o[i];
+        return cat(silence(shiftSec), m);
+    }
+
+    @Test
+    public void guidedFindsTheOffsetNearTheStereoOne() {
+        OffsetFit.Result r = OffsetFit.guided(ytSide(), OffsetFit.Side.of(otherMix(0.7)), 0.74, 5);
+        assertEquals(r.toString(), null, r.none);
+        near("offset " + r, r.offsetSec, 0.7, 0.002);
+    }
+
+    @Test
+    public void guidedKeepsTheStereoOffsetWhenNothingAgrees() {
+        OffsetFit.Result r = OffsetFit.guided(ytSide(), OffsetFit.Side.of(cat(silence(0.7), song(2, SEC))), 0.7, 5);
+        assertEquals(r.toString(), null, r.none);
+        near("offset " + r, r.offsetSec, 0.7, 0.1);
+    }
+
+    @Test
+    public void guidedRefusesALongerFile() {
+        OffsetFit.Result r = OffsetFit.guided(ytSide(), OffsetFit.Side.of(cat(otherMix(0), song(7, 12))), 0, 5);
+        assertEquals(r.toString(), "length", r.none);
+    }
 }

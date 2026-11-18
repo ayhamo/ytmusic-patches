@@ -14,7 +14,7 @@ public final class AddonPlayback {
     private static final String TAG = "Ayham";
     private static volatile Object player;
     private static volatile String addon;
-    private static volatile boolean audible, upgrading;
+    private static volatile boolean audible, upgrading, ownAtmos;
     private static Field rateField, encodingField;
     private static boolean fieldsFailed;
 
@@ -28,9 +28,18 @@ public final class AddonPlayback {
 
     /** Our player now carries this addon's audio; audible once it is heard (after any pre-roll). */
     public static void playing(Object p, String addonName, boolean isAudible) {
+        playing(p, addonName, isAudible, false);
+    }
+
+    /**
+     * atmosDecode: the player plays our own decode of a Dolby Atmos file (AtmosWav), so its input
+     * is PCM; the badge and the line still say what was decoded.
+     */
+    public static void playing(Object p, String addonName, boolean isAudible, boolean atmosDecode) {
         player = p;
         addon = addonName;
         audible = isAudible;
+        ownAtmos = atmosDecode;
     }
 
     public static void audible(Object p, boolean isAudible) {
@@ -40,6 +49,7 @@ public final class AddonPlayback {
     public static void stopped(Object p) {
         if (player != p) return;
         player = null;
+        ownAtmos = false;
         addon = null;
         audible = false;
     }
@@ -59,6 +69,12 @@ public final class AddonPlayback {
                         bitrate = parse(h[5]);
                         rate = intField(f, "L");
                         enc = intField(f, "M");
+                        if (ownAtmos && "audio/raw".equals(mime)) {
+                            // the phone's Dolby decoder's render, played from our WAV of it
+                            mime = Atmos.EAC3_JOC;
+                            bitrate = -1;
+                            enc = -1;
+                        }
                         line = Quality.line(mime, rate, enc, bitrate, addon);
                     }
                 }

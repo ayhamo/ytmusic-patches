@@ -32,8 +32,8 @@ import java.util.Properties;
  */
 public final class AddonDownloads {
     private static final String TAG = AddonPrep.TAG;
-    /** The tiers of the popup, in the order they step down. */
-    public static final String BEST = Pick.LOSSLESS, HIRES = Pick.HIRES, CD = Pick.CD;
+    /** The tiers of the popup, in the order they step down. ATMOS only with the Dolby Atmos switch on. */
+    public static final String BEST = Pick.LOSSLESS, HIRES = Pick.HIRES, CD = Pick.CD, ATMOS = Pick.DOLBY;
     private static final Deque<String> queue = new ArrayDeque<>();
     private static Thread worker;
     private static Context ctx;
@@ -80,7 +80,7 @@ public final class AddonDownloads {
         }
     }
 
-    /** Adds a song to download at tier (BEST, HIRES or CD). */
+    /** Adds a song to download at tier (BEST, HIRES, CD or ATMOS). */
     public static synchronized void enqueue(Context c, String id, String title, String artist, boolean isVideo, String tier) {
         if (c == null || id == null || title == null || title.isEmpty()) return;
         ctx = c.getApplicationContext();
@@ -117,6 +117,7 @@ public final class AddonDownloads {
 
     /** The tiers tried for the one asked: each steps down to the next. */
     static String[] steps(String tier) {
+        if (ATMOS.equals(tier)) return new String[]{ATMOS, BEST, HIRES, CD};
         if (HIRES.equals(tier)) return new String[]{HIRES, CD};
         if (CD.equals(tier)) return new String[]{CD};
         return new String[]{BEST, HIRES, CD};
@@ -161,7 +162,7 @@ public final class AddonDownloads {
                     Log.i(TAG, "download " + id + ": no addon has it at " + tier + (tier.equals(info[0]) ? "" : " (stepped down)"));
                 }
                 if (got != null) save(ctx, got, info[3], info[2]);
-                else why = "no addon has it lossless: YouTube's download only";
+                else why = "no addon has it lossless" + (ATMOS.equals(info[0]) ? " or in Atmos" : "") + ": YouTube's download only";
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 retry = true;
@@ -209,14 +210,14 @@ public final class AddonDownloads {
         }
     }
 
-    /** A file of this recording (ISRC) already downloaded, else null. */
-    static File byIsrc(String isrc) {
+    /** A file of this recording (ISRC) already downloaded, Atmos or stereo as asked, else null. */
+    static File byIsrc(String isrc, Boolean atmos) {
         if (isrc == null || isrc.isEmpty() || ctx == null) return null;
         File[] fs = dir(ctx).listFiles((d, n) -> n.endsWith(".json"));
         if (fs != null) for (File m : fs) {
             try {
                 JSONObject j = new JSONObject(read(m));
-                if (isrc.equalsIgnoreCase(j.optString("isrc"))) {
+                if (isrc.equalsIgnoreCase(j.optString("isrc")) && j.optBoolean("atmos", false) == Boolean.TRUE.equals(atmos)) {
                     File f = new File(j.getString("file"));
                     if (f.length() > 0) return f;
                 }
@@ -232,13 +233,13 @@ public final class AddonDownloads {
         j.put("file", p.file.getAbsolutePath()).put("addon", p.addon).put("host", p.host).put("row", p.rowId)
                 .put("offset", p.offsetSec).put("gain", p.gainDb).put("ytDur", p.ytDurationSec).put("addonDur", p.addonDurationSec)
                 .put("score", p.score).put("rate", p.rate).put("channels", p.channels).put("codec", p.codec)
-                .put("isrc", p.isrc).put("tier", p.tier).put("at", System.currentTimeMillis());
+                .put("isrc", p.isrc).put("tier", p.tier).put("atmos", p.atmos).put("at", System.currentTimeMillis());
         byte[] head = new byte[1 << 16];
         int n;
         try (InputStream in = new FileInputStream(p.file)) {
             n = in.read(head);
         }
-        Fetch.Info i = Fetch.info(head, Math.max(0, n));
+        Fetch.Info i = p.atmos ? Fetch.dolby(head, Math.max(0, n)) : Fetch.info(head, Math.max(0, n));
         if (i != null) j.put("format", i.toString());
         if (p.env != null) {
             ByteBuffer b = ByteBuffer.allocate(p.env.length * 4).order(ByteOrder.LITTLE_ENDIAN);
@@ -269,13 +270,27 @@ public final class AddonDownloads {
         p.codec = j.optString("codec");
         p.isrc = j.optString("isrc", null);
         p.tier = j.optString("tier", null);
+        p.atmos = j.optBoolean("atmos", false);
         String env = j.optString("env", "");
         if (!env.isEmpty()) {
             ByteBuffer b = ByteBuffer.wrap(Base64.decode(env, Base64.NO_WRAP)).order(ByteOrder.LITTLE_ENDIAN);
             p.env = new float[b.remaining() / 4];
             for (int k = 0; k < p.env.length; k++) p.env[k] = b.getFloat();
         }
-        app.ayham.extension.music.automix.AddonPcm.write(c, p);
+        if (p.atmos) {
+            // Dolby Atmos plays from our decode of it (AtmosWav), a WAV in the cache deleted with the song
+            p.wav = AtmosWav.decode(p.file, new File(AddonPrep.dir(c), id + ".atmos.wav"), p.gainDb);
+            p.file = p.wav;
+            p.bakedDb = p.gainDb;
+            p.gainDb = 0;
+        }
+        try {
+            app.ayham.extension.music.automix.AddonPcm.write(c, p);
+        } catch (Throwable t) {
+            if (p.wav != null) //noinspection ResultOfMethodCallIgnored
+                p.wav.delete();
+            throw t;
+        }
         Log.i(TAG, "downloaded file of " + id + " loaded: " + p.file.getName());
         return p;
     }

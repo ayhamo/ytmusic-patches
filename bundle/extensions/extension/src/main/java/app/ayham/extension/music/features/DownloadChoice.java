@@ -184,8 +184,12 @@ public final class DownloadChoice {
         TextView qLabel = label(a, "Quality", dp);
         RadioGroup quality = new RadioGroup(a);
         quality.setOrientation(LinearLayout.HORIZONTAL);
-        String[] tiers = {app.ayham.extension.music.addons.AddonDownloads.BEST, app.ayham.extension.music.addons.AddonDownloads.HIRES, app.ayham.extension.music.addons.AddonDownloads.CD};
-        String[] names = {"Best", "Hi-Res", "CD"};
+        // Atmos only with the Dolby Atmos switch on (and a decoder): it steps down to Best
+        boolean atmos = app.ayham.extension.music.addons.AddonSettings.atmosSwitch(a);
+        String[] tiers = atmos
+                ? new String[]{app.ayham.extension.music.addons.AddonDownloads.BEST, app.ayham.extension.music.addons.AddonDownloads.HIRES, app.ayham.extension.music.addons.AddonDownloads.CD, app.ayham.extension.music.addons.AddonDownloads.ATMOS}
+                : new String[]{app.ayham.extension.music.addons.AddonDownloads.BEST, app.ayham.extension.music.addons.AddonDownloads.HIRES, app.ayham.extension.music.addons.AddonDownloads.CD};
+        String[] names = {"Best", "Hi-Res", "CD", "Atmos"};
         String tierWas = sp.getString("ayham_dl_tier", tiers[0]);
         for (int i = 0; i < tiers.length; i++) {
             RadioButton r = radio(a, names[i], 10 + i);

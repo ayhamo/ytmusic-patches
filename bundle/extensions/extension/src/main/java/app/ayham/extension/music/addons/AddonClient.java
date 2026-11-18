@@ -85,6 +85,15 @@ public final class AddonClient {
         public Check check;
         /** True once the song is no longer wanted (skipped): the search and the opening stop there. */
         public java.util.function.BooleanSupplier cancelled;
+        /**
+         * The phone's Dolby Atmos switch: addons with an atmos setting are asked atmos=true, and every
+         * addon's matching Atmos rows are tried first (in priority order), then the stereo rows as before.
+         */
+        public boolean atmos;
+        /** An Atmos download: Atmos rows only (the next step down is the stereo tiers). */
+        public boolean atmosOnly;
+        /** Whether the phone decodes an Atmos stream's codec (null: any). An Atmos stream it can't decode is passed over. */
+        public java.util.function.Predicate<String> atmosDecodes;
     }
 
     private static boolean cancelled(Options opt) {
@@ -112,10 +121,17 @@ public final class AddonClient {
     public static final class Found {
         public final Addon addon;
         public final List<Pick.Row> rows;
+        /** Atmos rows: their /stream asks atmos=true and an Atmos answer is taken. */
+        public final boolean atmos;
 
         Found(Addon addon, List<Pick.Row> rows) {
+            this(addon, rows, false);
+        }
+
+        Found(Addon addon, List<Pick.Row> rows, boolean atmos) {
             this.addon = addon;
             this.rows = rows;
+            this.atmos = atmos;
         }
     }
 
@@ -358,9 +374,14 @@ public final class AddonClient {
     // ---- search (§3) ----
 
     /** The addon's rows for a query (first 15, cached 10 min). */
-    @SuppressWarnings("unchecked")
     public List<Object> search(Addon addon, TrackMatcher.Target target, String query, Protocol.Manifest man) {
-        String url = Protocol.searchUrl(addon.base, Protocol.paramsFor(man, addon.tier, addon.quality), target, query);
+        return search(addon, target, query, man, false);
+    }
+
+    /** atmos: an addon with an atmos setting is asked atmos=true (its Atmos rows come back too). */
+    @SuppressWarnings("unchecked")
+    public List<Object> search(Addon addon, TrackMatcher.Target target, String query, Protocol.Manifest man, boolean atmos) {
+        String url = Protocol.searchUrl(addon.base, Protocol.paramsFor(man, addon.tier, addon.quality, atmos), target, query);
         String key = "s|" + url;
         Object hit = cached(key);
         if (hit != null) return (List<Object>) hit;
@@ -388,7 +409,12 @@ public final class AddonClient {
 
     /** /stream for a row: cached 5 min (a cached answer costs nothing), else within the §4a budget. */
     public Protocol.Stream stream(Addon addon, Pick.Row row, Protocol.Manifest man) {
-        String url = Protocol.streamUrl(addon.base, row.id, Protocol.paramsFor(man, addon.tier, addon.quality));
+        return stream(addon, row, man, false);
+    }
+
+    /** atmos: an Atmos row (asked atmos=true; an Atmos answer is taken, marked atmos). */
+    public Protocol.Stream stream(Addon addon, Pick.Row row, Protocol.Manifest man, boolean atmos) {
+        String url = Protocol.streamUrl(addon.base, row.id, Protocol.paramsFor(man, addon.tier, addon.quality, atmos));
         String key = "t|" + url;
         Object hit = cached(key);
         if (hit != null) return (Protocol.Stream) hit;
@@ -396,7 +422,7 @@ public final class AddonClient {
         if (wait > 0) throw new AddonError("limit", "stream limit, free in " + (long) Math.ceil(wait / 1000.0) + " s");
         Protocol.Stream s;
         try {
-            s = Protocol.readStream(getJson(addon.base, url, false, false), man.limits.cachedMarker);
+            s = Protocol.readStream(getJson(addon.base, url, false, false), man.limits.cachedMarker, atmos);
             limits.answered(addon.base, s.cached);
         } catch (AddonError e) {
             if (e.status != null && e.status == 429) {
@@ -406,7 +432,7 @@ public final class AddonClient {
             if (!"miss".equals(e.kind) || row.streamURL == null) throw e;
             Map<String, Object> fallback = new HashMap<>();
             fallback.put("url", row.streamURL);
-            s = Protocol.readStream(fallback, null);
+            s = Protocol.readStream(fallback, null, atmos);
         }
         remember(key, s, TTL_STREAM);
         return s;
@@ -473,6 +499,8 @@ public final class AddonClient {
     public FindResult find(TrackMatcher.Target target, List<Addon> addons, Options opt) {
         if (opt == null) opt = new Options();
         FindResult out = new FindResult();
+        boolean atmosOk = opt.atmos || opt.atmosOnly;
+        List<Found> stereo = new ArrayList<>();
         for (Addon a : addons) {
             if (cancelled(opt)) break;
             Addon addon = a.copy();
@@ -499,22 +527,31 @@ public final class AddonClient {
                     continue;
                 }
                 Pick.Choice choice = new Pick.Choice();
+                List<Pick.Row> atmosRows = new ArrayList<>();
                 for (String q : TrackMatcher.queries(target)) {
-                    choice = Pick.rowsToOpen(search(addon, target, q, man), target, opt.slackSec, opt.forDownload);
-                    if (!choice.open.isEmpty()) break;
+                    choice = Pick.rowsToOpen(search(addon, target, q, man, atmosOk), target, opt.slackSec, opt.forDownload, atmosOk);
+                    // the first query's Atmos rows are kept; the stereo fallback still needs its own match
+                    if (atmosRows.isEmpty()) atmosRows.addAll(choice.atmos);
+                    if (opt.atmosOnly ? !atmosRows.isEmpty() : !choice.open.isEmpty()) break;
                 }
-                note(addon.base, true, choice.open.isEmpty() ? "no match" : "ok", now() - t0);
-                if (choice.open.isEmpty()) {
-                    out.tried.add(new Tried(host, null, "no match", choice.refused));
+                choice.atmos.clear();
+                choice.atmos.addAll(atmosRows);
+                boolean none = opt.atmosOnly ? choice.atmos.isEmpty() : choice.open.isEmpty() && choice.atmos.isEmpty();
+                note(addon.base, true, none ? "no match" : "ok", now() - t0);
+                if (none) {
+                    out.tried.add(new Tried(host, null, opt.atmosOnly ? "no Atmos match" : "no match", choice.refused));
                     continue;
                 }
                 addon.name = man.name;
                 addon.host = host;
-                out.found.add(new Found(addon, choice.open));
+                // Atmos rows of every addon first, in priority order; then the stereo rows as before
+                if (!choice.atmos.isEmpty()) out.found.add(new Found(addon, choice.atmos, true));
+                if (!opt.atmosOnly && !choice.open.isEmpty()) stereo.add(new Found(addon, choice.open));
             } catch (RuntimeException e) {
                 failed(addon.base, host, e, t0, out.tried);
             }
         }
+        out.found.addAll(stereo);
         return out;
     }
 
@@ -536,7 +573,7 @@ public final class AddonClient {
                     }
                     Protocol.Stream s;
                     try {
-                        s = stream(addon, row, man);
+                        s = stream(addon, row, man, f.atmos);
                     } catch (AddonError e) {
                         if (!"miss".equals(e.kind)) throw e;
                         s = Protocol.Stream.miss(e.getMessage());
@@ -553,7 +590,15 @@ public final class AddonClient {
                         tried.add(new Tried(addon.host, row.id, "not https", null));
                         continue;
                     }
-                    if (opt.forDownload && !Protocol.goodForDownload(s)) {
+                    if (s.atmos && opt.atmosDecodes != null && !opt.atmosDecodes.test(s.codec)) {
+                        tried.add(new Tried(addon.host, row.id, "Atmos in " + (s.codec != null ? s.codec : "an unknown codec") + ": no decoder on this phone", null));
+                        continue;
+                    }
+                    if (opt.atmosOnly && !s.atmos) {
+                        tried.add(new Tried(addon.host, row.id, "not Atmos", null));
+                        continue;
+                    }
+                    if (opt.forDownload && !s.atmos && !Protocol.goodForDownload(s)) {
                         tried.add(new Tried(addon.host, row.id, "lossy at 256 kbps or under", null));
                         continue;
                     }
@@ -565,7 +610,7 @@ public final class AddonClient {
                     }
                     note(addon.base, true, "ok", now() - t0);
                     log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id + ", "
-                            + (s.codec != null ? s.codec : "?")
+                            + (s.atmos ? "Dolby Atmos " : "") + (s.codec != null ? s.codec : "?")
                             + (s.sampleRate != null && s.sampleRate != 0 ? " " + Js.number(s.sampleRate / 1000) + " kHz" : "")
                             + (s.bitDepth != null && s.bitDepth != 0 ? "/" + Js.number(s.bitDepth) : ""));
                     Opened o = new Opened();

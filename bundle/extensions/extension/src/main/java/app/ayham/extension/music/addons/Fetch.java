@@ -97,6 +97,7 @@ final class Fetch {
     /** Before the fetch: a stream whose stated format can't be the tier asked for (null: fetch it). */
     static String statedRefusal(Protocol.Stream s, String tier) {
         if (s == null) return null;
+        if (Pick.DOLBY.equals(tier)) return s.atmos ? null : "not Atmos";
         String codec = s.codec == null ? "" : s.codec.toLowerCase(Locale.ROOT);
         if (!codec.isEmpty() && !codec.contains("flac") && !codec.contains("alac") && !codec.contains("wav")) return "not lossless (" + s.codec + ")";
         if (Pick.HIRES.equals(tier) && s.bitDepth != null && s.sampleRate != null && s.bitDepth > 0 && s.sampleRate > 0
@@ -112,6 +113,19 @@ final class Fetch {
             n = in.read(head);
         }
         if (n < 42) return "not an audio file";
+        if (Pick.DOLBY.equals(tier)) {
+            // an Atmos download: an MP4 with an E-AC-3 ('ec-3') or AC-4 ('ac-4') track
+            Info d = dolby(head, n);
+            if (d == null && n > 8 && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p') {
+                // its 'moov' (the sample entries) at the end
+                long len = f.length(), from = Math.max(0, len - (4L << 20));
+                byte[] tail = readAt(f, from, (int) (len - from));
+                if (tail != null) d = dolbyEntry(tail, 0, tail.length);
+            }
+            if (d == null) return "not Atmos (the file is " + sniff(head, n) + ")";
+            Log.i(TAG, f.getName() + ": " + d + (s != null && s.codec != null ? " (stated " + s.codec + ")" : ""));
+            return null;
+        }
         Info i = info(head, n);
         if (i == null && n > 10 && head[0] == 'I' && head[1] == 'D' && head[2] == '3') {
             // an ID3 tag (cover art) longer than the head: the FLAC marker is read after it
@@ -178,6 +192,20 @@ final class Fetch {
                 }
                 return new Info("ALAC", 0, 0);
             }
+        }
+        return null;
+    }
+
+    /** An MP4 with a Dolby track: its 'ec-3' (E-AC-3, Atmos as JOC) or 'ac-4' sample entry; null for anything else. */
+    static Info dolby(byte[] b, int n) {
+        if (!(n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p')) return null;
+        return dolbyEntry(b, 8, n);
+    }
+
+    private static Info dolbyEntry(byte[] b, int from, int n) {
+        for (int i = from; i + 4 <= n; i++) {
+            if (b[i] == 'e' && b[i + 1] == 'c' && b[i + 2] == '-' && b[i + 3] == '3') return new Info("Dolby Atmos (E-AC-3)", 48_000, 0);
+            if (b[i] == 'a' && b[i + 1] == 'c' && b[i + 2] == '-' && b[i + 3] == '4') return new Info("Dolby Atmos (AC-4)", 48_000, 0);
         }
         return null;
     }

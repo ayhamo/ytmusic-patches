@@ -343,6 +343,64 @@ public final class OffsetFit {
         return r;
     }
 
+    static final double GUIDE_STEP_SEC = 0.03, GUIDE_SPREAD_SEC = 0.005;
+    static final int GUIDE_WINDOWS = 4, GUIDE_STEPS = 3;
+
+    /**
+     * Ours (the phone's Dolby Atmos): a file that is another mix of the song (its envelope and waveform
+     * differ from YouTube's, so {@link #fit} finds no match) placed by a stereo file of the same release
+     * that did fit: priorSec is that file's offset. The fine fit (the 1 kHz waveform: the drums and
+     * the voice keep their timing in another mix) scans ±0.11 s around it in 4 windows across the song;
+     * where they agree within 5 ms their median is taken, otherwise priorSec. (The envelope's coarse
+     * fit is not used: across mixes it lands tens of ms off, outside the fine fit's ±20 ms.) Refused
+     * only for its length. score is the windows' mean fine score (for the log), not a gate; checkSec
+     * holds their spread.
+     */
+    public static Result guided(Side yt, Side ad, double priorSec, double slackSec) {
+        yt.finish();
+        ad.finish();
+        final double ytDur = yt.durationSec(), adDur = ad.durationSec();
+        float[] ytRms = yt.rms();
+        int first = -1;
+        for (int i = 0; i < ytRms.length && first < 0; i++) if (ytRms[i] >= SILENT_RMS) first = i;
+        double start = first < 0 ? 0 : Math.floor(first * ENV_WIN_SEC);
+        double fLen = Math.min(FINE_SEC, ytDur - 0.2);
+        Result r = new Result();
+        r.offsetSec = priorSec;
+        double[] at = new double[GUIDE_WINDOWS];
+        int n = 0;
+        double scores = 0;
+        for (int w = 0; w < GUIDE_WINDOWS; w++) {
+            double s = start + (ytDur - start - fLen) * (w + 0.5) / GUIDE_WINDOWS;
+            Lag best = null;
+            // 7 centres 30 ms apart, each looking ±20 ms: ±0.11 s, a whole number of steps so
+            // rounding never adds or drops the last one
+            for (int k = -GUIDE_STEPS; k <= GUIDE_STEPS; k++) {
+                double c = priorSec + k * GUIDE_STEP_SEC;
+                Lag f = fine(yt, ad, inside(s, fLen, c, ytDur, adDur), fLen, c);
+                if (f != null && (best == null || f.score > best.score)) best = f;
+            }
+            if (best == null) continue;
+            at[n++] = best.offsetSec;
+            scores += best.score;
+        }
+        if (n > 0) {
+            double[] sorted = Arrays.copyOf(at, n);
+            Arrays.sort(sorted);
+            double median = n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+            r.fineScore = scores / n;
+            r.checkOffsetSec = median;   // where they landed, taken or not
+            r.checkSec = sorted[n - 1] - sorted[0];
+            if (n >= 3 && r.checkSec <= GUIDE_SPREAD_SEC) r.offsetSec = median;
+        }
+        r.score = r.fineScore;
+        if (Math.abs(adDur - r.offsetSec - ytDur) > slackSec) {
+            r.none = "length";
+            r.extraSec = adDur - r.offsetSec - ytDur;
+        }
+        return r;
+    }
+
     /** A span of len seconds from s, moved inside both files (YouTube's, and the addon's read at offset off). */
     private static double inside(double s, double len, double off, double ytDur, double adDur) {
         double lo = Math.max(Math.max(s, -off + 0.05), 0.05);

@@ -12,7 +12,8 @@ import java.util.List;
  * private storage; links carry the user's tokens, so they are only ever logged redacted.
  */
 public final class AddonSettings {
-    public static final String KEY_ON = "ayham_addons", KEY_LINKS = "ayham_addon_links", KEY_SLACK = "ayham_addon_slack";
+    public static final String KEY_ON = "ayham_addons", KEY_LINKS = "ayham_addon_links", KEY_SLACK = "ayham_addon_slack",
+            KEY_ATMOS = "ayham_addon_atmos";
     private static volatile Context ctx;
 
     private AddonSettings() {
@@ -54,6 +55,20 @@ public final class AddonSettings {
     public static boolean on() {
         Context c = ctx;
         return c != null && prefs(c).getBoolean(KEY_ON, false) && !links(c).isEmpty();
+    }
+
+    /**
+     * The "Dolby Atmos" switch (off by default), and only on a phone with an Atmos decoder: addon
+     * rows in Atmos are asked for and preferred; off, stereo only (protocol.md §1, §3).
+     */
+    public static boolean atmos() {
+        Context c = ctx;
+        return on() && atmosSwitch(c);
+    }
+
+    /** The switch alone (downloads need links, not playback on): set, on a phone with an Atmos decoder. */
+    public static boolean atmosSwitch(Context c) {
+        return c != null && prefs(c).getBoolean(KEY_ATMOS, false) && Atmos.available();
     }
 
     public static List<String> links(Context c) {

@@ -50,6 +50,8 @@ public final class AddonPrep {
         public boolean saved;
         /** Downloads: the row's ISRC and the tier asked for. */
         public String isrc, tier;
+        /** Dolby Atmos from the addon (the switch on, or an Atmos download): its decoder's 2-channel render plays. */
+        public boolean atmos;
         /** The file's loudness (dBFS, mono RMS) every ENV_HOP seconds of its own time: where it is quiet. */
         public float[] env;
         public static final double ENV_HOP = Envelope.HOP;
@@ -80,10 +82,21 @@ public final class AddonPrep {
             return (float) Math.pow(10, Math.min(0, gainDb) / 20);
         }
 
+        /** Dolby Atmos: the fit's gain, in the WAV's samples (AtmosWav); gainDb is then 0. */
+        public double bakedDb;
+        /** Dolby Atmos: the WAV our decode was written to (AtmosWav), deleted with the song even when saved. */
+        public File wav;
+
+        /** Dolby Atmos played from our own decode (AtmosWav), not from the addon's file. */
+        public boolean ownDecode() {
+            return atmos && wav != null && wav.equals(file);
+        }
+
         @Override
         public String toString() {
-            return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s %d Hz %d ch, score %.3f", id, addon, offsetSec, gainDb,
-                    gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", codec, rate, channels, score);
+            return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s%s %d Hz %d ch, score %.3f", id, addon, offsetSec, gainDb + bakedDb,
+                    gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", atmos ? "Dolby Atmos " : "", codec, rate, channels, score)
+                    + (ownDecode() ? " (from our decode)" : "");
         }
     }
 
@@ -141,6 +154,16 @@ public final class AddonPrep {
             super("no longer playing or next");
         }
     }
+
+    /** No row was opened because an addon's /stream budget ran out (§4a): tried again soon, not a failure. */
+    static final class Limited extends IOException {
+        Limited() {
+            super("stream limit reached");
+        }
+    }
+
+    /** A song passed over for the stream limit is tried again after this. */
+    private static final long LIMIT_RETRY_MS = 60_000;
 
     /** On the prep worker: its song is no longer wanted. Downloads (another thread) never are. */
     private static boolean stale() {
@@ -216,6 +239,7 @@ public final class AddonPrep {
             // a downloaded file stays (only this play falls back to YouTube)
             failedAt.put(id, SystemClock.elapsedRealtime());
             Log.w(TAG, "dropped downloaded " + id + " for now: " + why);
+            deleteQuietly(p.wav);   // an Atmos download's decode, in the cache: made again on its next load
             return;
         }
         failedAt.put(id, SystemClock.elapsedRealtime());
@@ -278,21 +302,36 @@ public final class AddonPrep {
             long t0 = SystemClock.elapsedRealtime();
             Prepared p = null;
             String why;
-            boolean dropped = false;
+            boolean dropped = false, limited = false;
             try {
                 p = AddonDownloads.has(ctx, id) ? AddonDownloads.load(ctx, id) : prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
                 why = p == null ? "no addon has a file that fits" : null;
                 if (p == null && stale()) throw new Stale();
+                if (p != null && p.atmos && !p.saved && !AddonSettings.atmos()) {
+                    // the Dolby Atmos switch went off while it was prepared: asked again, in stereo
+                    deleteFiles(p);
+                    p = null;
+                    throw new Stale();
+                }
             } catch (Stale t) {
                 // skipped past: the playing song goes first; this one is asked again if it comes back
                 why = t.getMessage();
                 dropped = true;
+            } catch (Limited t) {
+                why = t.getMessage() + ": tried again in " + LIMIT_RETRY_MS / 1000 + " s";
+                limited = true;
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 Log.w(TAG, "prepare " + id + " failed: " + why);
             }
             synchronized (AddonPrep.class) {
                 working = null;
+                if (p != null && p.atmos && !p.saved && !AddonSettings.atmos()) {
+                    deleteFiles(p);
+                    p = null;
+                    dropped = true;
+                    why = "Dolby Atmos switched off";
+                }
                 if (p != null) {
                     ready.put(id, p);
                     // the eldest first, never one our player is on (its next seek reopens the file)
@@ -303,20 +342,22 @@ public final class AddonPrep {
                         it.remove();
                         deleteFiles(e.getValue());
                     }
+                } else if (limited) {
+                    failedAt.put(id, SystemClock.elapsedRealtime() - RETRY_MS + LIMIT_RETRY_MS);
                 } else if (!dropped) {
                     failedAt.put(id, SystemClock.elapsedRealtime());
                 } else if (!app.ayham.extension.music.automix.AddonDirect.inUse(id)) {
-                    deleteQuietly(fileFor(ctx, id));
+                    for (File x : filesOf(ctx, id)) deleteQuietly(x);
                 }
             }
             Log.i(TAG, (p != null ? "ready: " + p : dropped ? "dropped " + id + ": " + why : "not from an addon: " + id + " (" + why + ")") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
         }
     }
 
-    /** The fetched file of a song not prepared (whatever its extension). */
-    private static File fileFor(Context c, String id) {
+    /** The fetched files of a song not prepared (whatever their extension; Atmos: its WAV too). */
+    private static File[] filesOf(Context c, String id) {
         File[] fs = dir(c).listFiles((d, n) -> n.startsWith(id + ".") && !n.endsWith(".part"));
-        return fs == null || fs.length == 0 ? null : fs[0];
+        return fs == null ? new File[0] : fs;
     }
 
     private static void deleteQuietly(File f) {
@@ -328,6 +369,7 @@ public final class AddonPrep {
         if (p == null) return;
         //noinspection ResultOfMethodCallIgnored
         if (!p.saved) p.file.delete();
+        deleteQuietly(p.wav);
         app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
     }
 
@@ -355,18 +397,39 @@ public final class AddonPrep {
         return d;
     }
 
+    /**
+     * The Dolby Atmos switch went off: Atmos files not downloaded and not playing go (the player ends
+     * first), and their songs are asked again, in stereo.
+     */
+    public static synchronized void dropAtmos() {
+        java.util.Iterator<Map.Entry<String, Prepared>> it = ready.entrySet().iterator();
+        int n = 0;
+        while (it.hasNext()) {
+            Prepared p = it.next().getValue();
+            if (!p.atmos || p.saved || app.ayham.extension.music.automix.AddonDirect.inUse(p.id)) continue;
+            it.remove();
+            deleteFiles(p);
+            n++;
+        }
+        if (n > 0) Log.i(TAG, "Dolby Atmos off: " + n + " Atmos file(s) dropped, asked again in stereo");
+    }
+
     /** Forgets a song held in memory (its download was deleted): its next play asks again. */
     public static synchronized void forget(String id) {
         Prepared p = ready.remove(id);
-        if (p != null) app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
+        if (p == null) return;
+        app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
+        // an Atmos download's decode: a player still on it keeps reading (the file is unlinked, not
+        // emptied), and the next prepare of this id writes a new file rather than over it
+        deleteQuietly(p.wav);
     }
 
     /** What a download asks of the fetch (AddonDownloads); null for playback. */
     static final class Download {
         String tier;
         File dir;
-        /** A file already downloaded for the same ISRC (another upload of the song): reused, not fetched. */
-        java.util.function.Function<String, File> byIsrc;
+        /** A file already downloaded for the same ISRC (another upload of the song) at the same kind (Atmos or stereo): reused. */
+        java.util.function.BiFunction<String, Boolean, File> byIsrc;
     }
 
     /** The song from the addons, fitted and levelled; null when none fits. */
@@ -420,29 +483,66 @@ public final class AddonPrep {
             opt.forDownload = true;
             opt.tier = dl.tier;
         }
+        // Dolby Atmos: playback with the switch on prefers Atmos rows; an Atmos download takes only them
+        opt.atmos = dl == null && AddonSettings.atmos();
+        opt.atmosOnly = dl != null && Pick.DOLBY.equals(dl.tier);
+        opt.atmosDecodes = Atmos::decodes;
         final Prepared[] got = new Prepared[1];
+        // playback: an Atmos file that didn't fit, waiting for a stereo row's offset
+        final Held[] held = dl == null ? new Held[1] : null;
         if (dl == null) opt.cancelled = AddonPrep::stale;
         opt.check = o -> {
             if (dl == null && stale()) return "no longer playing or next";
             try {
                 String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
                 if (early != null) return early;
-                Prepared p = fetchAndFit(c, id, o, ytSide, ytDur, ytLufs, opt.slackSec, dl);
+                // one Atmos file waits at a time: a second would take the same names (id.atmos.*)
+                if (held != null && held[0] != null && o.stream != null && o.stream.atmos)
+                    return "Atmos: another addon's Atmos file already waits for a stereo row";
+                Prepared p = fetchAndFit(c, id, o, ytSide, ytDur, ytLufs, opt.slackSec, dl, held);
                 if (p.score < 0) {
-                    //noinspection ResultOfMethodCallIgnored
-                    p.file.delete();
+                    if (p.file != null) //noinspection ResultOfMethodCallIgnored
+                        p.file.delete();
+                    deleteQuietly(p.wav);
                     return p.codec;   // the refusal, carried in codec
+                }
+                if (held != null && held[0] != null && !p.atmos) {
+                    Prepared a = placeAtmos(id, held[0], p, ytSide, ytLufs, opt.slackSec);
+                    held[0] = null;
+                    if (a != null) {
+                        deleteQuietly(p.file);
+                        p = a;
+                    }
                 }
                 got[0] = p;
                 return null;
             } catch (Throwable e) {
-                if (dl == null && !app.ayham.extension.music.automix.AddonDirect.inUse(id)) deleteQuietly(fileFor(c, id));
+                if (dl == null && !app.ayham.extension.music.automix.AddonDirect.inUse(id)) {
+                    Prepared keep = held != null && held[0] != null ? held[0].p : null;
+                    File[] fs = dir(c).listFiles((d, n) -> n.startsWith(id + ".") && !n.endsWith(".part"));
+                    if (fs != null) for (File x : fs) if (keep == null || !(x.equals(keep.file) || x.equals(keep.wav))) deleteQuietly(x);
+                }
                 return "fetch or decode failed: " + Protocol.scrub(String.valueOf(e));
             }
         };
-        AddonClient.Opened o = client().resolve(t, addons, opt);
+        AddonClient.Opened o;
+        try {
+            o = client().resolve(t, addons, opt);
+        } finally {
+            // an Atmos file no stereo row placed
+            if (held != null && held[0] != null) {
+                deleteQuietly(held[0].p.file);
+                deleteQuietly(held[0].p.wav);
+                held[0] = null;
+            }
+        }
         if (o.stream == null || got[0] == null) {
-            if (o.tried != null) for (AddonClient.Tried x : o.tried) Log.i(TAG, "  passed over: " + x.addon + " " + x.row + ": " + x.why);
+            boolean limit = false;
+            if (o.tried != null) for (AddonClient.Tried x : o.tried) {
+                Log.i(TAG, "  passed over: " + x.addon + " " + x.row + ": " + x.why);
+                if (x.why != null && x.why.startsWith("stream limit")) limit = true;
+            }
+            if (limit && dl == null) throw new Limited();
             return null;
         }
         Prepared p = got[0];
@@ -456,14 +556,15 @@ public final class AddonPrep {
         return p;
     }
 
-    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Download dl) throws Exception {
+    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Download dl,
+                                        Held[] held) throws Exception {
         Protocol.Stream s = o.stream;
-        String ext = s.codec == null ? "audio" : s.codec.toLowerCase(Locale.ROOT).contains("flac") ? "flac"
+        String ext = s.atmos ? "m4a" : s.codec == null ? "audio" : s.codec.toLowerCase(Locale.ROOT).contains("flac") ? "flac"
                 : s.codec.toLowerCase(Locale.ROOT).contains("alac") || s.codec.toLowerCase(Locale.ROOT).contains("aac") ? "m4a"
                 : s.codec.toLowerCase(Locale.ROOT).contains("mp3") ? "mp3" : "audio";
         if (dl != null) {
             File f = null;
-            File reuse = o.row == null || o.row.isrc == null || dl.byIsrc == null ? null : dl.byIsrc.apply(o.row.isrc);
+            File reuse = o.row == null || o.row.isrc == null || dl.byIsrc == null ? null : dl.byIsrc.apply(o.row.isrc, s.atmos);
             if (reuse != null && reuse.length() > 0) {
                 f = reuse;
                 Log.i(TAG, id + ": the same recording (ISRC) is downloaded already: " + f.getName() + " reused");
@@ -478,7 +579,7 @@ public final class AddonPrep {
                 throw e;
             }
         }
-        return fetchAndFitPlayback(c, id, o, s, ext, ytSide, ytDur, ytLufs, slack);
+        return fetchAndFitPlayback(c, id, o, s, ext, ytSide, ytDur, ytLufs, slack, held);
     }
 
     private static Prepared checkAndFit(String id, AddonClient.Opened o, File f, File reuse, String ext, OffsetFit.Side ytSide,
@@ -494,7 +595,7 @@ public final class AddonPrep {
                 p.file = new File(dl.dir, id + ".none");
                 return p;
             }
-            Prepared p = fit(id, o, f, ytSide, ytDur, ytLufs, slack);
+            Prepared p = fit(id, o, f, ytSide, ytDur, ytLufs, slack, null);
             if (p.score < 0 && f == reuse) p.file = new File(dl.dir, id + ".none"); // the shared file stays
             p.saved = true;
             p.tier = dl.tier;
@@ -504,8 +605,10 @@ public final class AddonPrep {
     }
 
     private static Prepared fetchAndFitPlayback(Context c, String id, AddonClient.Opened o, Protocol.Stream s, String ext, OffsetFit.Side ytSide,
-                                                double ytDur, double ytLufs, double slack) throws Exception {
-        File f = new File(dir(c), id + "." + ext), part = new File(dir(c), id + "." + ext + ".part");
+                                                double ytDur, double ytLufs, double slack, Held[] held) throws Exception {
+        // an Atmos file can wait beside a stereo one of the same extension (placeAtmos)
+        String name = s.atmos ? id + ".atmos." + ext : id + "." + ext;
+        File f = new File(dir(c), name), part = new File(dir(c), name + ".part");
         long t0 = SystemClock.elapsedRealtime();
         HttpURLConnection h = HttpTransport.open(Protocol.audio(s.url, s.headers, null));
         h.setReadTimeout(30_000);
@@ -520,6 +623,7 @@ public final class AddonPrep {
                 total += n;
                 if (total > 300L << 20) throw new IOException("over 300 MB");
                 if (SystemClock.elapsedRealtime() > until) throw new IOException("download over 120 s");
+                if (stale()) throw new Stale();
             }
             done = true;
         } finally {
@@ -529,11 +633,70 @@ public final class AddonPrep {
         }
         if (!part.renameTo(f)) throw new IOException("could not keep the file");
         Log.i(TAG, String.format(Locale.US, "%s: %s's file fetched (%d KB) in %d ms", id, o.addon.name, f.length() / 1024, SystemClock.elapsedRealtime() - t0));
-        return fit(id, o, f, ytSide, ytDur, ytLufs, slack);
+        return fit(id, o, f, ytSide, ytDur, ytLufs, slack, held);
+    }
+
+    /** An Atmos file decoded but not fitted: placed by the next stereo row that fits (placeAtmos). */
+    static final class Held {
+        final Prepared p;
+        final OffsetFit.Side side;
+        final OffsetFit.PeakMeter peaks;
+
+        Held(Prepared p, OffsetFit.Side side, OffsetFit.PeakMeter peaks) {
+            this.p = p;
+            this.side = side;
+            this.peaks = peaks;
+        }
+    }
+
+    /**
+     * The Atmos mix differs from YouTube's (another mix, not another recording), so its own fit scores
+     * low. The stereo file that fit is the same song on YouTube's clock: the Atmos file is placed by its
+     * offset (OffsetFit.guided) and levelled by its own loudness. null (the stereo one plays) when its
+     * length doesn't fit there.
+     */
+    static Prepared placeAtmos(String id, Held h, Prepared stereo, OffsetFit.Side ytSide, double ytLufs, double slack) {
+        Prepared p = h.p;
+        OffsetFit.Result r = OffsetFit.guided(ytSide, h.side, stereo.offsetSec, slack);
+        Log.i(TAG, String.format(Locale.US, "%s: %s's Atmos placed by %s's offset %+.4f s: %s", id, p.addon, stereo.addon, stereo.offsetSec, r));
+        if (r.none != null) {
+            Log.i(TAG, id + ": Atmos passed over (" + r.none + "): " + stereo.addon + "'s stereo plays");
+            deleteQuietly(p.file);
+            deleteQuietly(p.wav);
+            return null;
+        }
+        p.offsetSec = r.offsetSec;
+        p.score = stereo.score;
+        p.gain = OffsetFit.sourceGainDb(ytLufs, h.side.lufs(), h.peaks);
+        p.gainDb = p.gain.gainDb;
+        p.atmos = true;
+        Log.i(TAG, String.format(Locale.US, "%s: level: YouTube %.2f LUFS, Atmos %.2f LUFS: %s", id, ytLufs, h.side.lufs(), p.gain));
+        try {
+            playOwnDecode(p);
+        } catch (Throwable t) {
+            Log.w(TAG, id + ": Atmos WAV failed: " + stereo.addon + "'s stereo plays", t);
+            deleteQuietly(p.file);
+            deleteQuietly(p.wav);
+            return null;
+        }
+        return p;
+    }
+
+    /** Dolby Atmos: the gain into the WAV of our decode, which is then the file played (AtmosWav). */
+    static void playOwnDecode(Prepared p) throws IOException {
+        if (p.wav == null) return;
+        long t0 = SystemClock.elapsedRealtime();
+        AtmosWav.scale(p.wav, p.gainDb);
+        if (!p.saved) deleteQuietly(p.file);
+        p.file = p.wav;
+        p.bakedDb = p.gainDb;
+        p.gainDb = 0;
+        Log.i(TAG, String.format(Locale.US, "%s: Dolby Atmos plays from our decode (%d KB WAV, %+.2f dB in it, %d ms)", p.id, p.wav.length() / 1024, p.bakedDb,
+                SystemClock.elapsedRealtime() - t0));
     }
 
     /** Decodes the file and fits it to YouTube's audio: a score under 0 (with why in codec) when it doesn't fit. */
-    static Prepared fit(String id, AddonClient.Opened o, File f, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack) throws Exception {
+    static Prepared fit(String id, AddonClient.Opened o, File f, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Held[] held) throws Exception {
         Protocol.Stream s = o.stream;
         long t1 = SystemClock.elapsedRealtime();
         final OffsetFit.Side side = new OffsetFit.Side();
@@ -541,24 +704,34 @@ public final class AddonPrep {
         final OffsetFit.PeakMeter[] peaks = new OffsetFit.PeakMeter[1];
         final int[] fmt = new int[2];
         final Envelope env = new Envelope();
-        AudioDecode.decode(f, new AudioDecode.Sink() {
-            @Override
-            public void format(int rate, int channels) {
-                fmt[0] = rate;
-                fmt[1] = channels;
-                fit.format(rate);
-                peaks[0] = new OffsetFit.PeakMeter(channels);
-                env.format(rate);
-            }
+        // playback of Dolby Atmos: our decode is kept as a WAV, which is what plays (AtmosWav)
+        final AtmosWav.Writer wav = s.atmos && held != null ? new AtmosWav.Writer(new File(f.getParentFile(), id + ".atmos.wav")) : null;
+        try {
+            AudioDecode.decode(f, new AudioDecode.Sink() {
+                @Override
+                public void format(int rate, int channels) throws IOException {
+                    fmt[0] = rate;
+                    fmt[1] = channels;
+                    fit.format(rate);
+                    peaks[0] = new OffsetFit.PeakMeter(channels);
+                    env.format(rate);
+                    if (wav != null) wav.format(rate, channels);
+                }
 
-            @Override
-            public void block(float[][] planar, int frames) throws IOException {
-                AddonPrep.waitWhileHeld();
-                fit.add(planar, frames);
-                env.add(planar, frames);
-                for (int ch = 0; ch < planar.length; ch++) peaks[0].add(ch, planar[ch], 0, frames);
-            }
-        });
+                @Override
+                public void block(float[][] planar, int frames) throws IOException {
+                    AddonPrep.waitWhileHeld();
+                    fit.add(planar, frames);
+                    env.add(planar, frames);
+                    for (int ch = 0; ch < planar.length; ch++) peaks[0].add(ch, planar[ch], 0, frames);
+                    if (wav != null) wav.add(planar, frames);
+                }
+            });
+            if (wav != null) wav.finish();
+        } catch (Throwable t) {
+            if (wav != null) wav.abort();
+            throw t;
+        }
         fit.finish();
         OffsetFit.Result r = OffsetFit.fit(ytSide, side, slack);
         Prepared p = new Prepared();
@@ -572,10 +745,30 @@ public final class AddonPrep {
         p.ytDurationSec = ytDur;
         p.addonDurationSec = side.durationSec();
         p.env = env.done();
+        p.wav = wav == null ? null : wav.file();
         Log.i(TAG, String.format(Locale.US, "%s: %s's file decoded and fitted in %d ms: %s", id, o.addon.name, SystemClock.elapsedRealtime() - t1, r));
+        if (s.atmos && fmt[1] > 2) {
+            // the mix decks write 2 channels: a decoder that hands out 5.1 or more would lose the centre
+            p.score = -1;
+            p.codec = "Atmos decoded to " + fmt[1] + " channels (2 needed)";
+            deleteQuietly(p.wav);
+            p.wav = null;
+            return p;
+        }
+        if (r.none != null && s.atmos && held != null && held[0] == null && !"silent".equals(r.none)) {
+            // another mix: kept for a stereo row of this song to place (placeAtmos)
+            p.codec = s.codec;
+            held[0] = new Held(p, side, peaks[0]);
+            Prepared refusal = new Prepared();
+            refusal.score = -1;
+            refusal.codec = "Atmos: its own fit found " + r.none + " (another mix): kept for a stereo row's offset";
+            return refusal;
+        }
         if (r.none != null) {
             p.score = -1;
             p.codec = "does not fit YouTube's audio (" + r.none + ")";
+            deleteQuietly(p.wav);
+            p.wav = null;
             return p;
         }
         p.offsetSec = r.offsetSec;
@@ -583,7 +776,17 @@ public final class AddonPrep {
         p.gain = OffsetFit.sourceGainDb(ytLufs, side.lufs(), peaks[0]);
         p.gainDb = p.gain.gainDb;
         p.codec = s.codec;
+        p.atmos = s.atmos;
         Log.i(TAG, String.format(Locale.US, "%s: level: YouTube %.2f LUFS, file %.2f LUFS: %s", id, ytLufs, side.lufs(), p.gain));
+        if (p.wav != null) {
+            try {
+                playOwnDecode(p);
+            } catch (Throwable t) {
+                deleteQuietly(p.wav);
+                p.wav = null;
+                throw t;
+            }
+        }
         return p;
     }
 }

@@ -973,7 +973,8 @@ final class PlayerScreen {
         // ---- the quality badge (BitChord's LosslessOrStats), where "Mixing" goes when no mix runs ----
         private app.ayham.extension.music.addons.Quality.Badge badge = app.ayham.extension.music.addons.Quality.Badge.NONE;
         private final Paint badgeText = new Paint(Paint.ANTI_ALIAS_FLAG), glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private android.graphics.Path wave;
+        private Paint layerPaint, bandPaint;
+        private android.graphics.Path wave, dolby;
         private final long badgeStart = android.os.SystemClock.uptimeMillis();
 
         void badge(app.ayham.extension.music.addons.Quality.Badge b) {
@@ -983,6 +984,20 @@ final class PlayerScreen {
             invalidate();
         }
 
+        /** BitChord's chrome: full white is 0.73 under the blend, anything else 0.15 below its strength. */
+        private final float FULL = 0.73f;
+
+        private int white(float a) {
+            float v = a >= FULL ? FULL : a - 0.15f;
+            return (Math.round(255 * v) << 24) | 0xFFFFFF;
+        }
+
+        private void sweep(Canvas canvas, float l, float r, float top, float bottom, float centre, float band, int base) {
+            bandPaint.setShader(new LinearGradient(centre - band, 0, centre + band, 0,
+                    new int[]{base, white(FULL), base}, null, Shader.TileMode.CLAMP));
+            canvas.drawRect(l, top, r, bottom, bandPaint);
+        }
+
         private void drawBadge(Canvas canvas, float d, float cy) {
             app.ayham.extension.music.addons.Quality.Badge b = badge;
             if (b == app.ayham.extension.music.addons.Quality.Badge.NONE) return;
@@ -990,7 +1005,6 @@ final class PlayerScreen {
             if (badgeText.getTextSize() == 0 || badgeText.getTypeface() == null) {
                 badgeText.setTextSize(12.5f * getResources().getDisplayMetrics().scaledDensity);
                 badgeText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-                badgeText.setShadowLayer(4 * d, 0, d, 0x8C000000);
             }
             if (wave == null) {
                 wave = new android.graphics.Path();
@@ -1003,9 +1017,12 @@ final class PlayerScreen {
             String text = b.label();
             boolean shimmer = b.shimmers();
             boolean headphones = b == app.ayham.extension.music.addons.Quality.Badge.HIGH_QUALITY;
-            float gw = headphones ? 13 * d : 15 * d, gh = headphones ? 13 * d : 8 * d, gap = 4 * d;
+            boolean atmos = b == app.ayham.extension.music.addons.Quality.Badge.DOLBY_ATMOS;
+            float gw = headphones ? 13 * d : atmos ? 13 * d : 15 * d, gh = headphones ? 13 * d : atmos ? 9 * d : 8 * d, gap = 4 * d;
             float tw = badgeText.measureText(text);
-            float x0 = getWidth() / 2f - (gw + gap + tw) / 2f;
+            // centred by eye: the glyph is fainter and lighter than the word, so the row measured
+            // centre looked right of the play button; it sits a third of the glyph's width left
+            float x0 = getWidth() / 2f - (gw + gap + tw) / 2f - gw / 3f;
             // "Upgrading Quality" breathes 1 → 0.4 → 1 (900 ms each way): a wait, not a result
             float alpha = 1f;
             if (b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) {
@@ -1014,9 +1031,22 @@ final class PlayerScreen {
                 k = k * k * (3 - 2 * k);
                 alpha = 1f - 0.6f * k;
             }
-            int glyphAlpha = Math.round(255 * alpha * (shimmer ? 0.7f : 0.45f));
-            glyph.setColor((glyphAlpha << 24) | 0xFFFFFF);
-            glyph.setShadowLayer(4 * d, 0, d, 0x8C000000);
+            // BitChord's LosslessLabel under its additiveChrome: the row is added onto the backdrop
+            // (Plus), so the artwork's colour tints the white and no shadow is needed. Glyph at
+            // chromeWhite(0.7), text at 0.73 ("full" under the blend); unconfirmed rows at 0.45.
+            // Each chrome white is 0.15 under its plain strength, so more of the backdrop shows.
+            float all = gw + gap + tw, top = cy - 12 * d, bottom = cy + 12 * d;
+            if (layerPaint == null) {
+                layerPaint = new Paint();
+                layerPaint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD));
+                bandPaint = new Paint();
+                bandPaint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN));
+            }
+            layerPaint.setAlpha(Math.round(255 * alpha));
+            int layer = canvas.saveLayer(x0 - 2 * d, top, x0 + all + 2 * d, bottom, layerPaint);
+            glyph.clearShadowLayer();
+            glyph.setShader(null);
+            glyph.setColor(white(shimmer ? 0.7f : 0.45f));
             canvas.save();
             if (headphones) {
                 float s = gw / 24f;
@@ -1028,6 +1058,28 @@ final class PlayerScreen {
                 glyph.setStyle(Paint.Style.FILL);
                 canvas.drawRoundRect(new android.graphics.RectF(3, 12, 9, 21), 2, 2, glyph);
                 canvas.drawRoundRect(new android.graphics.RectF(15, 12, 21, 21), 2, 2, glyph);
+            } else if (atmos) {
+                // BitChord's ic_dolby_atmos: Dolby's double-D as Apple Music draws it, the two Ds filled
+                if (dolby == null) {
+                    dolby = new android.graphics.Path();
+                    dolby.moveTo(0, 0);
+                    dolby.lineTo(12.382f, 0);
+                    dolby.cubicTo(25.274f, 0, 36.05f, 12.87f, 36.05f, 28.164f);
+                    dolby.cubicTo(36.053f, 43.896f, 25.274f, 56.625f, 12.382f, 56.625f);
+                    dolby.lineTo(0, 56.625f);
+                    dolby.close();
+                    dolby.moveTo(70.806f, 0);
+                    dolby.lineTo(83.288f, 0);
+                    dolby.lineTo(83.288f, 56.625f);
+                    dolby.lineTo(70.806f, 56.625f);
+                    dolby.cubicTo(57.908f, 56.625f, 47.135f, 43.896f, 47.135f, 28.164f);
+                    dolby.cubicTo(47.135f, 12.87f, 57.908f, 0, 70.806f, 0);
+                    dolby.close();
+                }
+                canvas.translate(x0, cy - gh / 2);
+                canvas.scale(gw / 83.288f, gh / 56.625f);
+                glyph.setStyle(Paint.Style.FILL);
+                canvas.drawPath(dolby, glyph);
             } else {
                 canvas.translate(x0, cy - gh / 2);
                 canvas.scale(gw / app.ayham.extension.music.addons.Quality.WAVE_W, gh / app.ayham.extension.music.addons.Quality.WAVE_H);
@@ -1036,19 +1088,21 @@ final class PlayerScreen {
             }
             canvas.restore();
             float tx = x0 + gw + gap, ty = cy - (badgeText.descent() + badgeText.ascent()) / 2;
+            badgeText.clearShadowLayer();
+            badgeText.setShader(null);
             badgeText.setTextAlign(Paint.Align.LEFT);
-            if (shimmer) {
-                // BitChord's ShimmerText: white at 0.55, a band of full white 0.6 of the width wide
-                // sweeping across every 3 s
-                float band = tw * 0.6f, centre = -band + (t % 3000) / 3000f * (tw + 2 * band);
-                badgeText.setShader(new LinearGradient(tx + centre - band, 0, tx + centre + band, 0,
-                        new int[]{0x8CFFFFFF, 0xFFFFFFFF, 0x8CFFFFFF}, null, Shader.TileMode.CLAMP));
-                badgeText.setColor(Color.WHITE);
-            } else {
-                badgeText.setShader(null);
-                badgeText.setColor((Math.round(255 * alpha * 0.45f) << 24) | 0xFFFFFF);
-            }
+            badgeText.setColor(white(shimmer ? FULL : 0.45f));
             canvas.drawText(text, tx, ty, badgeText);
+            if (shimmer) {
+                // ShimmerText's band, painted over what is drawn (SrcIn keeps the shapes and takes
+                // the band's colour): the plain tint, full white at the centre, 0.6 of the width
+                // each side, sweeping left to right every 3 s. Here it runs over the glyph too,
+                // which keeps its own lower tint at the band's ends.
+                float band = all * 0.6f, centre = x0 - band + (t % 3000) / 3000f * (all + 2 * band);
+                sweep(canvas, x0, x0 + gw + gap / 2, top, bottom, centre, band, white(0.7f));
+                sweep(canvas, x0 + gw + gap / 2, x0 + all + 2 * d, top, bottom, centre, band, white(0.55f));
+            }
+            canvas.restoreToCount(layer);
             if (shimmer || b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) postInvalidateOnAnimation();
         }
 
@@ -1120,7 +1174,8 @@ final class PlayerScreen {
             base = -1;
             mixStart = -1;
             showYts();
-            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 12 * d);
+            // just above YT's times (their digits sit 19 dp under the bar's line; at 19 the badge met the play button)
+            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 16 * d);
             if (running) postInvalidateDelayed(100); // the decks get onto YT's clock in a moment
             if (from < 0 || dur <= 0 || from >= dur) return;
             float x = left + (right - left) * from / dur;

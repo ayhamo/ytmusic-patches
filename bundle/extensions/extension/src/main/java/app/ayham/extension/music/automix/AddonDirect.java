@@ -78,6 +78,8 @@ public final class AddonDirect {
     private static boolean started;
     private static long lastQueue;
     private static volatile boolean pausedByYt;
+    /** The Dolby Atmos switch at the last step. */
+    private static boolean atmosWas;
     /** When YT paused: its last reading or two still arrive just after, they aren't a resume. */
     private static volatile long pausedAt;
     /** Debug (spike prop directTrace=1): every clock reading and error logged. */
@@ -219,6 +221,16 @@ public final class AddonDirect {
         if (next != null && !next.equals(cur) && q[4] != null && q[5] != null)
             AddonPrep.request(ctx, next, q[4], q[5], Features.isMusicVideo(next), false);
 
+        // the Dolby Atmos switch went off: Atmos audio hands back to YT's (in step underneath) at once,
+        // and the songs are asked again in stereo
+        boolean atmosNow = AddonSettings.atmos();
+        if (atmosWas && !atmosNow) {
+            for (Shadow s : list()) if (!s.done && s.p.atmos && !s.p.saved) s.end("Dolby Atmos switched off", false);
+            if (armed != null && armed.p.atmos && !armed.p.saved) disarm();
+            AddonPrep.dropAtmos();
+        }
+        atmosWas = atmosNow;
+
         Object host = PlayerTap.current();
         AddonPrep.Prepared onHost = null;
         if (host != null) {
@@ -342,6 +354,7 @@ public final class AddonDirect {
         boolean lastWasSeek, pausedJump;
         /** Our player's audio session (the equalizer), 0 when none. */
         int session;
+        private Method sessionOf;
         int grossSeeks;
         long lastM;
         float speedSet = 1f;
@@ -414,17 +427,7 @@ public final class AddonDirect {
                 ctb.getMethod("z").invoke(pl);
                 vol.invoke(pl, 0f);
                 lastVol = 0;
-                // YT's equalizer preset on our audio too (its sessions get it from their broadcasts;
-                // ours is never announced). "a": the player's audio session (probed: matches audioflinger's)
-                try {
-                    Method m = pl.getClass().getMethod("a");
-                    if (m.getReturnType() == int.class) {
-                        session = (int) m.invoke(pl);
-                        if (session > 0) app.ayham.extension.music.features.EqPresets.attachDeck(session);
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "no audio session for the equalizer", t);
-                }
+                audioSession();
                 if (playNow) play(true);
                 Log.i(TAG, "addon player for " + p + " opened at " + at + " ms");
             } catch (Throwable t) {
@@ -447,7 +450,7 @@ public final class AddonDirect {
                 } catch (Throwable ignored) {
                 }
             }
-            AddonPlayback.playing(pl, p.addon, true);
+            AddonPlayback.playing(pl, p.addon, true, p.ownDecode());
             if (offBy(ytPos) > START_OFF_MS && pl instanceof SeekAccess) {
                 // under a silent YT: a seek there, its buffering waited out silently (a moment at a song's start)
                 ((SeekAccess) pl).ayham_seekTo(Math.max(0, Math.round(target(ytPos)) + lead));
@@ -463,9 +466,32 @@ public final class AddonDirect {
         void startLocking(long ytPos) {
             mode = Mode.LOCKING;
             // a mix's held player is not the song heard yet: the badge stays on the playing one
-            if (!forMix) AddonPlayback.playing(pl, p.addon, false);
+            if (!forMix) AddonPlayback.playing(pl, p.addon, false, p.ownDecode());
             // opened (or armed) where it is; the first reading of both clocks says how far off
             Log.i(TAG, p.id + ": locking on YT at " + ytPos + " ms");
+        }
+
+        /**
+         * The player's audio session, once it has one (0 until its audio track is made: read again
+         * each tick): YT's equalizer preset on it.
+         */
+        void audioSession() {
+            // YT's equalizer preset on our audio too (its sessions get it from their broadcasts;
+            // ours is never announced). "a": the player's audio session (probed: matches audioflinger's)
+            try {
+                if (sessionOf == null) {
+                    Method m = pl.getClass().getMethod("a");
+                    if (m.getReturnType() != int.class) return;
+                    sessionOf = m;
+                }
+                session = (int) sessionOf.invoke(pl);
+            } catch (Throwable t) {
+                session = -1;   // not asked again
+                Log.w(TAG, "no audio session for the equalizer", t);
+                return;
+            }
+            if (session <= 0) return;
+            app.ayham.extension.music.features.EqPresets.attachDeck(session);
         }
 
         void play(boolean on) {
@@ -542,6 +568,7 @@ public final class AddonDirect {
         }
 
         void tick(long now) throws Exception {
+            if (session == 0 && pl != null) audioSession();
             if (mode == Mode.ARMED || host == null) return;
             // the crossfade
             if (fadeMs > 0) {
@@ -699,7 +726,7 @@ public final class AddonDirect {
                     mode = Mode.ON;
                     grossSeeks = 0;
                     learnedLead = lead;
-                    if (forMix) AddonPlayback.playing(pl, p.addon, false);
+                    if (forMix) AddonPlayback.playing(pl, p.addon, false, p.ownDecode());
                     // a held player (a mix's next song) takes its share at once; it is silent anyway
                     fade(1f, Engine.gateOut(host) > 0 ? FADE_IN_MS : 1);
                     Log.i(TAG, String.format(Locale.US, "%s: in step (%d ms, %d corrections, lead %d ms, %d ms after opening): the addon's audio now;%s",

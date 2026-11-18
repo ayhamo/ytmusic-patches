@@ -22,7 +22,9 @@ public final class Quality {
         /** FLAC / ALAC / PCM at 16-bit, 48 kHz or under (shimmers). */
         LOSSLESS,
         /** Lossless above 16-bit or above 48 kHz (shimmers). */
-        HI_RES;
+        HI_RES,
+        /** Dolby Atmos (E-AC-3 JOC or AC-4) decoded from an addon's file (shimmers). */
+        DOLBY_ATMOS;
 
         public String label() {
             switch (this) {
@@ -34,6 +36,8 @@ public final class Quality {
                     return "Lossless";
                 case HI_RES:
                     return "Hi-Res Lossless";
+                case DOLBY_ATMOS:
+                    return "Dolby Atmos";
                 default:
                     return "";
             }
@@ -41,7 +45,7 @@ public final class Quality {
 
         /** The confirmed lossless states shimmer; a wait or a lossy tier holds still. */
         public boolean shimmers() {
-            return this == LOSSLESS || this == HI_RES;
+            return this == LOSSLESS || this == HI_RES || this == DOLBY_ATMOS;
         }
     }
 
@@ -91,6 +95,7 @@ public final class Quality {
         if (sampleMime != null && lossless(sampleMime)) {
             return hiRes(bits(pcmEncoding), sampleRate) ? Badge.HI_RES : Badge.LOSSLESS;
         }
+        if (Atmos.isAtmosMime(sampleMime)) return Badge.DOLBY_ATMOS;
         if (upgrading) return Badge.UPGRADING;
         if (sampleMime != null && bitrate >= 256000) return Badge.HIGH_QUALITY;
         return Badge.NONE;
@@ -124,6 +129,8 @@ public final class Quality {
         if (m.endsWith("flac")) return "FLAC";
         if (m.endsWith("alac")) return "ALAC";
         if (m.endsWith("raw")) return "PCM";
+        if (m.endsWith("eac3-joc")) return "Dolby Atmos";
+        if (m.endsWith("ac4")) return "Dolby AC-4";
         if (m.endsWith("opus")) return "Opus";
         if (m.endsWith("mp4a-latm")) return "AAC";
         if (m.endsWith("mpeg")) return "MP3";

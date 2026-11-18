@@ -259,10 +259,15 @@ public final class Protocol {
 
     /**
      * §1: each declared setting's default in order, atmos=false in place of a declared atmos
-     * setting (ours: stereo only), then quality: the tier's option (or the tier name).
+     * setting (ours: stereo, unless the phone's Dolby Atmos switch asks for atmos=true), then
+     * quality: the tier's option (or the tier name). An Atmos download asks for the addon's best.
      */
     public static List<String[]> paramsFor(List<Setting> settings, String tier, String picked) {
-        if (tier == null) tier = Pick.LOSSLESS;
+        return paramsFor(settings, tier, picked, false);
+    }
+
+    public static List<String[]> paramsFor(List<Setting> settings, String tier, String picked, boolean atmos) {
+        if (tier == null || tier.equals(Pick.DOLBY)) tier = Pick.LOSSLESS;
         List<String[]> out = new ArrayList<>();
         Setting q = null;
         for (Setting s : settings) {
@@ -271,7 +276,7 @@ public final class Protocol {
                 continue;
             }
             if (s.key.toLowerCase(Locale.ROOT).equals("atmos")) {
-                out.add(new String[]{"atmos", "false"});
+                out.add(new String[]{"atmos", atmos ? "true" : "false"});
                 continue;
             }
             if (s.def != null) out.add(new String[]{s.key, Js.text(s.def)});
@@ -324,7 +329,11 @@ public final class Protocol {
     }
 
     public static List<String[]> paramsFor(Manifest m, String tier, String picked) {
-        return paramsFor(m == null ? new ArrayList<Setting>() : m.settings, tier, picked);
+        return paramsFor(m, tier, picked, false);
+    }
+
+    public static List<String[]> paramsFor(Manifest m, String tier, String picked, boolean atmos) {
+        return paramsFor(m == null ? new ArrayList<Setting>() : m.settings, tier, picked, atmos);
     }
 
     /** k=v pairs percent-encoded as encodeURIComponent does, joined by '&'. */
@@ -411,7 +420,7 @@ public final class Protocol {
     // ---- the /stream answer (§4) ----
 
     public static final class Stream {
-        /** Set when the answer is a miss (no url, an error, encrypted, Atmos); the rest is then empty. */
+        /** Set when the answer is a miss (no url, an error, encrypted, Atmos not asked for); the rest is then empty. */
         public String miss;
         public String url;
         public String codec;
@@ -426,6 +435,8 @@ public final class Protocol {
         public Map<String, String> headers = new LinkedHashMap<>();
         /** The cached marker's flag: it came from the service's cache (no uncached cost). */
         public boolean cached;
+        /** Dolby Atmos (only when asked for: an Atmos row with the switch on); tier is then Pick.DOLBY. */
+        public boolean atmos;
 
         static Stream miss(String why) {
             Stream s = new Stream();
@@ -452,8 +463,13 @@ public final class Protocol {
     }
 
     /** §4: the stream answer, read leniently. marker: the manifest's cachedMarker. */
-    @SuppressWarnings("unchecked")
     public static Stream readStream(Object json, String marker) {
+        return readStream(json, marker, false);
+    }
+
+    /** atmosOk: an Atmos answer is taken (an Atmos row, the switch on), marked atmos; else a miss. */
+    @SuppressWarnings("unchecked")
+    public static Stream readStream(Object json, String marker, boolean atmosOk) {
         Map<String, Object> j = json instanceof Map ? (Map<String, Object>) json : Collections.<String, Object>emptyMap();
         if (marker == null) marker = DEFAULT_LIMITS.cachedMarker;
         String url = Js.trim(Js.text(j.get("url")));
@@ -478,9 +494,13 @@ public final class Protocol {
         }
         String allText = all.toString();
         String atmosText = Js.text(j.get("codec")) + " " + Js.text(j.get("audioMode")) + " " + Js.text(j.get("format")) + " " + quality;
-        if (Pick.ATMOS.matcher(atmosText).find()) return Stream.miss("atmos");
+        boolean atmos = Pick.ATMOS.matcher(atmosText).find();
+        // an Atmos row whose answer names only its codec (eac3, ac4) is Atmos too
+        if (atmosOk && !atmos) atmos = Atmos.mimeOf(Js.text(j.get("codec"))) != null;
+        if (atmos && !atmosOk) return Stream.miss("atmos");
 
         Stream s = new Stream();
+        s.atmos = atmos;
         s.url = url;
         // transport: the URL path's extension and the answer's own format fields, never words inside
         // the host, query or a token (a progressive /Dashboard.flac or ?t=..mpd.. is a file)
@@ -499,7 +519,7 @@ public final class Protocol {
         s.sampleRate = sampleRate;
         Double bitDepth = Js.num(j.get("bitDepth"));
         s.bitDepth = bitDepth != null ? bitDepth : Js.num(Js.group1(BITS, allText));
-        s.tier = Pick.tierOf(Js.text(j.get("format")) + " " + quality + " " + Js.text(j.get("codec")));
+        s.tier = atmos ? Pick.DOLBY : Pick.tierOf(Js.text(j.get("format")) + " " + quality + " " + Js.text(j.get("codec")));
         Double bitrate = Js.num(j.get("bitrate"));
         if (bitrate == null) bitrate = Js.num(Js.group1(KBPS, allText));
         if (bitrate != null && bitrate > 3000) bitrate /= 1000;

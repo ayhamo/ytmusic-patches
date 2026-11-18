@@ -25,8 +25,9 @@ MOTION_KEYS = ["motionDetailSquare", "motionSquareVideo1x1", "motionDetailRaw", 
 UPSTREAM = Path(__file__).with_name("upstream.json")
 UPSTREAM_FILES = [
     ("ayhamo/BitChord", "app/src/main/java/com/music/bitchord/data/canvas/AppleMusicCanvas.kt"),
-    ("ayhamo/vivimusic-automix", "src/apple-canvas.js"),
 ]
+# vivimusic-automix's src/apple-canvas.js is plain upstream code since 2026-11-18 (the fork's token
+# handling moved into src/plus/bg-plus.js with its other features); ours follows BitChord's file above.
 
 
 def get(url, bearer=None):

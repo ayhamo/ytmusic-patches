@@ -54,13 +54,43 @@ final class Engine {
         return v == null ? 1f : v;
     }
 
+    /** Each player's last setVolume and what the gate gave it before the addon's share. */
+    private static final java.util.Map<Object, Float> gateIn = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>()),
+            gateOut = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>()),
+            speeds = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
     static float gate(Object player, float volume) {
         if (player != null && app.ayham.extension.music.features.PlayerTap.isOurs(player)) return volume; // our addon player
         if (!selfCall && player != null) ytAsked.put(player, volume);
+        float v;
         // the stream deck plays this song: YT's player stays silent under it
-        if (player != null && StreamDeck.mutes(player)) return 0f;
-        if (!holding) return volume;
-        return player == released ? volume : 0f;
+        if (player != null && StreamDeck.mutes(player)) v = 0f;
+        else if (!holding) v = volume;
+        else v = player == released ? volume : 0f;
+        if (player == null) return v;
+        gateIn.put(player, volume);
+        gateOut.put(player, v);
+        // the addon plays this song (Direct): YT's player is turned down by its share, ours follows v
+        AddonDirect.onGate(player, v);
+        return v * (1 - AddonDirect.share(player));
+    }
+
+    /** What the gate gives the player before the addon's share (YT's volume when never set). */
+    static float gateOut(Object player) {
+        Float v = gateOut.get(player);
+        return v == null ? ytVolume(player) : v;
+    }
+
+    /** The player's last volume set again, through the gate (the addon's share changed). */
+    static void reapply(Object player) {
+        Float v = gateIn.get(player);
+        setVolume(player, v == null ? ytVolume(player) : v);
+    }
+
+    /** The speed automix last gave YT's player (1 when none). */
+    static float speedOf(Object player) {
+        Float s = speeds.get(player);
+        return s == null ? 1f : s;
     }
 
     interface Listener {
@@ -148,6 +178,15 @@ final class Engine {
         try {
             Models.loadNative();
             Analyzer.Pcm outPcm = Analyzer.tail(ctx, m.outId), inPcm = Analyzer.head(ctx, m.inId);
+            // a song heard from an addon (or about to be) is mixed from the addon's audio, so the
+            // takeover and the handover don't change the sound
+            Analyzer.Pcm ao = AddonDirect.audibleFor(m.outId) ? AddonPcm.tail(ctx, m.outId) : null;
+            Analyzer.Pcm ai = app.ayham.extension.music.addons.AddonSettings.on() && app.ayham.extension.music.addons.AddonPrep.get(m.inId) != null
+                    ? AddonPcm.head(ctx, m.inId) : null;
+            if (ao != null) outPcm = ao;
+            if (ai != null) inPcm = ai;
+            if (ao != null || ai != null)
+                Log.i(TAG, "mix decks: " + (ao != null ? "addon" : "YouTube") + " audio out, " + (ai != null ? "addon" : "YouTube") + " audio in");
             if (outPcm == null || inPcm == null) {
                 Log.w(TAG, "mix not built: decoded audio missing");
                 return null;
@@ -568,7 +607,8 @@ final class Engine {
         }
         inPlayer = player;
         setVolume(player, 0f);
-        deck = StreamDeck.follow(Automix.context(), m.inId, player);
+        // a song the addon plays (Direct) gets no stream deck: the addon's player is its deck
+        deck = app.ayham.extension.music.addons.AddonPrep.get(m.inId) != null ? null : StreamDeck.follow(Automix.context(), m.inId, player);
         settleUntil = 0;
         nudgeUntil = 0;
         errs.clear();
@@ -830,6 +870,7 @@ final class Engine {
 
     static void speed(Object player, float s) {
         StreamDeck.ytSpeed(player, s);
+        speeds.put(player, s);
         try {
             player.getClass().getMethod("patch_setPlaybackParameters", float.class, float.class).invoke(player, s, 1f);
         } catch (Throwable t) {

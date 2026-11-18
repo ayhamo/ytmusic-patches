@@ -190,6 +190,28 @@ val playerFeaturesPatch = patch(
                         setAttribute("android:key", "ayham_automix_saved")
                     }
                 }
+                // Addons: songs played from the user's own addons, fitted to YouTube's audio.
+                appendChild("PreferenceCategory") {
+                    setAttribute("android:key", "ayham_addons_category")
+                    setAttribute("android:title", "Addons")
+                    appendChild("SwitchPreference") {
+                        setAttribute("android:key", "ayham_addons")
+                        setAttribute("android:title", "Play from addons")
+                        setAttribute("android:summary", "Songs play from your addons when one has them (lossless where it can): the file is fetched ahead, lined up with YouTube's audio and matched to its loudness. YouTube plays the song until the addon's audio is ready and takes over again if the file fails.")
+                        setAttribute("android:defaultValue", "false")
+                    }
+                    appendChild("app.ayham.extension.music.addons.AddonLinksPreference") {
+                        setAttribute("android:key", "ayham_addon_links_ui")
+                        setAttribute("android:dependency", "ayham_addons")
+                    }
+                    appendChild("$AUTOMIX.AutomixVersionPreference") {
+                        setAttribute("android:key", "ayham_addon_slack")
+                        setAttribute("android:title", "Length match")
+                        setAttribute("android:summary", "%s. How far an addon's file may be from YouTube's length.")
+                        setAttribute("android:defaultValue", "5")
+                        setAttribute("android:dependency", "ayham_addons")
+                    }
+                }
                 }
                 log.info("Features: settings row added to $name")
             } ?: log.warning("Features: $name not found")

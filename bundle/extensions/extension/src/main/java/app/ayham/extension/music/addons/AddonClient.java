@@ -78,6 +78,16 @@ public final class AddonClient {
         public String tier = Pick.LOSSLESS;
         /** Downloads: ±2 s, addons with allowDownloads only, lossy files over 256 kbps only (§8). */
         public boolean forDownload;
+        /**
+         * The last say on an opened row before it is taken (the phone's fit: the file fetched and
+         * fitted to YouTube's audio): a reason refuses it and the next row, then addon, is tried.
+         */
+        public Check check;
+    }
+
+    public interface Check {
+        /** null to take the row, else why not (logged; no link in it). */
+        String refuse(Opened o);
     }
 
     /** Why an addon or a row was passed over. Never holds a link. */
@@ -552,6 +562,12 @@ public final class AddonClient {
                     o.row = row;
                     o.stream = s;
                     o.tried = tried;
+                    String refused = opt.check == null ? null : opt.check.refuse(o);
+                    if (refused != null) {
+                        log.log("addons: " + man.name + " row " + row.id + " refused: " + refused);
+                        tried.add(new Tried(addon.host, row.id, refused, null));
+                        continue;
+                    }
                     return o;
                 }
             } catch (AddonError e) {

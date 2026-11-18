@@ -82,6 +82,7 @@ public final class Automix {
         if (started) return;
         started = true;
         main.postDelayed(Automix::tick, 2000);
+        AddonDirect.start(app);
         Log.i(TAG, "automix ready (" + (enabled() ? "on" : "off") + ")");
     }
 
@@ -97,6 +98,7 @@ public final class Automix {
 
     /** Injection point: Morphe's CrossfadePatch.onPauseVideo (a pause, or the first step of a skip). */
     public static void onPauseVideo() {
+        AddonDirect.onPause();
         Engine e = engine;
         if (e == null || !e.running()) return;
         // our own "next" pauses too, 10-50 ms before the stop: the next song's start isn't a pause
@@ -135,6 +137,16 @@ public final class Automix {
 
     static String nextIdNow() {
         return nextId;
+    }
+
+    /** The queue as last read: {current id, title, artist, next id, title, artist}. */
+    static String[] queue() {
+        return new String[]{curId, curTitle, curArtist, nextId, nextTitle, nextArtist};
+    }
+
+    /** Reads the queue (main thread) when automix's tick hasn't lately: the addons need it with automix off. */
+    static void pollQueue() {
+        if (SystemClock.elapsedRealtime() - queueAt > 1400) readQueue();
     }
 
     /** The song version lookup reads the queue too (for the next song), with or without automix. */
@@ -227,6 +239,12 @@ public final class Automix {
 
     private static Song amx = new Song("");
     private static volatile Engine engine;
+
+    /** A mix is on (from its build to its end). */
+    static boolean mixing() {
+        Engine e = engine;
+        return e != null && e.running();
+    }
     private static Object lastPlayer;
     private static double lastDur, lastPos;
 

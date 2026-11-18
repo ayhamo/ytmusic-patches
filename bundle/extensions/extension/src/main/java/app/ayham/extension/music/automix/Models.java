@@ -24,7 +24,7 @@ import ai.onnxruntime.OrtSession;
  * and open-unmix's vocal mask. They ship in the APK's assets (automix/) and are copied to the
  * app's files on first use, where ONNX Runtime opens them.
  */
-final class Models {
+public final class Models {
     private static final String TAG = Automix.TAG;
     static final String BEAT = "beat_this_final0_q8.onnx";
     static final String VOCALS = "vocals_umxhq_int8.onnx";
@@ -33,6 +33,12 @@ final class Models {
     private static boolean nativeLoaded;
 
     private Models() {
+    }
+
+    /** The native resampler (the analysis' and the decks'), for other packages. */
+    public static float[] resample(float[] x, int from, int to) {
+        loadNative();
+        return com.music.bitchord.playback.smart.MelSpectrogram.nativeResample(x, from, to);
     }
 
     static synchronized void loadNative() {

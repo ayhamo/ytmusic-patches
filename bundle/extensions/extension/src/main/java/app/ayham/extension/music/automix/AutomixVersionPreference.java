@@ -38,6 +38,9 @@ public class AutomixVersionPreference extends ListPreference {
         if ("ayham_eq_preset".equals(key)) {
             setEntries(new CharSequence[]{"Bass Boost", "Clear Vocals", "Night Mode", "Room", "Flat"});
             setEntryValues(new CharSequence[]{"bass", "vocals", "night", "room", "flat"});
+        } else if (app.ayham.extension.music.addons.AddonSettings.KEY_SLACK.equals(key)) {
+            setEntries(new CharSequence[]{"Exact length only", "Up to 2 s apart", "Up to 5 s apart (default)", "Up to 10 s apart"});
+            setEntryValues(new CharSequence[]{"0", "2", "5", "10"});
         } else if (Automix.KEY_BARS.equals(key)) {
             setEntries(new CharSequence[]{"Auto (picks per song, like BitChord phone)", "Up to 4 bars", "Up to 8 bars",
                     "Up to 16 bars (BitChord web default)", "Up to 32 bars"});

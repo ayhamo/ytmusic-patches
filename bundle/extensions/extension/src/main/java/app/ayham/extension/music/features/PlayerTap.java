@@ -108,6 +108,15 @@ public final class PlayerTap {
             path = null;
             return null;
         }
+        // YouTube's own audio: "High Quality" when the stream decoded really is 256 kbps or more (Premium's
+        // Opus 774), not the usual 251 at about 130-160 kbps; an addon lookup running keeps "Upgrading"
+        if (badge == Quality.Badge.NONE) {
+            try {
+                String[] h = AddonPlayback.head(format.toString());
+                badge = Quality.badge(false, h[3], 0, -1, AddonPlayback.parse(h[5]));
+            } catch (Throwable ignored) {
+            }
+        }
         return describe(format.toString());
     }
 

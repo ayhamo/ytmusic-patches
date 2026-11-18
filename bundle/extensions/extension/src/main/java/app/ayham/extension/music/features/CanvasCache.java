@@ -76,6 +76,16 @@ final class CanvasCache {
         return "id:" + videoId;
     }
 
+    /** The key a downloaded song's Spotify canvas is saved under. */
+    static String spotifyIdKey(String videoId) {
+        return "spid:" + videoId;
+    }
+
+    static synchronized void remove(String songKey) {
+        if (props == null || props.remove("song." + songKey) == null) return;
+        save();
+    }
+
     static synchronized void put(String songKey, String clipPath) {
         if (props == null) return;
         props.setProperty("song." + songKey, System.currentTimeMillis() + "|" + (clipPath == null ? "" : clipPath));

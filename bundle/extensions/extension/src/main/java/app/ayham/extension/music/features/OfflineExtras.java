@@ -37,20 +37,25 @@ final class OfflineExtras {
     private OfflineExtras() {
     }
 
-    /** Called when YT's offline engine saves [videoId]. */
-    static void saved(String videoId) {
+    /** Called when YT's offline engine saves [videoId], with the popup's answer (or the switch's defaults). */
+    static void saved(String videoId, DownloadChoice.Choice ch) {
         Context c = Features.appContext;
         if (c == null || videoId == null || videoId.isEmpty() || !done.add(videoId)) return;
         new Thread(() -> {
+            OfflineIndex.touch(c, videoId);
             try {
                 JSONObject d = details(videoId);
                 String title = d.optString("title", ""), artist = d.optString("author", "");
                 int length = d.optInt("lengthSeconds", 0);
-                SongVersion.noteType(videoId, d.optString("musicVideoType", ""));
-                Log.i(TAG, "offline extras for " + videoId + ": '" + title + "' by '" + artist + "' (" + length + " s)");
+                String type = d.optString("musicVideoType", "");
+                SongVersion.noteType(videoId, type);
+                Log.i(TAG, "offline extras for " + videoId + ": '" + title + "' by '" + artist + "' (" + length + " s): " + ch);
                 if (title.isEmpty()) return;
-                Log.i(TAG, "offline extras " + videoId + ": lyrics " + lyrics(title, artist, length));
-                if ("1".equals(Features.props().getProperty("canvas"))) Log.i(TAG, "offline extras " + videoId + ": art clip " + clip(c, videoId, title, artist));
+                if (ch.lossless) app.ayham.extension.music.addons.AddonDownloads.enqueue(c, videoId, title, artist,
+                        type.contains("OMV") || type.contains("UGC"), ch.tier);
+                if (ch.lyrics) Log.i(TAG, "offline extras " + videoId + ": lyrics " + lyrics(c, videoId, title, artist, length));
+                if (ch.art) Log.i(TAG, "offline extras " + videoId + ": art clip " + clip(c, videoId, title, artist));
+                if (ch.canvas) Log.i(TAG, "offline extras " + videoId + ": canvas " + canvas(c, videoId, title, artist));
             } catch (Throwable t) {
                 done.remove(videoId); // asked again on the next save
                 Log.w(TAG, "offline extras failed for " + videoId, t);
@@ -91,7 +96,7 @@ final class OfflineExtras {
      * Morphe's own lyrics prefetch, for this song: its search providers in the user's order, the
      * first valid answer stored in its lyrics store under the track key its player looks up.
      */
-    private static String lyrics(String title, String artist, int length) throws Exception {
+    private static String lyrics(Context c, String videoId, String title, String artist, int length) throws Exception {
         Class<?> settings = Class.forName("app.morphe.extension.music.settings.Settings");
         Object enabled = settings.getField("LYRICS_ENABLED").get(null);
         if (!(boolean) enabled.getClass().getMethod("get").invoke(enabled)) return "skipped (Morphe's lyrics are off)";
@@ -123,13 +128,52 @@ final class OfflineExtras {
             if (!(boolean) match.getMethod("isValidLyrics", lyricsType, trackType).invoke(null, l, track)) continue;
             String src = (String) match.getMethod("cacheSourceFor", lyricsType).invoke(null, l);
             cache.getMethod("put", trackType, String.class, lyricsType, String.class).invoke(null, track, src, l, null);
+            keepLyrics(c, videoId, cache, trackType, track, src);
             return "saved from " + p.getClass().getSimpleName() + " for '" + clean[0] + " - " + clean[1] + "'";
         }
         return "none found";
     }
 
+    /**
+     * Our copy of Morphe's lyrics file (its cache keeps a set number and trims the oldest), put
+     * back at start when trimmed; noted so deleting the song deletes both.
+     */
+    private static void keepLyrics(Context c, String videoId, Class<?> cache, Class<?> trackType, Object track, String src) {
+        try {
+            Method key = cache.getDeclaredMethod("key", trackType, String.class);
+            Method file = cache.getDeclaredMethod("cacheFile", String.class);
+            key.setAccessible(true);
+            file.setAccessible(true);
+            File f = (File) file.invoke(null, key.invoke(null, track, src));
+            if (f == null || !f.exists()) return;
+            File copy = new File(OfflineIndex.dir(c), "lyrics/" + videoId + ".lrc");
+            OfflineIndex.copy(f, copy);
+            File raw = new File(f.getPath() + ".raw");
+            if (raw.exists()) OfflineIndex.copy(raw, new File(copy.getPath() + ".raw"));
+            OfflineIndex.note(c, videoId, OfflineIndex.LYRICS, f.getAbsolutePath() + "|" + copy.getAbsolutePath());
+        } catch (Throwable t) {
+            Log.w(TAG, "offline lyrics copy failed for " + videoId + ": " + t);
+        }
+    }
+
+    /** The song's Spotify canvas, kept in files/ayham-offline/spotify (no cap) and saved against the video id. */
+    private static String canvas(Context c, String videoId, String title, String artist) throws Exception {
+        CanvasCache.init(c.getFilesDir());
+        File f = SpotifyCanvas.find(title, artist, new File(OfflineIndex.dir(c), "spotify"), false);
+        if (f == null) return "none (no canvas)";
+        CanvasCache.put(CanvasCache.spotifyIdKey(videoId), f.getAbsolutePath());
+        OfflineIndex.note(c, videoId, OfflineIndex.CANVAS, f.getAbsolutePath());
+        return f.getName() + " (" + f.length() / 1024 + " KB)";
+    }
+
+    /** Forgets that a song's extras were saved this run (its download was deleted: a new one saves them again). */
+    static void forget(String videoId) {
+        done.remove(videoId);
+    }
+
     /** The Apple motion clip, kept in files/ayham-offline (no cap) and saved against the video id. */
     private static String clip(Context c, String videoId, String title, String artist) throws Exception {
+        CanvasCache.init(c.getFilesDir());
         // the shape the player shows: tall with full-screen art, else square; the other when that fails
         String[] urls = AppleCanvas.find(title, artist, FullArt.on());
         if (urls == null) {
@@ -148,6 +192,7 @@ final class OfflineExtras {
         }
         if (f == null) return "download failed" + (last == null ? "" : " (" + last.getMessage() + ")");
         CanvasCache.put(CanvasCache.idKey(videoId), f.getAbsolutePath());
+        OfflineIndex.note(c, videoId, OfflineIndex.ART, f.getAbsolutePath());
         return f.getName() + " (" + f.length() / 1024 + " KB)";
     }
 }

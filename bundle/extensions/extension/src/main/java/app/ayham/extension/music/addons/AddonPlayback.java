@@ -70,11 +70,11 @@ public final class AddonPlayback {
     }
 
     /** Format(id, label, container, sampleMime, codecs, bitrate, ...) */
-    static String[] head(String s) {
+    public static String[] head(String s) {
         return s.substring(7, s.indexOf(", [")).split(", ");
     }
 
-    private static int parse(String s) {
+    public static int parse(String s) {
         try {
             return Integer.parseInt(s.trim());
         } catch (NumberFormatException e) {

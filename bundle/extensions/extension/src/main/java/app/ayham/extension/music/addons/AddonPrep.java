@@ -46,6 +46,10 @@ public final class AddonPrep {
         public OffsetFit.Gain gain;
         public int rate, channels;
         public String codec;
+        /** A downloaded song (AddonDownloads): its file is kept when it leaves memory. */
+        public boolean saved;
+        /** Downloads: the row's ISRC and the tier asked for. */
+        public String isrc, tier;
         /** The file's loudness (dBFS, mono RMS) every ENV_HOP seconds of its own time: where it is quiet. */
         public float[] env;
         public static final double ENV_HOP = Envelope.HOP;
@@ -163,6 +167,12 @@ public final class AddonPrep {
     /** Playback gave up on it (the file stalled or errored): not played from the addon again soon. */
     public static synchronized void dropped(String id, String why) {
         Prepared p = ready.remove(id);
+        if (p != null && p.saved) {
+            // a downloaded file stays (only this play falls back to YouTube)
+            failedAt.put(id, SystemClock.elapsedRealtime());
+            Log.w(TAG, "dropped downloaded " + id + " for now: " + why);
+            return;
+        }
         failedAt.put(id, SystemClock.elapsedRealtime());
         Log.w(TAG, "dropped " + id + ": " + why);
         if (p != null) deleteFiles(p);
@@ -222,7 +232,7 @@ public final class AddonPrep {
             Prepared p = null;
             String why;
             try {
-                p = prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
+                p = AddonDownloads.has(ctx, id) ? AddonDownloads.load(ctx, id) : prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
                 why = p == null ? "no addon has a file that fits" : null;
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
@@ -262,7 +272,7 @@ public final class AddonPrep {
     private static void deleteFiles(Prepared p) {
         if (p == null) return;
         //noinspection ResultOfMethodCallIgnored
-        p.file.delete();
+        if (!p.saved) p.file.delete();
         app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
     }
 
@@ -290,8 +300,27 @@ public final class AddonPrep {
         return d;
     }
 
+    /** Forgets a song held in memory (its download was deleted): its next play asks again. */
+    public static synchronized void forget(String id) {
+        Prepared p = ready.remove(id);
+        if (p != null) app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
+    }
+
+    /** What a download asks of the fetch (AddonDownloads); null for playback. */
+    static final class Download {
+        String tier;
+        File dir;
+        /** A file already downloaded for the same ISRC (another upload of the song): reused, not fetched. */
+        java.util.function.Function<String, File> byIsrc;
+    }
+
     /** The song from the addons, fitted and levelled; null when none fits. */
     static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo) throws Exception {
+        return prepare(c, id, title, artist, isVideo, null);
+    }
+
+    /** dl set: a download (allowDownloads addons, ±2 s, lossless at the tier asked, kept in dl.dir). */
+    static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo, Download dl) throws Exception {
         // YouTube's side first: everything is fitted to it
         long t0 = SystemClock.elapsedRealtime();
         File yt = app.ayham.extension.music.automix.AddonPcm.youtubeFile(c, id);
@@ -325,13 +354,19 @@ public final class AddonPrep {
         t.durationSec = ytDur;
         t.isVideo = isVideo;
         List<AddonClient.Addon> addons = new ArrayList<>();
-        for (String l : AddonSettings.links()) addons.add(new AddonClient.Addon(l));
+        for (String l : AddonSettings.links(c)) addons.add(new AddonClient.Addon(l));
         AddonClient.Options opt = new AddonClient.Options();
         opt.slackSec = AddonSettings.slackSec();
+        if (dl != null) {
+            opt.forDownload = true;
+            opt.tier = dl.tier;
+        }
         final Prepared[] got = new Prepared[1];
         opt.check = o -> {
             try {
-                Prepared p = fetchAndFit(c, id, o, ytSide, ytDur, ytLufs, opt.slackSec);
+                String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
+                if (early != null) return early;
+                Prepared p = fetchAndFit(c, id, o, ytSide, ytDur, ytLufs, opt.slackSec, dl);
                 if (p.score < 0) {
                     //noinspection ResultOfMethodCallIgnored
                     p.file.delete();
@@ -340,7 +375,7 @@ public final class AddonPrep {
                 got[0] = p;
                 return null;
             } catch (Throwable e) {
-                if (!app.ayham.extension.music.automix.AddonDirect.inUse(id)) deleteQuietly(fileFor(c, id));
+                if (dl == null && !app.ayham.extension.music.automix.AddonDirect.inUse(id)) deleteQuietly(fileFor(c, id));
                 return "fetch or decode failed: " + Protocol.scrub(String.valueOf(e));
             }
         };
@@ -350,6 +385,7 @@ public final class AddonPrep {
             return null;
         }
         Prepared p = got[0];
+        if (dl != null) return p; // its deck PCM is written when it is played (AddonDownloads.load)
         try {
             app.ayham.extension.music.automix.AddonPcm.write(c, p);
         } catch (Throwable e) {
@@ -359,11 +395,36 @@ public final class AddonPrep {
         return p;
     }
 
-    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack) throws Exception {
+    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Download dl) throws Exception {
         Protocol.Stream s = o.stream;
         String ext = s.codec == null ? "audio" : s.codec.toLowerCase(Locale.ROOT).contains("flac") ? "flac"
                 : s.codec.toLowerCase(Locale.ROOT).contains("alac") || s.codec.toLowerCase(Locale.ROOT).contains("aac") ? "m4a"
                 : s.codec.toLowerCase(Locale.ROOT).contains("mp3") ? "mp3" : "audio";
+        if (dl != null) {
+            File f = null;
+            File reuse = o.row == null || o.row.isrc == null || dl.byIsrc == null ? null : dl.byIsrc.apply(o.row.isrc);
+            if (reuse != null && reuse.length() > 0) {
+                f = reuse;
+                Log.i(TAG, id + ": the same recording (ISRC) is downloaded already: " + f.getName() + " reused");
+            } else {
+                f = Fetch.download(o, new File(dl.dir, id + "." + ext));
+            }
+            String bad = Fetch.formatRefusal(f, ext, dl.tier, s);
+            if (bad != null) {
+                if (f != reuse) deleteQuietly(f);
+                Prepared p = new Prepared();
+                p.score = -1;
+                p.codec = bad;
+                p.file = new File(dl.dir, id + ".none");
+                return p;
+            }
+            Prepared p = fit(id, o, f, ytSide, ytDur, ytLufs, slack);
+            if (p.score < 0 && f == reuse) p.file = new File(dl.dir, id + ".none"); // the shared file stays
+            p.saved = true;
+            p.tier = dl.tier;
+            p.isrc = o.row == null ? null : o.row.isrc;
+            return p;
+        }
         File f = new File(dir(c), id + "." + ext), part = new File(dir(c), id + "." + ext + ".part");
         long t0 = SystemClock.elapsedRealtime();
         HttpURLConnection h = HttpTransport.open(Protocol.audio(s.url, s.headers, null));
@@ -388,7 +449,12 @@ public final class AddonPrep {
         }
         if (!part.renameTo(f)) throw new IOException("could not keep the file");
         Log.i(TAG, String.format(Locale.US, "%s: %s's file fetched (%d KB) in %d ms", id, o.addon.name, f.length() / 1024, SystemClock.elapsedRealtime() - t0));
+        return fit(id, o, f, ytSide, ytDur, ytLufs, slack);
+    }
 
+    /** Decodes the file and fits it to YouTube's audio: a score under 0 (with why in codec) when it doesn't fit. */
+    static Prepared fit(String id, AddonClient.Opened o, File f, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack) throws Exception {
+        Protocol.Stream s = o.stream;
         long t1 = SystemClock.elapsedRealtime();
         final OffsetFit.Side side = new OffsetFit.Side();
         final AudioDecode.ToFit fit = new AudioDecode.ToFit(side);

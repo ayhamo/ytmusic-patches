@@ -438,10 +438,18 @@ final class AnimatedCover {
                 try {
                     // only when the queue already names this song (it can lag a song behind)
                     vid = app.ayham.extension.music.automix.Automix.currentIdFor(title);
-                    if (vid == null) app.ayham.extension.music.automix.Automix.refreshQueue();
+                    // a song just started: the queue names it a moment later (a downloaded song's
+                    // saved clip needs its id, and offline nothing else answers)
+                    for (int i = 0; vid == null && i < 6 && forKey.equals(key); i++) {
+                        app.ayham.extension.music.automix.Automix.refreshQueue();
+                        Thread.sleep(500);
+                        vid = app.ayham.extension.music.automix.Automix.currentIdFor(title);
+                    }
                 } catch (Throwable ignored) {
                 }
-                if (vid != null) saved = CanvasCache.lookup(CanvasCache.idKey(vid));
+                // its downloaded Spotify canvas first (Metrolist's order: Spotify before Apple), then its art clip
+                if (vid != null && spotify) saved = CanvasCache.lookup(CanvasCache.spotifyIdKey(vid));
+                if (vid != null && (saved == null || saved.isEmpty())) saved = CanvasCache.lookup(CanvasCache.idKey(vid));
             }
             if (saved != null && !saved.isEmpty()) {
                 // saved lookup: a miss for 24 h, or the clip file (also offline)

@@ -149,6 +149,12 @@ val playerFeaturesPatch = patch(
                             setAttribute("android:key", "ayham_clear_canvas_cache")
                             setAttribute("android:dependency", "ayham_canvas")
                         }
+                        // the download popup saves these with each downloaded song; a row empties one kind
+                        if (key == "ayham_native") listOf("lyrics", "art", "canvas").forEach { kind ->
+                            appendChild("app.ayham.extension.music.features.ClearOfflinePreference") {
+                                setAttribute("android:key", "ayham_clear_dl_$kind")
+                            }
+                        }
                     }
                     appendChild("$AUTOMIX.AutomixVersionPreference") {
                         setAttribute("android:key", "ayham_eq_preset")

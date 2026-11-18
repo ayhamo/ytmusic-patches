@@ -174,6 +174,7 @@ public final class Features {
                 rewrapCurrentResolver();
                 startLyricsPoll();
                 EqPresets.register(appContext);
+                OfflineIndex.start(appContext); // downloads: lyrics put back, removed songs' files, unfinished ones
                 // Phase 4 debug: the Direct-mode spike, only with directSpike=1 in spike.properties
                 if ("1".equals(readProps().getProperty("directSpike"))) {
                     app.ayham.extension.music.addons.DirectSpike.register(appContext);
@@ -183,6 +184,7 @@ public final class Features {
                 }
             }
             app.ayham.extension.music.automix.Automix.onActivityCreate(activity);
+            DownloadChoice.onActivity(activity);
             hookPlayerPage(activity);
             AnimatedCover.attach(activity); // follows the Animated art switch live
         } catch (Throwable t) {

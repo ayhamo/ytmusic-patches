@@ -53,7 +53,12 @@ final class SpotifyCanvas {
     }
 
     /** The song's Canvas clip as a file in cacheDir/canvas, or null (no canvas, or no match). */
-    static synchronized File find(String title, String artist, File cacheDir) throws Exception {
+    static File find(String title, String artist, File cacheDir) throws Exception {
+        return find(title, artist, cacheDir, true);
+    }
+
+    /** @param trim false for the downloaded songs' canvases (kept in the app's files, no size cap). */
+    static synchronized File find(String title, String artist, File cacheDir, boolean trim) throws Exception {
         if (title == null || artist == null || title.trim().isEmpty() || artist.trim().isEmpty()) return null;
         String url = canvasUrl(title, artist);
         if (url == null) return null;
@@ -85,7 +90,7 @@ final class SpotifyCanvas {
             if (!done && part.exists() && !part.delete()) Log.w(TAG, "canvas: could not delete " + part.getName());
         }
         if (!part.renameTo(out)) return null;
-        HlsClip.trim(dir, out);
+        if (trim) HlsClip.trim(dir, out);
         Log.i(TAG, "canvas: spotify clip " + out.length() / 1024 + " KB in " + (System.currentTimeMillis() - start) + " ms");
         return out;
     }

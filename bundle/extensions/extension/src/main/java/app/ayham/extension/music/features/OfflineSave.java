@@ -27,8 +27,15 @@ public final class OfflineSave {
                 Features.appContext = (Context) Class.forName("android.app.ActivityThread")
                         .getMethod("currentApplication").invoke(null);
             }
-            if (!"1".equals(Features.props().getProperty("native"))) return; // switched off in settings
-            OfflineExtras.saved(videoId);
+            DownloadChoice.Choice choice = DownloadChoice.choiceFor(videoId);
+            if (choice == null) {
+                // saved without the popup (smart downloads, a refresh): the Offline lyrics and art switch
+                if (!"1".equals(Features.props().getProperty("native"))) return;
+                choice = new DownloadChoice.Choice();
+                choice.canvas = false;
+                choice.art = "1".equals(Features.props().getProperty("canvas"));
+            }
+            OfflineExtras.saved(videoId, choice);
         } catch (Throwable t) {
             Log.w(TAG, "offline save hook failed", t);
         }

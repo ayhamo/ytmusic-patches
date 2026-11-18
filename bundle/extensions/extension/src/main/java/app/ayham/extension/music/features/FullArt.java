@@ -443,7 +443,10 @@ final class FullArt {
         screenW = W;
         screenH = H;
         pageTopNow = pageTop;
-        float wantS = clip ? Math.max(W, seam() * H) : ArtBleed.containerWidth(W, H, 1f);
+        // a full-height clip (a Spotify canvas, a music video's loop) fills the whole player, unfaded;
+        // only Apple's tall 3:4 cover stops at the seam and fades into the colours below
+        boolean fullClip = clip && !AnimatedCover.tallClip();
+        float wantS = fullClip ? Math.max(W, H - pageTop) : clip ? Math.max(W, seam() * H) : ArtBleed.containerWidth(W, H, 1f);
         if (bannerS == 0) bannerS = wantS;
         else if (bannerS != wantS) {
             bannerS += (wantS - bannerS) * Math.min(1f, dt / 120f);
@@ -464,7 +467,12 @@ final class FullArt {
         ours[1] = y - baseY;
         ours[2] = s;
         oursSet = true;
-        if (clip) fade(move, offY, card.getHeight(), e, fadeStart() * H / bannerS, seam() * H / bannerS, false);
+        // YT's layouts around the card clip it to their own bounds (about 60% of the screen): opened up
+        // while a full-height clip shows, so it reaches the bottom instead of the backdrop showing there
+        if (fullClip && e > 0f) unclip(move, decor);
+        else restoreClip();
+        if (fullClip) fade(move, offY, card.getHeight(), 0f, 0f, 1f, false); // no mask: the clip to the bottom
+        else if (clip) fade(move, offY, card.getHeight(), e, fadeStart() * H / bannerS, seam() * H / bannerS, false);
         else {
             // YT's art gives way to the bleed's first rows (ArtBleed: Metrolist's 48-row crossfade)
             int side = Math.round(bannerS), top0 = ArtBleed.detailTop(side, side);
@@ -534,8 +542,33 @@ final class FullArt {
                 RenderEffect.createOffsetEffect(0, 0), RenderEffect.createShaderEffect(mask), BlendMode.DST_IN));
     }
 
+    /** YT's layouts we stopped clipping the card (each was clipping before). */
+    private static final java.util.List<java.lang.ref.WeakReference<ViewGroup>> unclipped = new java.util.ArrayList<>();
+
+    private static void unclip(View v, View decor) {
+        if (!unclipped.isEmpty()) return;
+        for (android.view.ViewParent p = v.getParent(); p instanceof ViewGroup && p != decor; p = p.getParent()) {
+            ViewGroup g = (ViewGroup) p;
+            if (g.getClipChildren()) {
+                g.setClipChildren(false);
+                unclipped.add(new java.lang.ref.WeakReference<>(g));
+            }
+        }
+        if (!unclipped.isEmpty()) Log.i(TAG, "full-height clip: " + unclipped.size() + " of YT's layouts no longer clip the art");
+    }
+
+    private static void restoreClip() {
+        if (unclipped.isEmpty()) return;
+        for (java.lang.ref.WeakReference<ViewGroup> r : unclipped) {
+            ViewGroup g = r.get();
+            if (g != null) g.setClipChildren(true);
+        }
+        unclipped.clear();
+    }
+
     /** YT's art and top bar as YT had them; a value YT changed since (a drag, a sheet) stays YT's. */
     static void giveBack() {
+        restoreClip();
         if (pagerHidden != null) {
             pagerHidden.setAlpha(pagerAlpha);
             pagerHidden = null;

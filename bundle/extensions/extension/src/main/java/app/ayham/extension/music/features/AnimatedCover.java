@@ -146,8 +146,10 @@ final class AnimatedCover {
         lastTextCheck = now;
         String title = text(page, titleId, artistId, true);
         String artist = text(page, titleId, artistId, false);
-        if (title != null && artist != null && !(title + "\u0000" + artist).equals(key)) {
-            key = title + "\u0000" + artist;
+        // the sources are part of the key: switching Spotify's canvas on or off looks the song up again
+        String sources = "0".equals(Features.props().getProperty("canvasSpotify")) ? "" : "\u0000sp";
+        if (title != null && artist != null && !(title + "\u0000" + artist + sources).equals(key)) {
+            key = title + "\u0000" + artist + sources;
             onSong(title, artist);
         }
         applyVisibility(wanted, music);

@@ -1676,6 +1676,8 @@ final class PlayerScreen {
         m.getMenu().add(0, 5, 0, "Jump to the most replayed part");
         m.getMenu().add(0, 1, 0, "Fullscreen cover art").setCheckable(true).setChecked(Features.switchOn("fullArt"));
         m.getMenu().add(0, 2, 1, "Animated covers").setCheckable(true).setChecked(Features.switchOn("canvas"));
+        m.getMenu().add(0, 6, 1, "Spotify canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"))
+                .setEnabled(Features.switchOn("canvas"));
         m.getMenu().add(0, 3, 2, "More options");
         m.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
@@ -1684,6 +1686,9 @@ final class PlayerScreen {
                     return true;
                 case 2:
                     Features.setSwitch("canvas", !item.isChecked());
+                    return true;
+                case 6:
+                    Features.setSwitch("canvasSpotify", !item.isChecked());
                     return true;
                 case 4:
                     MixOverview.show(a);

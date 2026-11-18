@@ -84,7 +84,7 @@ public final class Features {
     }
 
     /** The feature switches in Morphe's settings ("Fork settings"), all on by default. */
-    static final String[] SWITCHES = {"ui", "fullArt", "artistArt", "canvas", "lyricLine", "stats", "autoSong", "native", "eq"};
+    static final String[] SWITCHES = {"ui", "fullArt", "artistArt", "canvas", "canvasSpotify", "lyricLine", "stats", "autoSong", "native", "eq"};
 
     /**
      * The features' configuration: the settings switches (Morphe's settings screen, "Ayham

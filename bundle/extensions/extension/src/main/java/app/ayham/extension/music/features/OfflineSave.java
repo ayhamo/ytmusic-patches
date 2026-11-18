@@ -29,11 +29,9 @@ public final class OfflineSave {
             }
             DownloadChoice.Choice choice = DownloadChoice.choiceFor(videoId);
             if (choice == null) {
-                // saved without the popup (smart downloads, a refresh): the Offline lyrics and art switch
-                if (!"1".equals(Features.props().getProperty("native"))) return;
-                choice = new DownloadChoice.Choice();
-                choice.canvas = false;
-                choice.art = "1".equals(Features.props().getProperty("canvas"));
+                // saved without the popup (smart downloads, a refresh, the popup off): YouTube's audio alone
+                Log.i(TAG, "saved " + videoId + " without the popup: YouTube's download only");
+                return;
             }
             OfflineExtras.saved(videoId, choice);
         } catch (Throwable t) {

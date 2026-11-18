@@ -135,7 +135,7 @@ val playerFeaturesPatch = patch(
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
                         Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
                         Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),
-                        Triple("ayham_native", "Offline lyrics and art", "Save lyrics and the animated cover along with each downloaded song, for offline play."),
+                        Triple("ayham_native", "Download popup", "Every download asks: the lossless file from your addons or YouTube's, and whether its lyrics, animated art and canvas are saved for offline. Off: YouTube's download only. Smart downloads are always YouTube's alone."),
                         Triple("ayham_eq", "Equalizer", "A preset on YT's audio output and on automix's mixes. A change applies at once."),
                     ).forEach { (key, title, summary) ->
                         appendChild("SwitchPreference") {
@@ -154,6 +154,9 @@ val playerFeaturesPatch = patch(
                             appendChild("app.ayham.extension.music.features.ClearOfflinePreference") {
                                 setAttribute("android:key", "ayham_clear_dl_$kind")
                             }
+                        }
+                        if (key == "ayham_native") appendChild("app.ayham.extension.music.features.ExportDownloadsPreference") {
+                            setAttribute("android:key", "ayham_export_downloads")
                         }
                     }
                     appendChild("$AUTOMIX.AutomixVersionPreference") {

@@ -46,6 +46,8 @@ public final class DownloadChoice {
         public boolean lossless, lyrics = true, art = true, canvas = true;
         public String tier = app.ayham.extension.music.addons.AddonDownloads.BEST;
         long until;
+        /** For a playlist's answer: the playlist, whose songs alone it is for. */
+        String playlistId;
 
         @Override
         public String toString() {
@@ -75,6 +77,8 @@ public final class DownloadChoice {
     public static boolean onCommand(Object resolver, Object command, Map<?, ?> map) {
         try {
             if (passing || command == null || resolver == null) return false;
+            // the popup off (Fork settings): YT's download as it is
+            if (!"1".equals(Features.props().getProperty("native"))) return false;
             byte[] bytes = (byte[]) command.getClass().getMethod("toByteArray").invoke(command);
             if (bytes == null || bytes.length == 0) return false;
             ProtoWire c = new ProtoWire(bytes);
@@ -224,6 +228,7 @@ public final class DownloadChoice {
         long now = System.currentTimeMillis();
         if (isPlaylist) {
             ch.until = now + PLAYLIST_MS;
+            ch.playlistId = id;
             playlist = ch;
         } else {
             ch.until = now + SONG_MS;
@@ -239,7 +244,13 @@ public final class DownloadChoice {
         long now = System.currentTimeMillis();
         Choice c = songs.remove(videoId);
         if (c != null && c.until > now) return c;
-        if (playlist != null && playlist.until > now) return playlist;
+        if (playlist != null && playlist.until > now) {
+            // a song of that playlist, not one smart downloads saves meanwhile
+            Context a = Features.appContext;
+            Boolean in = a == null ? null : OfflineIndex.inPlaylist(a, playlist.playlistId, videoId);
+            if (!Boolean.FALSE.equals(in)) return playlist;
+            Log.i(TAG, videoId + " is not in playlist " + playlist.playlistId + ": its answer not used");
+        }
         return null;
     }
 

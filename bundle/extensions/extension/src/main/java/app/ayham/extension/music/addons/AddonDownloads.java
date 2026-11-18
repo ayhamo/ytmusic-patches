@@ -150,7 +150,7 @@ public final class AddonDownloads {
                     if (got != null) break;
                     Log.i(TAG, "download " + id + ": no addon has it at " + tier + (tier.equals(info[0]) ? "" : " (stepped down)"));
                 }
-                if (got != null) save(ctx, got);
+                if (got != null) save(ctx, got, info[3], info[2]);
                 else why = "no addon has it lossless: YouTube's download only";
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
@@ -183,8 +183,9 @@ public final class AddonDownloads {
         return null;
     }
 
-    private static void save(Context c, AddonPrep.Prepared p) throws Exception {
+    private static void save(Context c, AddonPrep.Prepared p, String title, String artist) throws Exception {
         JSONObject j = new JSONObject();
+        j.put("title", title).put("artist", artist);
         j.put("file", p.file.getAbsolutePath()).put("addon", p.addon).put("host", p.host).put("row", p.rowId)
                 .put("offset", p.offsetSec).put("gain", p.gainDb).put("ytDur", p.ytDurationSec).put("addonDur", p.addonDurationSec)
                 .put("score", p.score).put("rate", p.rate).put("channels", p.channels).put("codec", p.codec)
@@ -265,6 +266,33 @@ public final class AddonDownloads {
             f.delete();
         AddonPrep.forget(id);
         return freed;
+    }
+
+    /** A downloaded file to export: the file, and "Artist - Title" for its name. */
+    public static final class Saved {
+        public String id, name, format;
+        public File file;
+    }
+
+    /** The downloaded files, one per song. */
+    public static java.util.List<Saved> saved(Context c) {
+        java.util.List<Saved> out = new java.util.ArrayList<>();
+        File[] fs = dir(c).listFiles((d, n) -> n.endsWith(".json"));
+        if (fs != null) for (File m : fs) {
+            try {
+                JSONObject j = new JSONObject(read(m));
+                Saved s = new Saved();
+                s.id = m.getName().substring(0, m.getName().length() - 5);
+                s.file = new File(j.getString("file"));
+                if (s.file.length() == 0) continue;
+                String t = j.optString("title", ""), a = j.optString("artist", "");
+                s.name = t.isEmpty() ? s.id : a.isEmpty() ? t : a + " - " + t;
+                s.format = j.optString("format", null);
+                out.add(s);
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
     }
 
     /** The ids with a download record. */

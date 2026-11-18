@@ -178,6 +178,40 @@ public final class OfflineIndex {
     }
 
     /**
+     * The song is one of the downloaded playlist's songs in YT's database: true, false, or null when
+     * that can't be told yet (the playlist has no songs listed yet, or the database is unreadable).
+     */
+    static Boolean inPlaylist(Context c, String playlistId, String videoId) {
+        File[] dbs = new File(c.getApplicationInfo().dataDir, "databases").listFiles((d, n) -> n.startsWith("offline") && n.endsWith(".db"));
+        if (dbs == null) return null;
+        String key = playlistId.startsWith("VL") ? playlistId.substring(2) : playlistId;
+        boolean listed = false;
+        for (File db : dbs) {
+            try (SQLiteDatabase d = SQLiteDatabase.openDatabase(db.getPath(), null, SQLiteDatabase.OPEN_READONLY);
+                 Cursor cur = d.rawQuery("SELECT video_id = ? FROM playlist_video WHERE playlist_id = ? ORDER BY 1 DESC LIMIT 1", new String[]{videoId, key})) {
+                if (cur.moveToFirst()) {
+                    if (cur.getInt(0) == 1) return true;
+                    listed = true;
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "offline db " + db.getName() + " unreadable: " + e);
+                return null;
+            }
+        }
+        return listed ? false : null;
+    }
+
+    /** Our copy of the song's saved lyrics (LRC), or null. */
+    static synchronized File lyricsFile(Context c, String videoId) {
+        init(c);
+        String v = props.getProperty(LYRICS + "." + videoId);
+        if (v == null) return null;
+        String[] p = v.split("\\|", 2);
+        File f = new File(p[p.length - 1]);
+        return f.length() > 0 ? f : null;
+    }
+
+    /**
      * Songs no longer in YT's downloads lose what was saved with them. removed: a song YT just
      * removed, checked however new its record is.
      */

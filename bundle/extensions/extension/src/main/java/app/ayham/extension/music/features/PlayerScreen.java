@@ -1691,8 +1691,12 @@ final class PlayerScreen {
         m.getMenu().add(0, 5, 0, "Jump to the most replayed part");
         m.getMenu().add(0, 1, 0, "Fullscreen cover art").setCheckable(true).setChecked(Features.switchOn("fullArt"));
         m.getMenu().add(0, 2, 1, "Animated covers").setCheckable(true).setChecked(Features.switchOn("canvas"));
-        m.getMenu().add(0, 6, 1, "Spotify canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"))
+        m.getMenu().add(0, 6, 1, "Canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"))
                 .setEnabled(Features.switchOn("canvas"));
+        String song = app.ayham.extension.music.automix.AddonDirect.playingId();
+        boolean onAddon = song != null && app.ayham.extension.music.automix.AddonDirect.inUse(song);
+        if (song != null && app.ayham.extension.music.addons.AddonSettings.on())
+            m.getMenu().add(0, 7, 1, onAddon ? "Use YouTube quality" : "Upgrade quality");
         m.getMenu().add(0, 3, 2, "More options");
         m.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
@@ -1710,6 +1714,15 @@ final class PlayerScreen {
                     return true;
                 case 5:
                     BestPart.jump(a);
+                    return true;
+                case 7:
+                    if (onAddon) {
+                        app.ayham.extension.music.addons.AddonPrep.useYouTube(song);
+                        android.widget.Toast.makeText(a, "Playing YouTube's quality", android.widget.Toast.LENGTH_SHORT).show();
+                    } else {
+                        app.ayham.extension.music.addons.AddonPrep.upgrade(song);
+                        android.widget.Toast.makeText(a, "Looking for a lossless file", android.widget.Toast.LENGTH_SHORT).show();
+                    }
                     return true;
                 default:
                     View yt = a.getWindow().getDecorView().findViewById(id(a, "contextual_menu"));

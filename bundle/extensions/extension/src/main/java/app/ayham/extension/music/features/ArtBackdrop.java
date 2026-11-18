@@ -25,11 +25,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * What the BitChord screen's background view draws under YT's art, as Metrolist's fullscreen style:
- * for a static cover, ArtBleed's bleed made from YT's own cover image (a quarter-size preview within
- * a few frames, the detailed one crossfading in); for an animated cover, a blurred mirrored frame of
- * the clip with a 12% scrim. Songs crossfade over Metrolist's 300 ms. Without a cover image (none
- * found) the view falls back to its colour mesh.
+ * What the BitChord screen's background view draws under YT's art, as BitChord's own player does
+ * (ArtworkMeshBackdrop): no blur and no reflection, ArtMesh's tiny colour map of the cover stretched
+ * over the whole screen, YT's art fading into it over its lowest 42% (FullArt). An animated cover
+ * gets the same mesh from one of its frames every 3 s, its seam at the clip's bottom. Songs
+ * crossfade. Without a cover image (none found) the view falls back to its colour mesh.
  */
 final class ArtBackdrop {
     private static final String TAG = "AyhamBleed";
@@ -43,7 +43,12 @@ final class ArtBackdrop {
     static final long CROSSFADE_MS = 350;
     private static final long CHECK_MS = 100;
     /** BLURRED_ARTWORK_SCRIM_ALPHA; the mirrored tall clip's 24dp blur (ClipFrameBleed) and the full-screen 48dp one (FullscreenBackdropBlurRadius). */
-    private static final int SCRIM = Math.round(0.12f * 255);
+    private static final int SCRIM = 0;
+    /** BitChord's MESH_REFRESH_MS: a clip's mesh is made again from its frame this often. */
+    private static final long CLIP_MESH_MS = 3000;
+    /** BitChord's HERO_FADE_FRACTION: the art's lowest 42% fades into the mesh. */
+    static final float FADE_FRACTION = 0.42f;
+    private static long clipMeshAt;
     private static final float CLIP_BLUR_DP = 24, CLIP_SCALE = 8, BACKDROP_BLUR_DP = 48, BACKDROP_SCALE = 16;
     /** The live backdrop's own thread: one frame at a time, frames that come while it works are skipped. */
     private static final ExecutorService liveWorker = Executors.newSingleThreadExecutor(r -> {
@@ -56,7 +61,7 @@ final class ArtBackdrop {
 
     private static final class Layer {
         int tone, width, detailTop, softTop;
-        Bitmap preview, detail, soft;
+        Bitmap preview, detail, soft, mesh;
         /** The square cover it was made from: drawn in the banner's place while YT's card is hidden (a song swipe). */
         Bitmap cover;
         int previewH;
@@ -168,48 +173,29 @@ final class ArtBackdrop {
     private static void build(Bitmap cover, int W, int H) {
         int gen = ++generation;
         int width = ArtBleed.containerWidth(W, H, 1f);
-        Log.i(TAG, "bleed: cover " + cover.getWidth() + "px -> " + width + "px wide for " + W + "x" + H);
         worker.execute(() -> {
             try {
                 long t0 = SystemClock.uptimeMillis();
-                int q = (width + ArtBleed.SOFT_DIVISOR - 1) / ArtBleed.SOFT_DIVISOR;
-                int[] small = pixels(Bitmap.createScaledBitmap(cover, q, q, true));
-                ArtBleed.Bleed coarse = ArtBleed.coarse(small, width, width, H);
+                int[] small = pixels(Bitmap.createScaledBitmap(cover, 128, 128, true));
                 Layer l = new Layer();
-                l.tone = coarse.tone;
                 l.width = width;
-                l.detailTop = coarse.detailTop;
-                l.softTop = coarse.softTop;
+                l.detailTop = Math.round(width * (1 - FADE_FRACTION));
                 l.cover = cover;
-                if (coarse.preview != null) {
-                    l.preview = Bitmap.createBitmap(coarse.preview, coarse.previewW, coarse.previewH, Bitmap.Config.ARGB_8888);
-                    l.previewH = coarse.previewH;
-                }
-                long t1 = SystemClock.uptimeMillis();
+                // the seam: the banner's bottom (it starts at the top of the screen)
+                l.mesh = Bitmap.createBitmap(ArtMesh.mesh(small, 128, 128, Math.min(1f, width / (float) H)),
+                        ArtMesh.TEX, ArtMesh.TEX, Bitmap.Config.ARGB_8888);
+                l.tone = l.mesh.getPixel(ArtMesh.TEX / 2, ArtMesh.TEX - 1);
+                long took = SystemClock.uptimeMillis() - t0;
                 main.post(() -> {
                     if (gen != generation) return;
                     if (cur != null) old = cur;
-                    l.shownAt = SystemClock.uptimeMillis();
+                    l.shownAt = l.fullAt = SystemClock.uptimeMillis();
                     cur = l;
                     redraw();
-                });
-                if (gen != generation) return;
-                int[] art = pixels(Bitmap.createScaledBitmap(cover, width, width, true));
-                ArtBleed.Bleed full = ArtBleed.full(art, width, width, H, coarse);
-                Bitmap detail = full.detail == null ? null : Bitmap.createBitmap(full.detail, width, full.detailH, Bitmap.Config.ARGB_8888);
-                Bitmap soft = full.soft == null ? null : Bitmap.createBitmap(full.soft, full.softW, full.softH, Bitmap.Config.ARGB_8888);
-                long t2 = SystemClock.uptimeMillis();
-                main.post(() -> {
-                    if (gen != generation) return;
-                    l.detail = detail;
-                    l.soft = soft;
-                    l.fullAt = SystemClock.uptimeMillis();
-                    redraw();
-                    Log.i(TAG, "bleed ready: preview " + (t1 - t0) + " ms, full " + (t2 - t1) + " ms, tone #"
-                            + Integer.toHexString(l.tone & 0xFFFFFF) + ", blur from " + l.detailTop + "px");
+                    Log.i(TAG, "mesh ready in " + took + " ms for " + W + "x" + H + " (banner " + width + "px)");
                 });
             } catch (Throwable t) {
-                Log.w(TAG, "bleed failed", t);
+                Log.w(TAG, "mesh failed", t);
             }
         });
     }
@@ -231,31 +217,32 @@ final class ArtBackdrop {
      */
     static void live(int[] frame, int fw, int fh, boolean tall) {
         if (liveBusy || held != null || FullArt.hiding() || screenW == 0) return;
+        long at = SystemClock.uptimeMillis();
+        if (clipNow != null && at - clipMeshAt < CLIP_MESH_MS) return;
+        clipMeshAt = at;
         liveBusy = true;
         final int W = screenW, H = screenH;
-        final float scale = tall ? CLIP_SCALE : BACKDROP_SCALE;
-        // a Compose blur radius as Skia's sigma, at the backdrop's scale
-        final float sigma = ((tall ? CLIP_BLUR_DP : BACKDROP_BLUR_DP) * density * 0.57735f + 0.5f) / scale;
-        final float seam = FullArt.seam();
+        final float seam = tall ? FullArt.seam() : Math.min(1f, ArtBleed.containerWidth(W, H, 1f) / (float) H);
         final int gen = clipGen;
         liveWorker.execute(() -> {
             try {
                 long t0 = SystemClock.uptimeMillis();
-                int w = Math.max(1, Math.round(W / scale)), h = Math.max(1, Math.round(H / scale));
-                int seamRow = tall ? Math.round(seam * H / scale) : h;
-                Bitmap b = Bitmap.createBitmap(ArtBleed.mirroredBackdrop(frame, fw, fh, w, h, seamRow, sigma), w, h, Bitmap.Config.ARGB_8888);
+                int w = ArtMesh.TEX, h = ArtMesh.TEX;
+                Bitmap b = Bitmap.createBitmap(ArtMesh.mesh(frame, fw, fh, seam), w, h, Bitmap.Config.ARGB_8888);
                 long took = SystemClock.uptimeMillis() - t0;
                 main.post(() -> {
                     liveBusy = false;
                     if (gen != clipGen || !FullArt.clipMode()) return;
-                    if (clipNow == null) clipAt = SystemClock.uptimeMillis(); // the first one fades in
+                    // each new mesh fades in over the one before
+                    clipOld = clipNow;
+                    clipAt = SystemClock.uptimeMillis();
                     clipNow = b;
                     long now = SystemClock.uptimeMillis();
                     liveCount++;
                     liveMs += took;
                     if (now - liveLogAt > 10_000) {
                         Log.i(TAG, "live backdrop: " + liveCount + " frames, " + (liveMs / Math.max(1, liveCount)) + " ms each ("
-                                + (tall ? "tall, mirrored 24dp" : "full screen 48dp") + ", " + w + "x" + h + ")");
+                                + (tall ? "tall clip" : "clip") + " mesh, " + w + "x" + h + ")");
                         liveLogAt = now;
                         liveCount = liveMs = 0;
                     }
@@ -394,36 +381,15 @@ final class ArtBackdrop {
     /** One song's bleed at alpha a; true while its full version is still fading in. */
     private static boolean layer(Canvas c, View v, Layer l, float a, int bannerTop, float e, long now) {
         float left = (v.getWidth() - l.width) / 2f;
-        fill.setShader(null);
-        fill.setColor(l.tone);
-        fill.setAlpha(Math.round(255 * a));
-        c.drawRect(0, 0, v.getWidth(), v.getHeight(), fill);
-        float pa = ramp(l.shownAt, now), fa = ramp(l.fullAt, now);
-        int top = bannerTop + l.detailTop;
-        if (l.preview != null && fa < 1f) {
-            paint.setAlpha(Math.round(255 * a * pa));
-            dst.set(left, top, left + l.preview.getWidth() * ArtBleed.SOFT_DIVISOR, top + l.previewH * ArtBleed.SOFT_DIVISOR);
-            c.drawBitmap(l.preview, null, dst, paint);
-        }
-        if (l.detail != null) {
-            paint.setAlpha(Math.round(255 * a * fa));
-            c.drawBitmap(l.detail, left, top, paint);
-            if (l.soft != null) {
-                int st = bannerTop + l.softTop;
-                dst.set(left, st, left + l.soft.getWidth() * ArtBleed.SOFT_DIVISOR, st + l.soft.getHeight() * ArtBleed.SOFT_DIVISOR);
-                c.drawBitmap(l.soft, null, dst, paint);
-            }
-            if (grain == null) {
-                Bitmap tile = Bitmap.createBitmap(ArtBleed.grain(), ArtBleed.GRAIN_TILE, ArtBleed.GRAIN_TILE, Bitmap.Config.ARGB_8888);
-                grain = new Paint();
-                grain.setShader(new BitmapShader(tile, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT));
-            }
-            grain.setAlpha(Math.round(255 * a * fa));
-            c.drawRect(left, top, left + l.width, v.getHeight(), grain);
+        float pa = ramp(l.shownAt, now), fa = 1f;
+        if (l.mesh != null) {
+            paint.setAlpha(Math.round(255 * a));
+            dst.set(0, 0, v.getWidth(), v.getHeight());
+            c.drawBitmap(l.mesh, null, dst, paint);
         }
         if (FullArt.hiding() && e > 0f && l.cover != null) {
             // YT's card is hidden for its swipe: the cover in its place, fading into the bleed as YT's does
-            int side = l.width, cut = l.detailTop + ArtBleed.CROSSFADE_ROWS;
+            int side = l.width, cut = side;
             int save = c.saveLayerAlpha(left, bannerTop, left + side, bannerTop + cut, Math.round(255 * a * e));
             paint.setAlpha(255);
             dst.set(left, bannerTop, left + side, bannerTop + side);
@@ -444,15 +410,6 @@ final class ArtBackdrop {
             c.drawRect(left, bannerTop, left + side, bannerTop + cut, coverMask);
             c.restoreToCount(save);
         }
-        if (e < 1f) {
-            // YT's card instead of the banner (paused): the bleed's sharp first rows would show as an
-            // edge behind it, so they go into the tone
-            float span = l.width * 0.25f;
-            fill.setShader(new LinearGradient(0, top, 0, top + span, l.tone, l.tone & 0xFFFFFF, Shader.TileMode.CLAMP));
-            fill.setAlpha(Math.round(255 * a * (1 - e)));
-            c.drawRect(0, top, v.getWidth(), top + span, fill);
-            fill.setShader(null);
-        }
-        return (l.fullAt != 0 && fa < 1f) || pa < 1f;
+        return pa < 1f;
     }
 }

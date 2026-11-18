@@ -131,7 +131,7 @@ val playerFeaturesPatch = patch(
                         Triple("ayham_fullArt", "Fullscreen cover art", "On the BitChord screen in portrait, the cover fills the top of the screen and fades into the colours below while a song plays (or its animated cover shows); paused, it goes back to a card. Also in the player's … menu."),
                         Triple("ayham_artistArt", "Artist colours", "The player takes the artist's colours and photo from their Apple Music page."),
                         Triple("ayham_canvas", "Animated covers", "The album's motion art from Apple Music plays muted over YT's art, where the album has one. Also in the player's … menu."),
-                        Triple("ayham_canvasSpotify", "Spotify canvas", "The song's Spotify Canvas (a full-screen vertical loop) where it has one; off, the other animated covers only. Also in the player's … menu."),
+                        Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Canvas, or a loop of its music video); off, the other animated covers only. Also in the player's … menu."),
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
                         Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
                         Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),

@@ -145,6 +145,11 @@ public final class AddonDirect {
     }
 
     /** A player of ours (playing or armed) is on this song: its files must stay. */
+    /** The playing song's id, as YT's queue names it (null when unknown). */
+    public static String playingId() {
+        return Automix.queue()[0];
+    }
+
     public static boolean inUse(String id) {
         Shadow a = armed;
         if (a != null && !a.done && a.p.id.equals(id)) return true;
@@ -229,6 +234,10 @@ public final class AddonDirect {
                 }
             }
             Shadow s = get(host);
+            if (s != null && !s.done && AddonPrep.youtubeChosen(s.p.id)) {
+                // the player's menu: YouTube's quality for this song, its audio back at once
+                s.end("YouTube's quality chosen", false);
+            }
             // in a mix the incoming song is the engine's: follow() locks it on the held player, silent
             // until the hand-over; it never starts here as a song starting on its own
             boolean mix = Automix.mixing();
@@ -270,7 +279,7 @@ public final class AddonDirect {
                 locking = true;
             }
         }
-        AddonPlayback.upgrading(AddonPrep.busy(cur) || locking);
+        AddonPlayback.upgrading(AddonPrep.waiting(cur) || locking);
         AddonPrep.held = Automix.mixing();
     }
 

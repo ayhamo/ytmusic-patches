@@ -83,6 +83,12 @@ public final class AddonClient {
          * fitted to YouTube's audio): a reason refuses it and the next row, then addon, is tried.
          */
         public Check check;
+        /** True once the song is no longer wanted (skipped): the search and the opening stop there. */
+        public java.util.function.BooleanSupplier cancelled;
+    }
+
+    private static boolean cancelled(Options opt) {
+        return opt.cancelled != null && opt.cancelled.getAsBoolean();
     }
 
     public interface Check {
@@ -468,6 +474,7 @@ public final class AddonClient {
         if (opt == null) opt = new Options();
         FindResult out = new FindResult();
         for (Addon a : addons) {
+            if (cancelled(opt)) break;
             Addon addon = a.copy();
             if (addon.tier == null) addon.tier = opt.tier;
             addon.base = Protocol.baseOf(a.base);
@@ -521,6 +528,12 @@ public final class AddonClient {
             try {
                 Protocol.Manifest man = manifest(addon.base);
                 for (Pick.Row row : f.rows) {
+                    if (cancelled(opt)) {
+                        Opened none = new Opened();
+                        none.none = "cancelled";
+                        none.tried = tried;
+                        return none;
+                    }
                     Protocol.Stream s;
                     try {
                         s = stream(addon, row, man);

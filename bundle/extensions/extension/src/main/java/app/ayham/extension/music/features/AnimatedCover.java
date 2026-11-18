@@ -421,9 +421,9 @@ final class AnimatedCover {
         Properties p = Features.props();
         String fixed = p.getProperty("canvasUrl", "").trim();
         boolean apple = "1".equals(p.getProperty("canvasApple"));
-        boolean video = !"0".equals(p.getProperty("canvasVideo"));
         boolean spotify = !"0".equals(p.getProperty("canvasSpotify"));
-        lookupStart = System.currentTimeMillis();
+        boolean video = spotify && !"0".equals(p.getProperty("canvasVideo")); // both full-screen loops are "Canvas"
+                lookupStart = System.currentTimeMillis();
         Log.i(TAG, "canvas: song '" + title + "' by '" + artist + "'");
         new Thread(() -> {
             // skipping through songs: only look up the one that stays for a moment

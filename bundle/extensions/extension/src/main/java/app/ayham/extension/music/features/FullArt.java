@@ -474,9 +474,8 @@ final class FullArt {
         if (fullClip) fade(move, offY, card.getHeight(), 0f, 0f, 1f, false); // no mask: the clip to the bottom
         else if (clip) fade(move, offY, card.getHeight(), e, fadeStart() * H / bannerS, seam() * H / bannerS, false);
         else {
-            // YT's art gives way to the bleed's first rows (ArtBleed: Metrolist's 48-row crossfade)
-            int side = Math.round(bannerS), top0 = ArtBleed.detailTop(side, side);
-            fade(move, offY, card.getHeight(), e, top0 / bannerS, (top0 + ArtBleed.CROSSFADE_ROWS) / bannerS, true);
+            // BitChord: the art's lowest 42% dissolves into the mesh on a smootherstep
+            fade(move, offY, card.getHeight(), e, 1f - ArtBackdrop.FADE_FRACTION, 1f, true);
         }
         if (radius > 0) setRadius(move, radius * (1 - e)); // the banner runs edge to edge, square
         if (!logged && (t == 1f || t == 0f)) {

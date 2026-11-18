@@ -129,7 +129,25 @@ public final class AddonPrep {
     private static final Map<String, String[]> asked = new HashMap<>();
     private static final Deque<String> queue = new ArrayDeque<>();
     private static volatile String working;
-    private static Thread worker;
+    private static volatile Thread worker;
+    /** The playing song and the next one, as last asked: work on any other song is dropped. */
+    private static volatile String current, upNext;
+    /** Songs the user set to YouTube's quality (the player's menu), this run. */
+    private static final java.util.Set<String> youtubeOnly = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Work dropped because its song is no longer the playing or next one (or set to YouTube's quality). */
+    static final class Stale extends IOException {
+        Stale() {
+            super("no longer playing or next");
+        }
+    }
+
+    /** On the prep worker: its song is no longer wanted. Downloads (another thread) never are. */
+    private static boolean stale() {
+        String id = working;
+        return Thread.currentThread() == worker && id != null
+                && ((!id.equals(current) && !id.equals(upNext)) || youtubeOnly.contains(id));
+    }
     private static Context ctx;
     private static AddonClient client;
 
@@ -139,8 +157,9 @@ public final class AddonPrep {
     /** Set while automix mixes: the decodes wait, so the mix's audio thread has the CPU. */
     public static volatile boolean held;
 
-    /** Called between decoded blocks. */
-    public static void waitWhileHeld() {
+    /** Called between decoded blocks; throws Stale when the song being prepared is no longer wanted. */
+    public static void waitWhileHeld() throws IOException {
+        if (stale()) throw new Stale();
         while (held) {
             try {
                 Thread.sleep(50);
@@ -159,7 +178,33 @@ public final class AddonPrep {
         return id != null && id.equals(working);
     }
 
+    /** Being prepared, or waiting its turn: the badge says "Upgrading Quality" from the start. */
+    public static synchronized boolean waiting(String id) {
+        return id != null && (id.equals(working) || queue.contains(id));
+    }
+
+    /** The player's menu: this song plays YouTube's own audio (this run, until upgraded again). */
+    public static synchronized void useYouTube(String id) {
+        if (id == null) return;
+        youtubeOnly.add(id);
+        queue.remove(id);
+        Log.i(TAG, id + ": YouTube's quality chosen");
+    }
+
+    /** The player's menu: look again now, even for a song that failed or was set to YouTube's quality. */
+    public static synchronized void upgrade(String id) {
+        if (id == null) return;
+        youtubeOnly.remove(id);
+        failedAt.remove(id);
+        Log.i(TAG, id + ": upgrade asked");
+    }
+
+    public static boolean youtubeChosen(String id) {
+        return id != null && youtubeOnly.contains(id);
+    }
+
     public static synchronized boolean failed(String id) {
+        if (id != null && youtubeOnly.contains(id)) return true;
         Long at = failedAt.get(id);
         return at != null && SystemClock.elapsedRealtime() - at < RETRY_MS;
     }
@@ -185,6 +230,8 @@ public final class AddonPrep {
     public static synchronized void request(Context c, String id, String title, String artist, boolean isVideo, boolean now) {
         if (c == null || id == null || title == null || artist == null || !AddonSettings.on()) return;
         ctx = c.getApplicationContext();
+        if (now) current = id;
+        else upNext = id;
         if (ready.containsKey(id) || id.equals(working) || failed(id)) return;
         asked.put(id, new String[]{title, artist, isVideo ? "1" : "0"});
         if (queue.contains(id)) {
@@ -231,9 +278,15 @@ public final class AddonPrep {
             long t0 = SystemClock.elapsedRealtime();
             Prepared p = null;
             String why;
+            boolean dropped = false;
             try {
                 p = AddonDownloads.has(ctx, id) ? AddonDownloads.load(ctx, id) : prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
                 why = p == null ? "no addon has a file that fits" : null;
+                if (p == null && stale()) throw new Stale();
+            } catch (Stale t) {
+                // skipped past: the playing song goes first; this one is asked again if it comes back
+                why = t.getMessage();
+                dropped = true;
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 Log.w(TAG, "prepare " + id + " failed: " + why);
@@ -250,11 +303,13 @@ public final class AddonPrep {
                         it.remove();
                         deleteFiles(e.getValue());
                     }
-                } else {
+                } else if (!dropped) {
                     failedAt.put(id, SystemClock.elapsedRealtime());
+                } else if (!app.ayham.extension.music.automix.AddonDirect.inUse(id)) {
+                    deleteQuietly(fileFor(ctx, id));
                 }
             }
-            Log.i(TAG, (p != null ? "ready: " + p : "not from an addon: " + id + " (" + why + ")") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
+            Log.i(TAG, (p != null ? "ready: " + p : dropped ? "dropped " + id + ": " + why : "not from an addon: " + id + " (" + why + ")") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
         }
     }
 
@@ -366,7 +421,9 @@ public final class AddonPrep {
             opt.tier = dl.tier;
         }
         final Prepared[] got = new Prepared[1];
+        if (dl == null) opt.cancelled = AddonPrep::stale;
         opt.check = o -> {
+            if (dl == null && stale()) return "no longer playing or next";
             try {
                 String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
                 if (early != null) return early;

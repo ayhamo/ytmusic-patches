@@ -992,9 +992,9 @@ final class PlayerScreen {
             return (Math.round(255 * v) << 24) | 0xFFFFFF;
         }
 
-        private void sweep(Canvas canvas, float l, float r, float top, float bottom, float centre, float band, int base) {
+        private void sweep(Canvas canvas, float l, float r, float top, float bottom, float centre, float band, int base, int peak) {
             bandPaint.setShader(new LinearGradient(centre - band, 0, centre + band, 0,
-                    new int[]{base, white(FULL), base}, null, Shader.TileMode.CLAMP));
+                    new int[]{base, peak, base}, null, Shader.TileMode.CLAMP));
             canvas.drawRect(l, top, r, bottom, bandPaint);
         }
 
@@ -1099,8 +1099,10 @@ final class PlayerScreen {
                 // each side, sweeping left to right every 3 s. Here it runs over the glyph too,
                 // which keeps its own lower tint at the band's ends.
                 float band = all * 0.6f, centre = x0 - band + (t % 3000) / 3000f * (all + 2 * band);
-                sweep(canvas, x0, x0 + gw + gap / 2, top, bottom, centre, band, white(0.7f));
-                sweep(canvas, x0 + gw + gap / 2, x0 + all + 2 * d, top, bottom, centre, band, white(0.55f));
+                // the glyph peaks at solid white: from its 0.55 to the word's 0.73 was too small a
+                // step to see on a 13 dp glyph
+                sweep(canvas, x0, x0 + gw + gap / 2, top, bottom, centre, band, white(0.7f), 0xFFFFFFFF);
+                sweep(canvas, x0 + gw + gap / 2, x0 + all + 2 * d, top, bottom, centre, band, white(0.55f), white(FULL));
             }
             canvas.restoreToCount(layer);
             if (shimmer || b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) postInvalidateOnAnimation();
@@ -1771,6 +1773,11 @@ final class PlayerScreen {
                     BestPart.jump(a);
                     return true;
                 case 7:
+                    // the song changed while the menu was open: its label was for the one before
+                    if (!song.equals(app.ayham.extension.music.automix.AddonDirect.playingId())) {
+                        android.widget.Toast.makeText(a, "The song changed: open the menu again", android.widget.Toast.LENGTH_SHORT).show();
+                        return true;
+                    }
                     if (onAddon) {
                         app.ayham.extension.music.addons.AddonPrep.useYouTube(song);
                         android.widget.Toast.makeText(a, "Playing YouTube's quality", android.widget.Toast.LENGTH_SHORT).show();

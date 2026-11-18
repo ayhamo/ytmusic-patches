@@ -431,6 +431,29 @@ final class Engine {
     }
 
     private final AudioTimestamp ts = new AudioTimestamp();
+    private boolean leadLogged;
+
+    /**
+     * How long after the mixer a sample is heard, as measured on the S21 FE: with YT unmuted 12.5 ms
+     * ahead the hole was 21 ms of silence between the deck's 25 ms fade and an 8 ms ramp back, so
+     * the ramp lands mid-fade at ~37 ms more; 40 ms is used. AudioTrack's own figure (getLatency()
+     * less its buffer: 84 ms there) counts more than the volume's path and would double the sound
+     * for ~45 ms instead, so it is only logged.
+     */
+    private double mixerLead() {
+        if (!leadLogged) {
+            leadLogged = true;
+            String read;
+            try {
+                int total = (int) AudioTrack.class.getMethod("getLatency").invoke(track);
+                read = (total - Math.round(track.getBufferSizeInFrames() * 1000.0 / SR)) + " ms";
+            } catch (Throwable t) {
+                read = "unread (" + t.getClass().getSimpleName() + ")";
+            }
+            Log.i(TAG, "hand-over: YT's volume comes back 40 ms before the deck fades (the track says " + read + " after the mixer)");
+        }
+        return 0.040;
+    }
 
     private double heardFrames() {
         if (track == null || !track.getTimestamp(ts)) return -1;
@@ -585,7 +608,11 @@ final class Engine {
                 deck = null;
             }
         }
-        if (!handedOver && !Double.isNaN(handoverAt) && mix >= handoverAt - 0.0125) {
+        // mix is what is heard; a volume set now reaches the speaker only after the output's latency
+        // past the mixer. Set at the heard moment, YT's (or the addon's) sound came back that much after
+        // the deck had faded: a ~20 ms hole heard at every hand-over (S21 FE, recorded 2026-11-18: a
+        // 12 ms fade, 21 ms of silence, an 8 ms ramp back). So it is set that much ahead (mixerLead).
+        if (!handedOver && !Double.isNaN(handoverAt) && mix >= handoverAt - 0.0125 - mixerLead()) {
             handedOver = true;
             rescueOffHandover();
             if (setSpeed != 1) speed(inPlayer, 1f);

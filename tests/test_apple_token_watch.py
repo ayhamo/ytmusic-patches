@@ -208,7 +208,9 @@ class UpstreamTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / "upstream.json"
-        patches = [mock.patch.object(w, "UPSTREAM", self.path), mock.patch.object(w, "check_scrape", lambda report: report.append("scrape ok"))]
+        # two files of its own, so the logic is tested whatever the real list holds (it is one file now)
+        patches = [mock.patch.object(w, "UPSTREAM", self.path), mock.patch.object(w, "check_scrape", lambda report: report.append("scrape ok")),
+                   mock.patch.object(w, "UPSTREAM_FILES", [("owner/one", "src/One.kt"), ("owner/two", "src/two.js")])]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -272,6 +274,19 @@ class UpstreamTest(unittest.TestCase):
         code, out = self.run_main([RuntimeError("HTTP Error 403: rate limit exceeded"), commit("b1")])
         self.assertEqual(code, 0)
         self.assertIn("upstream: could not check (HTTP Error 403", out)
+
+    def test_accept_fails_when_github_fails(self):
+        code, out = self.run_main([RuntimeError("HTTP Error 403: rate limit exceeded"), commit("b1")], "--accept")
+        self.assertEqual(code, 1)
+        self.assertIn("upstream: could not record", out)
+        self.assertFalse(self.path.exists())
+
+    def test_unreadable_repository_fails(self):
+        import urllib.error
+        gone = urllib.error.HTTPError("https://api.github.com/x", 404, "Not Found", None, None)
+        code, out = self.run_main([gone, commit("b1")])
+        self.assertEqual(code, 1)
+        self.assertIn("upstream scrape code unreadable", out)
 
     def test_scrape_failure_fails(self):
         def broken(report):

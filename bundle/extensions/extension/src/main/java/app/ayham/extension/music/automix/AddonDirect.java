@@ -149,6 +149,12 @@ public final class AddonDirect {
     /** A player of ours (playing or armed) is on this song: its files must stay. */
     /** The playing song's id, as YT's queue names it (null when unknown). */
     public static String playingId() {
+        // the player on YT's playing player knows its song at once; the queue is read every 1.5 s
+        try {
+            Shadow s = get(PlayerTap.current());
+            if (s != null && !s.done) return s.p.id;
+        } catch (Throwable ignored) {
+        }
         return Automix.queue()[0];
     }
 
@@ -246,10 +252,9 @@ public final class AddonDirect {
                 }
             }
             Shadow s = get(host);
-            if (s != null && !s.done && AddonPrep.youtubeChosen(s.p.id)) {
-                // the player's menu: YouTube's quality for this song, its audio back at once
-                s.end("YouTube's quality chosen", false);
-            }
+            // the player's menu: YouTube's quality for this song, its audio back at once (on every
+            // host: in a mix the song can be on the other player)
+            for (Shadow x : list()) if (!x.done && AddonPrep.youtubeChosen(x.p.id)) x.end("YouTube's quality chosen", false);
             // in a mix the incoming song is the engine's: follow() locks it on the held player, silent
             // until the hand-over; it never starts here as a song starting on its own
             boolean mix = Automix.mixing();
@@ -724,6 +729,7 @@ public final class AddonDirect {
                 lastWasSeek = false;
                 if (Math.abs(m) <= LOCK_MS || (seeks >= 4 && Math.abs(m) <= LOCK_LOOSE_MS)) {
                     mode = Mode.ON;
+                    AddonPlayback.hold(pl, false);
                     grossSeeks = 0;
                     learnedLead = lead;
                     if (forMix) AddonPlayback.playing(pl, p.addon, false, p.ownDecode());
@@ -771,6 +777,7 @@ public final class AddonDirect {
             resyncs++;
             resyncAt = Long.MIN_VALUE;
             mode = Mode.LOCKING;
+            AddonPlayback.hold(pl, true);
             seeks = 0;
             fade(0f, fadeMs);
             log.append(" resync (").append(why).append(");");
@@ -782,6 +789,7 @@ public final class AddonDirect {
             fadeMs = 0;
             setShare(0f);
             mode = Mode.LOCKING;
+            AddonPlayback.hold(pl, true);
             seeks = 0;
             resyncAt = Long.MIN_VALUE;
         }

@@ -90,16 +90,29 @@ public final class AudioStream {
         File out = new File(dir, videoId + (pick.mime.contains("mp4") ? ".m4a" : ".webm"));
         byte[] buffer = new byte[64 * 1024];
         try (FileOutputStream os = new FileOutputStream(out)) {
+            String url = pick.url;
             for (long start = 0; start < pick.length; start += RANGE) {
                 long end = Math.min(pick.length, start + RANGE) - 1;
-                HttpURLConnection conn = (HttpURLConnection) new URL(pick.url).openConnection();
-                conn.setConnectTimeout(15_000);
-                conn.setReadTimeout(30_000);
-                conn.setRequestProperty("User-Agent", USER_AGENT);
-                conn.setRequestProperty("Referer", "https://music.youtube.com/");
-                conn.setRequestProperty("Range", "bytes=" + start + "-" + end);
+                HttpURLConnection conn = null;
+                int code = -1;
+                // googlevideo sometimes answers 302 to another server; the connection in YT's process
+                // doesn't follow it (phone, 2026-11-18: every analysis of a song failed on it). Followed
+                // here, and the new address kept for the remaining ranges.
+                for (int hop = 0; hop <= 5; hop++) {
+                    conn = (HttpURLConnection) new URL(url).openConnection();
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setConnectTimeout(15_000);
+                    conn.setReadTimeout(30_000);
+                    conn.setRequestProperty("User-Agent", USER_AGENT);
+                    conn.setRequestProperty("Referer", "https://music.youtube.com/");
+                    conn.setRequestProperty("Range", "bytes=" + start + "-" + end);
+                    code = conn.getResponseCode();
+                    String to = code / 100 == 3 ? conn.getHeaderField("Location") : null;
+                    if (to == null || hop == 5) break;
+                    conn.disconnect();
+                    url = new URL(new URL(url), to).toString();
+                }
                 try {
-                    int code = conn.getResponseCode();
                     if (code != HttpURLConnection.HTTP_PARTIAL) {
                         throw new IOException("range " + start + "-" + end + ": HTTP " + code);
                     }

@@ -338,7 +338,8 @@ public final class Features {
     /** The next songs in the queue ({id, title, artist}): their canvas loops fetched ahead. */
     public static void canvasAhead(java.util.List<String[]> next) {
         Properties p = props();
-        if (!"1".equals(p.getProperty("canvas")) || "0".equals(p.getProperty("canvasVideo"))) return;
+        // the loops are Canvas: with it off (canvasSpotify 0) none is shown, so none is cut ahead
+        if (!"1".equals(p.getProperty("canvas")) || "0".equals(p.getProperty("canvasSpotify")) || "0".equals(p.getProperty("canvasVideo"))) return;
         AnimatedCover.ahead(next);
     }
 

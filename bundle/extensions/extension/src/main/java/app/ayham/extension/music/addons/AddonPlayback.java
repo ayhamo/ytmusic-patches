@@ -14,7 +14,9 @@ public final class AddonPlayback {
     private static final String TAG = "Ayham";
     private static volatile Object player;
     private static volatile String addon;
-    private static volatile boolean audible, upgrading, ownAtmos;
+    private static volatile boolean audible, upgrading, ownAtmos, held;
+    /** The last {badge, line} while the addon was heard: kept through a re-lock (hold). */
+    private static volatile Object[] last;
     private static Field rateField, encodingField;
     private static boolean fieldsFailed;
 
@@ -36,6 +38,10 @@ public final class AddonPlayback {
      * is PCM; the badge and the line still say what was decoded.
      */
     public static void playing(Object p, String addonName, boolean isAudible, boolean atmosDecode) {
+        if (player != p) {
+            held = false;
+            last = null;
+        }
         player = p;
         addon = addonName;
         audible = isAudible;
@@ -46,9 +52,20 @@ public final class AddonPlayback {
         if (player == p) audible = isAudible;
     }
 
+    /**
+     * on: the player re-locks onto YT after a seek (YT's audio covers a few seconds). The badge
+     * keeps what it showed rather than flicking to "Upgrading Quality" and back; the song is still
+     * the addon's.
+     */
+    public static void hold(Object p, boolean on) {
+        if (player == p) held = on;
+    }
+
     public static void stopped(Object p) {
         if (player != p) return;
         player = null;
+        held = false;
+        last = null;
         ownAtmos = false;
         addon = null;
         audible = false;
@@ -82,6 +99,9 @@ public final class AddonPlayback {
                 Log.w(TAG, "addon format read failed", t);
             }
         }
+        Object[] r = last;
+        if (mime != null) last = new Object[]{Quality.badge(false, mime, rate, enc, bitrate), line};
+        else if (held && r != null && p != null) return r;
         return new Object[]{Quality.badge(upgrading, mime, rate, enc, bitrate), line};
     }
 

@@ -1,6 +1,7 @@
 """Daily check that the animated art's Apple scrape still works, the same way the app does it
-(features/AppleCanvas.java), and that the scrape code in BitChord and the browser extension hasn't
-changed upstream. Exits 1 with a report when something is wrong; the GitHub Action then opens an
+(features/AppleCanvas.java), and that the scrape code it follows hasn't changed upstream
+(BitChord's AppleMusicCanvas.kt; the extension's copy is plain upstream now and not watched).
+Exits 1 with a report when something is wrong; the GitHub Action then opens an
 issue. Standard library only.
 
     python watcher/apple_token_watch.py            # check
@@ -145,7 +146,15 @@ def main():
                                     "Compare with features/AppleCanvas.java, then run with --accept and commit upstream.json.")
             report.append(f"upstream: {len(now)} files checked")
     except Exception as e:
-        report.append(f"upstream: could not check ({e})")  # GitHub hiccup: not a scrape failure
+        code = getattr(e, "code", None)
+        if "--accept" in sys.argv:
+            # nothing was recorded: saying "all good" would leave upstream.json stale
+            problems.append(f"upstream: could not record ({e})")
+        elif code == 404:
+            # the repository or file can't be read (renamed, made private): the watch would be blind
+            problems.append(f"upstream scrape code unreadable ({e}): check UPSTREAM_FILES and the repository's access.")
+        else:
+            report.append(f"upstream: could not check ({e})")  # GitHub hiccup (rate limit): not a scrape failure
 
     print("\n".join(report))
     if problems:

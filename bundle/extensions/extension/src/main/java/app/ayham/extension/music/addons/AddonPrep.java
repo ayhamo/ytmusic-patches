@@ -184,6 +184,8 @@ public final class AddonPrep {
     public static void waitWhileHeld() throws IOException {
         if (stale()) throw new Stale();
         while (held) {
+            // a mix can hold for its whole length: a song skipped meanwhile stops here too
+            if (stale()) throw new Stale();
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
@@ -441,6 +443,8 @@ public final class AddonPrep {
 
     /** dl set: a download (allowDownloads addons, ±2 s, lossless at the tier asked, kept in dl.dir). */
     static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo, Download dl) throws Exception {
+        // a queued song skipped before its turn: not even YouTube's copy is fetched
+        if (stale()) throw new Stale();
         // YouTube's side first: everything is fitted to it
         long t0 = SystemClock.elapsedRealtime();
         File yt = app.ayham.extension.music.automix.AddonPcm.youtubeFile(c, id);

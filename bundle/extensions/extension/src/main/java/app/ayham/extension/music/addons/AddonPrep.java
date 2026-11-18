@@ -676,7 +676,7 @@ public final class AddonPrep {
         p.atmos = true;
         Log.i(TAG, String.format(Locale.US, "%s: level: YouTube %.2f LUFS, Atmos %.2f LUFS: %s", id, ytLufs, h.side.lufs(), p.gain));
         try {
-            playOwnDecode(p);
+            playOwnDecode(p, ytLufs);
         } catch (Throwable t) {
             Log.w(TAG, id + ": Atmos WAV failed: " + stereo.addon + "'s stereo plays", t);
             deleteQuietly(p.file);
@@ -686,17 +686,36 @@ public final class AddonPrep {
         return p;
     }
 
-    /** Dolby Atmos: the gain into the WAV of our decode, which is then the file played (AtmosWav). */
-    static void playOwnDecode(Prepared p) throws IOException {
+    /**
+     * Dolby Atmos: the gain into the WAV of our decode, which is then the file played (AtmosWav):
+     * the whole way to YouTube's loudness (up to +14 dB) under the limiter, then measured.
+     */
+    static void playOwnDecode(Prepared p, double ytLufs) throws Exception {
         if (p.wav == null) return;
         long t0 = SystemClock.elapsedRealtime();
-        AtmosWav.scale(p.wav, p.gainDb);
+        double db = AtmosWav.boostDb(p.gainDb, p.gain == null ? Double.NaN : p.gain.wantDb);
+        AtmosWav.Limited lim = AtmosWav.scale(p.wav, db);
         if (!p.saved) deleteQuietly(p.file);
         p.file = p.wav;
-        p.bakedDb = p.gainDb;
+        p.bakedDb = db;
         p.gainDb = 0;
-        Log.i(TAG, String.format(Locale.US, "%s: Dolby Atmos plays from our decode (%d KB WAV, %+.2f dB in it, %d ms)", p.id, p.wav.length() / 1024, p.bakedDb,
-                SystemClock.elapsedRealtime() - t0));
+        // what it comes out at, measured the way YouTube's copy was (to compare)
+        final OffsetFit.Side after = new OffsetFit.Side();
+        final AudioDecode.ToFit meter = new AudioDecode.ToFit(after);
+        AudioDecode.decode(p.wav, new AudioDecode.Sink() {
+            @Override
+            public void format(int rate, int channels) {
+                meter.format(rate);
+            }
+
+            @Override
+            public void block(float[][] planar, int frames) throws IOException {
+                meter.add(planar, frames);
+            }
+        });
+        meter.finish();
+        Log.i(TAG, String.format(Locale.US, "%s: Dolby Atmos plays from our decode (%d KB WAV, %s; now %.2f LUFS, YouTube %.2f, %d ms)", p.id,
+                p.wav.length() / 1024, lim, after.lufs(), ytLufs, SystemClock.elapsedRealtime() - t0));
     }
 
     /** Decodes the file and fits it to YouTube's audio: a score under 0 (with why in codec) when it doesn't fit. */
@@ -784,7 +803,7 @@ public final class AddonPrep {
         Log.i(TAG, String.format(Locale.US, "%s: level: YouTube %.2f LUFS, file %.2f LUFS: %s", id, ytLufs, side.lufs(), p.gain));
         if (p.wav != null) {
             try {
-                playOwnDecode(p);
+                playOwnDecode(p, ytLufs);
             } catch (Throwable t) {
                 deleteQuietly(p.wav);
                 p.wav = null;

@@ -111,6 +111,8 @@ public final class AudioStream {
                     if (to == null || hop == 5) break;
                     conn.disconnect();
                     url = new URL(new URL(url), to).toString();
+                    // the host only: the address carries the stream's signature
+                    Log.i(TAG, videoId + ": HTTP " + code + " at byte " + start + ", followed to " + new URL(url).getHost());
                 }
                 try {
                     if (code != HttpURLConnection.HTTP_PARTIAL) {

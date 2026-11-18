@@ -69,6 +69,14 @@ public final class AddonDirect {
     private static final long START_OFF_MS = 150;
     /** In step: within this (LOOSE after 4 corrections). Drift: past this, a resync. */
     private static final long LOCK_MS = 10, LOCK_LOOSE_MS = 20, DRIFT_MS = 30;
+    /**
+     * In step and heard: the median error of TRIM_N readings past TRIM_MS is taken back by a rate
+     * change of TRIM_RATE with the pitch following it (a plain resample, 7 cents for a few seconds:
+     * not heard), so a lock taken at up to LOCK_LOOSE_MS doesn't stay that far off YT and the decks.
+     */
+    private static final long TRIM_MS = 7;
+    private static final int TRIM_N = 20;
+    private static final float TRIM_RATE = 0.004f;
     private static final Map<Object, Shadow> shadows = new IdentityHashMap<>();
     /** The next song's player, opened and paused at its start, before YT gets to it. */
     private static volatile Shadow armed;
@@ -84,6 +92,8 @@ public final class AddonDirect {
     private static volatile long pausedAt;
     /** Debug (spike prop directTrace=1): every clock reading and error logged. */
     private static boolean TRACE;
+    /** Debug (spike prop directDuo=1): YT stays heard under ours, so a recording shows their lag. */
+    private static boolean DUO;
 
     private AddonDirect() {
     }
@@ -96,6 +106,7 @@ public final class AddonDirect {
         started = true;
         AddonPrep.clearCache(ctx);
         TRACE = "1".equals(Features.prop("directTrace"));
+        DUO = "1".equals(Features.prop("directDuo"));
         if ("1".equals(Features.prop("directTest"))) registerTest();
         main.postDelayed(AddonDirect::tick, 2000);
     }
@@ -121,7 +132,7 @@ public final class AddonDirect {
     /** How much of the host's sound the addon carries (0..1): YT's player is turned down by it. */
     static float share(Object host) {
         Shadow s = get(host);
-        return s == null ? 0 : s.share;
+        return s == null || DUO ? 0 : s.share;
     }
 
     /** The gate set YT's player's volume: ours follows (the same moment on the main thread). */
@@ -365,6 +376,9 @@ public final class AddonDirect {
         float speedSet = 1f;
         /** The running nudge's rate as a factor of YT's speed (1: none). */
         float nudgeFactor = 1f;
+        /** The running nudge is a heard trim: the pitch follows its rate (a resample, no stretch). */
+        boolean trimming;
+        final List<Long> trimErr = new ArrayList<>();
         float lastVol = -1;
         boolean cappedLogged;
         final StringBuilder log = new StringBuilder();
@@ -450,11 +464,13 @@ public final class AddonDirect {
             if (nudgeUntil != 0) {
                 nudgeUntil = 0;
                 nudgeFactor = 1f;
+                trimming = false;
                 try {
-                    speed.invoke(pl, speedSet, 1f);
+                    applySpeed();
                 } catch (Throwable ignored) {
                 }
             }
+            trimErr.clear();
             AddonPlayback.playing(pl, p.addon, true, p.ownDecode());
             if (offBy(ytPos) > START_OFF_MS && pl instanceof SeekAccess) {
                 // under a silent YT: a seek there, its buffering waited out silently (a moment at a song's start)
@@ -552,17 +568,26 @@ public final class AddonDirect {
             return share > 0 && Engine.gateOut(host) > 0;
         }
 
+        /** Our player's speed: YT's times the nudge; a trim's pitch follows its factor. */
+        private void applySpeed() throws Exception {
+            speed.invoke(pl, speedSet * nudgeFactor, trimming ? nudgeFactor : 1f);
+        }
+
         void followSpeed(float s, long now) {
             if (pl == null || Math.abs(s - speedSet) < 0.0005f) return;
             speedSet = s;
             // a nudge running carries on at the new speed: automix's steps (a second apart) would
             // cut every one short and the lock never get there (m5: 11 corrections, 5 s late)
-            if (nudgeUntil == 0) nudgeFactor = 1f;
+            if (nudgeUntil == 0) {
+                nudgeFactor = 1f;
+                trimming = false;
+            }
+            trimErr.clear();
             // both clocks' lines change speed now, not at their next reading (up to 1 s later)
             ytClock.speed(now, s);
             ourClock.speed(now, s);
             try {
-                speed.invoke(pl, s * nudgeFactor, 1f);
+                applySpeed();
             } catch (Throwable ignored) {
             }
             // both clocks follow the speed (StepClock's time line) and both players change it alike, so
@@ -685,23 +710,35 @@ public final class AddonDirect {
                 }
                 nudgeUntil = 0;
                 nudgeFactor = 1f;
-                speed.invoke(pl, speedSet, 1f);
+                trimming = false;
+                applySpeed();
                 ytClock.reset();
                 seek(yt, now);
                 lastWasSeek = true;
                 return;
             }
+            // a heard trim keeps watching for YT's seeks (a silent nudge's lock sees them after)
+            boolean trimJump = trimming && fresh && Math.abs(ours - target(yt)) > SEEK_OVER_MS;
             if (nudgeUntil != 0) {
-                if (now < nudgeUntil) return;
+                if (now < nudgeUntil && !trimJump) return;
                 // the nudge is over: back to YT's speed, both clocks read afresh
                 nudgeUntil = 0;
                 nudgeFactor = 1f;
+                trimming = false;
                 try {
-                    speed.invoke(pl, speedSet, 1f);
+                    applySpeed();
                 } catch (Throwable ignored) {
                 }
                 ourClock.reset(); // YT's clock reads on
                 settleUntil = now + 300;
+                if (trimJump) {
+                    log.append(" YT jumped to ").append(yt).append(" in a trim;");
+                    ytClock.reset();
+                    if (mode == Mode.ON && heard()) resync("YT jumped", 1);
+                    else if (mode == Mode.ON) relock();
+                    seek(yt, now);
+                    lastWasSeek = true;
+                }
                 return;
             }
             if (now < settleUntil) return;
@@ -762,6 +799,7 @@ public final class AddonDirect {
                 }
             } else {
                 resyncAt = Long.MIN_VALUE;
+                if (heard()) trim(m, now);
             }
             if (resyncAt != Long.MIN_VALUE && ytAt >= resyncAt) {
                 Log.i(TAG, String.format(Locale.US, "%s: resync at %.2f s (%.1f dBFS there)", p.id, ytAt / 1000.0, p.levelAt(ytAt / 1000.0)));
@@ -779,6 +817,7 @@ public final class AddonDirect {
             mode = Mode.LOCKING;
             AddonPlayback.hold(pl, true);
             seeks = 0;
+            trimErr.clear();
             fade(0f, fadeMs);
             log.append(" resync (").append(why).append(");");
         }
@@ -791,7 +830,31 @@ public final class AddonDirect {
             mode = Mode.LOCKING;
             AddonPlayback.hold(pl, true);
             seeks = 0;
+            trimErr.clear();
             resyncAt = Long.MIN_VALUE;
+        }
+
+        /** Heard, in step: a steady error past TRIM_MS taken back by an unheard resample. */
+        private void trim(long m, long now) {
+            trimErr.add(m);
+            if (trimErr.size() < TRIM_N) return;
+            List<Long> s = new ArrayList<>(trimErr);
+            trimErr.clear();
+            Collections.sort(s);
+            long med = s.get(s.size() / 2);
+            if (Math.abs(med) <= TRIM_MS) return;
+            float f = 1 + (med > 0 ? -TRIM_RATE : TRIM_RATE);
+            nudgeFactor = f;
+            trimming = true;
+            try {
+                applySpeed();
+            } catch (Throwable t) {
+                nudgeFactor = 1f;
+                trimming = false;
+                return;
+            }
+            nudgeUntil = now + Math.max(1, Math.round(Math.abs(med) / (speedSet * TRIM_RATE)));
+            Log.i(TAG, String.format(Locale.US, "%s: %d ms off YT in step: trimmed at x%.3f for %d ms", p.id, med, f, nudgeUntil - now));
         }
 
         /** Silent: a seek when far off, else a speed nudge for as long as m takes. */

@@ -105,27 +105,130 @@ public final class AtmosWav {
     }
 
     /**
-     * The gain into the samples, in place. The fit's gain keeps a boost under -1 dBTP, so nothing
-     * clips; a sample that would is held at full scale.
+     * Atmos renders are mastered far quieter than YouTube's copy (Blinding Lights: -23.8 against
+     * -10.2 LUFS), more than the +6 dB a file may be boosted plainly. Our decode takes the whole
+     * difference, up to this, with a limiter keeping it under the ceiling.
      */
-    public static void scale(File wav, double gainDb) throws IOException {
+    public static final double MAX_BOOST_DB = 14;
+    /** Sample ceiling: 0.5 dB under the -1 dBTP target, room for the peaks between samples. */
+    static final double CEILING_DBFS = -1.5;
+    static final double LOOKAHEAD_SEC = 0.005, RELEASE_SEC = 0.08;
+
+    /** The gain our decode is given: the fit's, or more toward YouTube's loudness (wantDb). */
+    public static double boostDb(double gainDb, double wantDb) {
+        if (Double.isNaN(wantDb) || wantDb <= gainDb) return gainDb;
+        return Math.max(gainDb, Math.min(wantDb, MAX_BOOST_DB));
+    }
+
+    /** What the limiter did: the share of frames turned down and the most it took off. */
+    public static final class Limited {
+        public double gainDb, limitedShare, maxReductionDb;
+
+        @Override
+        public String toString() {
+            return String.format(java.util.Locale.US, "%+.2f dB, limiter on %.2f%% of the song, at most -%.1f dB", gainDb, limitedShare * 100, maxReductionDb);
+        }
+    }
+
+    /**
+     * The gain into the samples, in place, under a look-ahead limiter: each frame's need (the
+     * ceiling over its loudest channel) is the minimum over the next 5 ms, averaged over 5 ms, so
+     * the gain is already down when a peak arrives and ramps smoothly; it comes back up with an
+     * 80 ms release. Without a peak over the ceiling it is a plain gain.
+     */
+    public static Limited scale(File wav, double gainDb) throws IOException {
         // a WAV that is gone or empty must not pass as the song's audio (RandomAccessFile would
         // create it)
         if (wav == null || wav.length() <= HEADER) throw new IOException("Atmos WAV missing or empty: " + wav);
-        if (Math.abs(gainDb) < 0.005) return;
-        float g = (float) Math.pow(10, gainDb / 20);
+        Limited out = new Limited();
+        out.gainDb = gainDb;
+        if (Math.abs(gainDb) < 0.005) return out;
         try (RandomAccessFile f = new RandomAccessFile(wav, "rw"); FileChannel ch = f.getChannel()) {
-            long len = ch.size() - HEADER;
-            for (long at = 0; at < len; at += 1 << 24) {
-                long n = Math.min(1L << 24, len - at) & ~1L;
-                MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_WRITE, HEADER + at, n);
-                ShortBuffer s = m.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
-                for (int i = 0; i < s.limit(); i++) {
-                    int v = Math.round(s.get(i) * g);
-                    s.put(i, (short) (v > 32767 ? 32767 : v < -32768 ? -32768 : v));
+            ByteBuffer hdr = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN);
+            ch.read(hdr, 0);
+            int channels = Math.max(1, hdr.getShort(22));
+            int rate = hdr.getInt(24) > 0 ? hdr.getInt(24) : 48000;
+            long len = (ch.size() - HEADER) & ~1L;
+            MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_WRITE, HEADER, len);
+            ShortBuffer s = m.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
+            int frames = s.limit() / channels;
+            new Limiter(rate, (float) Math.pow(10, gainDb / 20), (float) (32768 * Math.pow(10, CEILING_DBFS / 20))).run(s, channels, frames, out);
+            m.force();
+        }
+        return out;
+    }
+
+    /** One pass over the samples (see scale). Output lags the input by the look-ahead, in place. */
+    static final class Limiter {
+        final int look;
+        final float g, ceil, release;
+
+        Limiter(int rate, float g, float ceil) {
+            look = Math.max(1, (int) Math.round(rate * LOOKAHEAD_SEC));
+            this.g = g;
+            this.ceil = ceil;
+            release = (float) (1 - Math.exp(-1 / (RELEASE_SEC * rate)));
+        }
+
+        void run(ShortBuffer s, int channels, int frames, Limited out) {
+            // need r[i] = min(1, ceil / (peak of frame i x g)); m[k] = min r over k..k+look-1 (a
+            // monotonic deque); avg[p] = mean m over p-look+1..p; e follows avg down at once, up
+            // with the release
+            float[] rv = new float[look + 1];
+            int[] ri = new int[look + 1];
+            int head = 0, tail = 0, size = 0;
+            float[] mRing = new float[look];
+            double sum = look; // m before the start: 1
+            for (int k = 0; k < look; k++) mRing[k] = 1;
+            float e = 1, minE = 1;
+            long limited = 0;
+            for (int i = 0; i < frames + look - 1; i++) {
+                float r = 1;
+                if (i < frames) {
+                    int peak = 0;
+                    for (int c = 0; c < channels; c++) peak = Math.max(peak, Math.abs(s.get(i * channels + c)));
+                    float want = peak * g;
+                    if (want > ceil) r = ceil / want;
                 }
-                m.force();
+                // the deque keeps rising values: drop those not smaller than r from the back
+                while (size > 0 && rv[(tail - 1 + rv.length) % rv.length] >= r) {
+                    tail = (tail - 1 + rv.length) % rv.length;
+                    size--;
+                }
+                rv[tail] = r;
+                ri[tail] = i;
+                tail = (tail + 1) % rv.length;
+                size++;
+                int k = i - look + 1; // the window k..i is complete
+                while (ri[head] < k) {
+                    head = (head + 1) % rv.length;
+                    size--;
+                }
+                if (k < 0) continue;
+                float mk = rv[head];
+                if (k == 0) {
+                    // the window before the start: the first value, so the average never exceeds r
+                    for (int j = 0; j < look; j++) mRing[j] = mk;
+                    sum = (double) mk * look;
+                }
+                int slot = k % look;
+                sum += mk - mRing[slot];
+                mRing[slot] = mk;
+                int p = k; // avg[p] = mean of m[p-look+1..p]
+                float avg = (float) (sum / look);
+                e = avg < e ? avg : e + (avg - e) * release;
+                if (e > avg) e = avg;
+                if (e < 0.9999f) limited++;
+                if (e < minE) minE = e;
+                float k2 = g * e;
+                for (int c = 0; c < channels; c++) {
+                    int at = p * channels + c;
+                    int v = Math.round(s.get(at) * k2);
+                    s.put(at, (short) (v > 32767 ? 32767 : v < -32768 ? -32768 : v));
+                }
             }
+            out.limitedShare = frames == 0 ? 0 : limited / (double) frames;
+            out.maxReductionDb = -20 * Math.log10(Math.max(minE, 1e-6f));
         }
     }
 

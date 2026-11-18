@@ -118,6 +118,14 @@ final class Engine {
     private volatile boolean stop;
     private volatile long written;
     private volatile double fadeFrom = Double.NaN, fadeLen; // master fade (abort / another song)
+    /**
+     * A forced hand-over with YT (or the addon's player) not lined up with the deck: an equal-power
+     * crossfade this long instead of the 25 ms splice, which played the misalignment as a jump
+     * (phone, 2026-11-18: 116 ms skipped after YT's next player stalled 10 s).
+     */
+    static final double SOFT_SEC = 0.25;
+    private volatile double softFrom = Double.NaN;
+    private boolean softRamp;
     private final List<Double> offsets = new ArrayList<>();
     private boolean started, tookOver, asked, toasted, handedOver, finished;
     private double handoverAt = Double.NaN;
@@ -357,9 +365,12 @@ final class Engine {
                     levelOut = lo;
                     levelIn = li;
                 }
+                double sf = softFrom;
                 for (int i = 0; i < BLOCK; i++) {
                     float g = 1;
                     if (!Double.isNaN(fs)) g = (float) Math.max(0, Math.min(1, 1 - ((f + i) / (double) SR - fs) / fadeLen));
+                    // the soft hand-over: the deck goes out on a cosine while YT comes in on a sine
+                    if (!Double.isNaN(sf)) g *= (float) Math.cos(Math.PI / 2 * Math.max(0, Math.min(1, ((f + i) / (double) SR - sf) / SOFT_SEC)));
                     levelOut += (lo - levelOut) * LEVEL_GLIDE;
                     levelIn += (li - levelIn) * LEVEL_GLIDE;
                     buf[2 * i] = (bo[2 * i] * levelOut + bi[2 * i] * levelIn) * g;
@@ -590,15 +601,29 @@ final class Engine {
         // unmuted, heard as a short cut (phone, 2026-11-17: x0.994 -> x1.000 2 ms before the unmute).
         // A nudge ends (silent) within 1 s, then the speed settles 300 ms.
         boolean speedSettled = nudgeUntil == 0 && SystemClock.elapsedRealtime() - speedSetAt >= 300;
-        if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null
-                && ((aligned && speedSettled && mix >= m.elementAt - 0.3
-                        // the stream deck lines up (silently) after the last nudge: up to 3 s for it
-                        && (deck == null || deck.inStep() || mix >= m.elementAt + 3)
-                        // ...and so does the addon's player for the next song
-                        && (!addonIn || AddonDirect.inStep(inPlayer) || mix >= m.elementAt + 3))
-                    || mix >= Math.min(m.elementAt + 8, deadline))) {
-            handoverAt = mix + 0.3;
-            LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
+        boolean ready = aligned && speedSettled && mix >= m.elementAt - 0.3
+                // the stream deck lines up (silently) after the last nudge: up to 3 s for it
+                && (deck == null || deck.inStep() || mix >= m.elementAt + 3)
+                // ...and so does the addon's player for the next song
+                && (!addonIn || AddonDirect.inStep(inPlayer) || mix >= m.elementAt + 3);
+        if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null && (ready || mix >= Math.min(m.elementAt + 8, deadline))) {
+            // what is heard after the hand-over isn't lined up with the deck: crossfaded, not spliced
+            // (the stream deck taking the song is lined up with it: spliced)
+            boolean lined = (aligned && (!addonIn || AddonDirect.inStep(inPlayer))
+                    // debug (spike prop softHandover=1): every hand-over crossfaded, to test this path
+                    && !"1".equals(app.ayham.extension.music.features.Features.prop("softHandover")))
+                    || (deck != null && deck.inStep());
+            // the render writes ~0.26 s ahead of what is heard (the track's buffer and the output's
+            // latency): the crossfade starts past that, or its first part is skipped as a step
+            handoverAt = mix + (lined ? 0.3 : 0.5);
+            if (!lined) {
+                softFrom = handoverAt - SOFT_SEC / 2;
+                Log.w(TAG, String.format(Locale.US, "hand-over forced at mix %.2f s with %s not in step (last error %s ms): a %.0f ms crossfade instead of a splice",
+                        mix, addonIn && !AddonDirect.inStep(inPlayer) ? "the addon's player" : "YT's player",
+                        lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), SOFT_SEC * 1000));
+            } else {
+                LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
+            }
             // the stream deck takes the song from here when it is in step (YT stays silent), else YT does
             if (deck != null && deck.inStep()) {
                 deck.takeAt(m.in.trackAt(handoverAt));
@@ -612,19 +637,31 @@ final class Engine {
         // past the mixer. Set at the heard moment, YT's (or the addon's) sound came back that much after
         // the deck had faded: a ~20 ms hole heard at every hand-over (S21 FE, recorded 2026-11-18: a
         // 12 ms fade, 21 ms of silence, an 8 ms ramp back). So it is set that much ahead (mixerLead).
-        if (!handedOver && !Double.isNaN(handoverAt) && mix >= handoverAt - 0.0125 - mixerLead()) {
+        double soft = softFrom;
+        if (!handedOver && !Double.isNaN(handoverAt) && mix >= (Double.isNaN(soft) ? handoverAt - 0.0125 : soft) - mixerLead()) {
             handedOver = true;
             rescueOffHandover();
             if (setSpeed != 1) speed(inPlayer, 1f);
             released = inPlayer;
-            restoreVolume(inPlayer);
+            if (Double.isNaN(soft)) restoreVolume(inPlayer);
+            else softRamp = true;
             double yt = (freshInAt + mix) * 1000;
-            Log.i(TAG, String.format(Locale.US, "HANDOVER at mix %.3f s: YT at %.0f ms, deck at %.3f s (splice error %+.0f ms, last median %s ms, YT's volume %.3f); alignment:%s",
-                    mix, yt, m.in.trackAt(mix), yt - m.in.trackAt(mix) * 1000, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), ytVolume(inPlayer), alignLog));
+            Log.i(TAG, String.format(Locale.US, "HANDOVER%s at mix %.3f s: YT at %.0f ms, deck at %.3f s (splice error %+.0f ms, last median %s ms, YT's volume %.3f); alignment:%s",
+                    Double.isNaN(soft) ? "" : " (crossfaded)", mix, yt, m.in.trackAt(mix), yt - m.in.trackAt(mix) * 1000, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), ytVolume(inPlayer), alignLog));
         }
         if (!handedOver && inPlayer == null && mix >= deadline) {
             abort("YT's player for the next song never came", false);
             return;
+        }
+        if (softRamp) {
+            // YT's volume on the sine, on the heard timeline (set mixerLead ahead, like the splice)
+            double t = (mix + mixerLead() - soft) / SOFT_SEC;
+            if (t >= 1) {
+                softRamp = false;
+                restoreVolume(inPlayer);
+            } else {
+                setVolume(inPlayer, ytVolume(inPlayer) * (float) Math.sin(Math.PI / 2 * Math.max(0, t)));
+            }
         }
         if (handedOver && mix >= handoverAt + 0.6) finish(true, null);
     }
@@ -750,6 +787,11 @@ final class Engine {
         holding = false;
         released = null;
         if (inPlayer != null && setSpeed != 1) speed(inPlayer, 1f);
+        // stopped mid-crossfade (a soft hand-over): YT's volume is given back whole, not left part way
+        if (softRamp && inPlayer != null) {
+            softRamp = false;
+            restoreVolume(inPlayer);
+        }
         // a mix that failed after the takeover: YT's playing player gets its volume back (the
         // incoming one when it came, else the outgoing one), never left silent
         if (!ok && tookOver && !handedOver) {

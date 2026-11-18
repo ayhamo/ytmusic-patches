@@ -231,7 +231,8 @@ public final class AddonDownloads {
         JSONObject j = new JSONObject();
         j.put("title", title).put("artist", artist);
         j.put("file", p.file.getAbsolutePath()).put("addon", p.addon).put("host", p.host).put("row", p.rowId)
-                .put("offset", p.offsetSec).put("gain", p.gainDb).put("ytDur", p.ytDurationSec).put("addonDur", p.addonDurationSec)
+                .put("offset", p.offsetSec).put("gain", p.gainDb)
+                .put("want", p.gain == null || Double.isNaN(p.gain.wantDb) ? p.gainDb : p.gain.wantDb).put("ytDur", p.ytDurationSec).put("addonDur", p.addonDurationSec)
                 .put("score", p.score).put("rate", p.rate).put("channels", p.channels).put("codec", p.codec)
                 .put("isrc", p.isrc).put("tier", p.tier).put("atmos", p.atmos).put("at", System.currentTimeMillis());
         byte[] head = new byte[1 << 16];
@@ -279,7 +280,10 @@ public final class AddonDownloads {
         }
         if (p.atmos) {
             // Dolby Atmos plays from our decode of it (AtmosWav), a WAV in the cache deleted with the song
-            p.wav = AtmosWav.decode(p.file, new File(AddonPrep.dir(c), id + ".atmos.wav"), p.gainDb);
+            // the same boost as for playback, toward YouTube's loudness under the limiter
+            double db = AtmosWav.boostDb(p.gainDb, j.optDouble("want", p.gainDb));
+            p.wav = AtmosWav.decode(p.file, new File(AddonPrep.dir(c), id + ".atmos.wav"), db);
+            p.gainDb = db;
             p.file = p.wav;
             p.bakedDb = p.gainDb;
             p.gainDb = 0;

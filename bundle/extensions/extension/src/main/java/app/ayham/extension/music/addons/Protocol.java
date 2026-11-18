@@ -407,8 +407,11 @@ public final class Protocol {
         }
     }
 
-    private static final Pattern HLS = Pattern.compile("hls|m3u8|mpegurl", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DASH = Pattern.compile("dash|mpd|dash\\+xml", Pattern.CASE_INSENSITIVE);
+    private static final Pattern HTTPS = Pattern.compile("^https://", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LOCAL_HTTP = Pattern.compile("^http://(127\\.0\\.0\\.1|localhost)(:[0-9]+)?/", Pattern.CASE_INSENSITIVE);
+    // whole words as JS's \b sees them (ASCII word characters): "Dashboard" isn't DASH
+    private static final Pattern HLS = Pattern.compile("(?<![A-Za-z0-9_])(hls|m3u8)(?![A-Za-z0-9_])|mpegurl", Pattern.CASE_INSENSITIVE);
+    private static final Pattern DASH = Pattern.compile("(?<![A-Za-z0-9_])(dash|mpd)(?![A-Za-z0-9_])|dash\\+xml", Pattern.CASE_INSENSITIVE);
     private static final Pattern KHZ = Pattern.compile("([0-9.]+)[" + Js.WS + "]*kHz", Pattern.CASE_INSENSITIVE);
     private static final Pattern BITS = Pattern.compile("([0-9]{1,2})[" + Js.WS + "]*-?bit", Pattern.CASE_INSENSITIVE);
     private static final Pattern KBPS = Pattern.compile("([0-9]{2,4})[" + Js.WS + "]*kbps", Pattern.CASE_INSENSITIVE);
@@ -431,6 +434,9 @@ public final class Protocol {
             String e = Js.text(j.get("error"));
             return Stream.miss(e.isEmpty() ? "no url" : e);
         }
+        // https only, never probed otherwise (plain http to this device: the tests' mock server; the
+        // client refuses that too unless the addon itself is local)
+        if (!HTTPS.matcher(url).find() && !LOCAL_HTTP.matcher(url).find()) return Stream.miss("not https");
         Object enc = j.get("encrypted");
         String encText = Js.text(enc);
         if (!(Boolean.FALSE.equals(enc) || enc == null || Js.trim(encText).isEmpty()
@@ -449,7 +455,17 @@ public final class Protocol {
 
         Stream s = new Stream();
         s.url = url;
-        s.transport = HLS.matcher(allText).find() ? "hls" : DASH.matcher(allText).find() ? "dash" : "file";
+        // transport: the URL path's extension and the answer's own format fields, never words inside
+        // the host, query or a token (a progressive /Dashboard.flac or ?t=..mpd.. is a file)
+        Url pu = parse(url);
+        String path = pu == null ? "" : pu.path.toLowerCase(Locale.ROOT);
+        StringBuilder fields = new StringBuilder();
+        for (Object v : new Object[]{j.get("format"), quality, j.get("codec"), j.get("fileCodec"), j.get("container"),
+                j.get("containerFormat"), j.get("mimeType"), j.get("manifest"), j.get("mediaType")}) {
+            fields.append(Js.text(v)).append(' ');
+        }
+        s.transport = path.endsWith(".m3u8") || HLS.matcher(fields).find() ? "hls"
+                : path.endsWith(".mpd") || DASH.matcher(fields).find() ? "dash" : "file";
         Double sampleRate = Js.num(j.get("sampleRate"));
         if (sampleRate == null) sampleRate = Js.num(Js.group1(KHZ, allText));
         if (sampleRate != null && sampleRate < 1000) sampleRate *= 1000;
@@ -486,11 +502,15 @@ public final class Protocol {
         String mime = Js.text(j.get("mimeType"));
         s.mimeType = mime.isEmpty() ? null : mime;
 
-        // the headers the addon wants on the file request: valid names, string or number values
+        // the headers the addon wants on the file request: valid names, string or number values; never
+        // its User-Agent, Range or Accept-Encoding (one fixed UA, and ours)
         if (j.get("headers") instanceof Map) {
             for (Map.Entry<String, Object> e : ((Map<String, Object>) j.get("headers")).entrySet()) {
                 Object v = e.getValue();
-                if (HEADER_NAME.matcher(e.getKey()).matches() && (v instanceof String || v instanceof Number)) {
+                String k = e.getKey().toLowerCase(Locale.ROOT);
+                if (k.equals("user-agent") || k.equals("range") || k.equals("accept-encoding")) continue;
+                if (HEADER_NAME.matcher(e.getKey()).matches() && (v instanceof String || v instanceof Number)
+                        && Js.string(v).indexOf('\r') < 0 && Js.string(v).indexOf('\n') < 0) {
                     s.headers.put(e.getKey(), Js.string(v));
                 }
             }

@@ -51,7 +51,8 @@ final class Engine {
 
     static float ytVolume(Object player) {
         Float v = player == null ? null : ytAsked.get(player);
-        return v == null ? 1f : v;
+        // as heard: ExoPlayer clamps to 0..1
+        return v == null ? 1f : Math.max(0f, Math.min(1f, v));
     }
 
     /** Each player's last setVolume and what the gate gave it before the addon's share. */
@@ -67,6 +68,9 @@ final class Engine {
         if (player != null && StreamDeck.mutes(player)) v = 0f;
         else if (!holding) v = volume;
         else v = player == released ? volume : 0f;
+        // ExoPlayer clamps a volume to 0..1 (YT asks for more, e.g. 4.4): clamped here, so the addon's
+        // share turns YT down from the start of a fade and ours follows what is really heard
+        v = Math.max(0f, Math.min(1f, v));
         if (player == null) return v;
         gateIn.put(player, volume);
         gateOut.put(player, v);
@@ -135,6 +139,8 @@ final class Engine {
     private boolean deckTook, deckReleased;
     /** The outgoing song's deck, let go for this mix's takeover. */
     private StreamDeck releasedDeck;
+    /** The next song plays from an addon: its player takes the handover. */
+    private boolean addonIn;
 
     private static Biquad[] chain() {
         return new Biquad[]{new Biquad(Biquad.LOWSHELF, SR, 250), new Biquad(Biquad.HIGHSHELF, SR, 4000),
@@ -537,7 +543,9 @@ final class Engine {
         if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null
                 && ((aligned && speedSettled && mix >= m.elementAt - 0.3
                         // the stream deck lines up (silently) after the last nudge: up to 3 s for it
-                        && (deck == null || deck.inStep() || mix >= m.elementAt + 3))
+                        && (deck == null || deck.inStep() || mix >= m.elementAt + 3)
+                        // ...and so does the addon's player for the next song
+                        && (!addonIn || AddonDirect.inStep(inPlayer) || mix >= m.elementAt + 3))
                     || mix >= Math.min(m.elementAt + 8, deadline))) {
             handoverAt = mix + 0.3;
             LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
@@ -608,7 +616,10 @@ final class Engine {
         inPlayer = player;
         setVolume(player, 0f);
         // a song the addon plays (Direct) gets no stream deck: the addon's player is its deck
-        deck = app.ayham.extension.music.addons.AddonPrep.get(m.inId) != null ? null : StreamDeck.follow(Automix.context(), m.inId, player);
+        addonIn = app.ayham.extension.music.addons.AddonSettings.on() && app.ayham.extension.music.addons.AddonPrep.get(m.inId) != null;
+        deck = addonIn ? null : StreamDeck.follow(Automix.context(), m.inId, player);
+        // the addon's player for the next song locks on this one silently, to take the handover
+        if (addonIn) AddonDirect.follow(player, m.inId);
         settleUntil = 0;
         nudgeUntil = 0;
         errs.clear();
@@ -759,6 +770,9 @@ final class Engine {
             speedSetAt = now;
         }
         if (seeks == 0) {
+            // the song not begun on the deck yet: a seek now would land at 0 and YT run ahead of it by
+            // as much (w7: 1.9 s, w4: 5.4 s). It waits until the deck is half a second in.
+            if (Math.round(want * 1000) + Math.round(lead * base) < 500) return;
             seek(want, base, now);
             return;
         }
@@ -871,6 +885,7 @@ final class Engine {
     static void speed(Object player, float s) {
         StreamDeck.ytSpeed(player, s);
         speeds.put(player, s);
+        AddonDirect.onSpeed(player, s);
         try {
             player.getClass().getMethod("patch_setPlaybackParameters", float.class, float.class).invoke(player, s, 1f);
         } catch (Throwable t) {

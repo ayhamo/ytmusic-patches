@@ -4,13 +4,15 @@ What the extension and the phone app send to and expect from a music addon. It i
 
 An addon is an HTTP(S) server with three GET endpoints that return JSON. Parse leniently: ignore unknown keys, allow nulls, coerce values.
 
+Regular expressions here are JavaScript's: `\s` matches Unicode white space, while `\w`, `\d` and `\b` are ASCII only. A port in another language must match that. In Java/Kotlin, `\s` is ASCII unless `UNICODE_CHARACTER_CLASS` is on, and that flag also widens `\w`, `\d` and `\b`; so spell out the Unicode spaces in place of `\s` instead.
+
 ## 1. Requests, all endpoints
 
 Headers:
 - `Accept: application/json`
 - A browser User-Agent, never BitChord's **(ours, the user's call)**. The developer of tidotido blocks every request whose UA contains "bitchord", at Cloudflare and in the addon, on all his addons; any other agent is fine. On PC nothing is overridden and there is no setting for it (the user's call): the extension's background fetch sends Firefox's own UA. Where a client must set one (the phone), use a browser's, e.g. the BitChord fork's presets: Firefox `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0`, Edge `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0`. Cloudflare may still refuse node by its TLS/HTTP2 fingerprint, so judge an addon from the browser, not node.
 - Nothing else: no Origin, no Referer, no cookies (`credentials: omit`), no `bitchordAuth` headers.
-- The audio file request sends only the headers the `/stream` answer supplies (§4 `headers`), plus `Range`, with `Accept-Encoding: identity` (a compressed answer's sizes would be the compressed ones). The Fetch standard adds that header to every request with `Range` (browsers and node alike), so on PC nothing sets it by hand; a client outside fetch (the phone's OkHttp) sends it itself.
+- The audio file request sends only the headers the `/stream` answer supplies (§4 `headers`, without any `User-Agent`, `Range` or `Accept-Encoding` of the addon's: one fixed UA, and ours), plus our `Range` where one is used (the probe; a ranged download), always with `Accept-Encoding: identity` (a compressed answer's sizes would be the compressed ones). The Fetch standard adds that header to every request with `Range` (browsers and node alike), so on PC nothing sets it by hand; a client outside fetch (the phone's OkHttp) sends it itself.
 - Links hold their owner's token. Wherever a link could show (logs, errors, health, the popup, what the page gets, test output), only its host appears.
 - `https` only. Plain `http://localhost` and `http://127.0.0.1` links are allowed on PC for the local mock server in tests; the phone and release builds accept `https` only.
 
@@ -73,7 +75,7 @@ Cache the manifest 10 min and re-read its policy fields before each search and s
 
 | Field | Notes |
 |---|---|
-| `url` | |
+| `url` | `https` only: any other link is a miss (`not https`) and is never probed. (PC tests: plain `http` to 127.0.0.1 or localhost.) |
 | `format`; `quality` / `streamQuality` / `audioQuality` | Quality text. |
 | `codec` / `fileCodec`; `container` / `containerFormat`; `mimeType` | |
 | `manifest` / `mediaType` | `none`, `hls`, `dash`. |
@@ -82,11 +84,11 @@ Cache the manifest 10 min and re-read its policy fields before each search and s
 | `sampleRate` | Hz; under 1000 means kHz. |
 | `bitDepth` | |
 | `bitrate` | Over 3000 means bit/s, else kbps. Absent: 320 for HIGH, 128 for LOW. |
-| `headers` | Optional object of header name → string (a number is sent as text). Sent with the audio file request (and its probe), and nothing else is. Invalid names and other values are dropped. |
+| `headers` | Optional object of header name → string (a number is sent as text). Sent with the audio file request (and its probe), and nothing else is. Invalid names, other values, and `User-Agent`, `Range` and `Accept-Encoding` (any case) are dropped. |
 | the `cachedMarker` field (default `cached`) | A true flag: the file came from the service's cache and doesn't count against the uncached limit (4a). |
 | `error` | Logged; the answer is a miss. |
 
-Transport: HLS when any of the text says `hls`, `m3u8` or `mpegurl`; DASH for `dash`, `mpd` or `dash+xml`; else a progressive file. Missing numbers are read from the quality text: `([\d.]+)\s*kHz`, `(\d{1,2})\s*-?bit`, `(\d{2,4})\s*kbps`.
+Transport: from the URL's path extension and the answer's format fields only (`format`, the quality text, `codec`, `fileCodec`, `container`, `containerFormat`, `mimeType`, `manifest`, `mediaType`), never from words inside the host, the query or a token. HLS when the path ends in `.m3u8` or a field has the word `hls` or `m3u8` or contains `mpegurl`; DASH when the path ends in `.mpd` or a field has the word `dash` or `mpd` or contains `dash+xml`; else a progressive file (so `/Dashboard.flac` and `?t=…mpd…` are files). Missing numbers are read from the quality text: `([\d.]+)\s*kHz`, `(\d{1,2})\s*-?bit`, `(\d{2,4})\s*kbps`.
 
 Codec, first that applies: stated codec; container (flac/wav/mp3/aiff); MIME subtype; `flac` if the text says lossless; the URL's extension when it is an audio one (flac, mp3, m4a, aac, ogg, oga, opus, wav, aif, aiff, alac).
 
@@ -113,7 +115,7 @@ So `/stream` is never spent on speculation: the look-ahead for the next song is 
 
 ## 6. Caching
 
-Identical calls in flight share one request. Manifest 10 min, search 10 min (key `query|params`, so title and artist are part of it), stream URL 5 min. Empty `tracks` are cached; failures, 404s included, are not. At most 128 entries.
+Identical calls in flight share one request (optional for a client whose cache already covers repeats). Manifest 10 min, search 10 min (key `query|params`, so title and artist are part of it), stream URL 5 min. Empty `tracks` are cached; failures, 404s included, are not. At most 128 entries.
 
 ## 7. Matching a YouTube Music song to addon rows
 
@@ -146,12 +148,21 @@ These rules, and the tier, kbps, probe, parameter, stream-answer and base-URL re
 - Look-ahead (both apps): as soon as the next song is known, search the addons for it (FIND: manifest, search, pick; no `/stream`). Call `/stream` and the probe (OPEN) for the playing song when it starts, and for the next song only when the mix or the deck needs it. On PC the background keeps the addon links and the file URLs and gives the page a ticket (`src/addons/bg-addons.js`, `src/addons/page-addons.js`).
 - Extension (PC: YouTube-first with a deck switch only; decided 2026-11-17). There is no Direct mode: swapping the `<video>`'s source would break YouTube's player (it plays through MediaSource; seek, next and history depend on it). Instead:
   1. YouTube starts the song as always.
-  2. The picked row's file is fetched (by the background script, which holds the addon's host permission) and handed to the page.
+  2. The picked row's file is fetched (FETCH: by the background script, which holds the host permission and the file URL; at most 300 MB, 120 s) and handed to the page as bytes.
   3. Its timeline is fitted to YouTube's own audio (`offset-map.md`). A row that doesn't fit (another edit or master) is refused and the next row or addon is tried.
   4. The stream deck (Phase 2) plays the file on YouTube's clock, YouTube muted underneath, and takes over with a short crossfade. Its level is YouTube's element volume times the source gain (`offset-map.md`, Level).
   5. On any failure mid-song the deck hands back to YouTube, which is at the same spot.
-  Progressive files only for now; HLS and DASH rows are skipped.
-- Automix on addon audio (extension): the analysis stays on YouTube's audio. The mix decks play the addon file, every song time mapped through the offset map.
+  Progressive files only for now; HLS and DASH rows are skipped. The fit reads YouTube's audio of the song from Automix's download, so on PC addons need Crossfade and Automix on (`src/crossfade.js` addonTick).
+- The PC deck (`src/addons/buffer-deck.js`): the whole file, decoded at the audio context's rate (on PC the output device's rate; `decodeAudioData` resamples a 44.1 or 96 kHz file there, the one resample on the way out), played by buffer sources. Every start is on a whole output frame and a whole file sample, so the output is the file's own samples (measured: −152 dB residual against the decoded file).
+  - Its place comes from YouTube's output: a tap records what YouTube plays on exact frames, and its last 0.25 s is matched against the file (±0.35 s around YouTube's time). YouTube's time (plus the lead learnt from the last match) is a last resort only: after a seek the lead changes (measured 144 → 31 ms), so the time alone can be 0.1 s off.
+  - After a pause, a seek or a stall, the sound goes back to YouTube, the deck waits for 0.4 s of YouTube's new sound in the tap and tries the match up to 4 times, 0.25 s apart, then crosses back (50 ms). Nothing is silent meanwhile.
+  - Started by a mix (a take-over), it starts at the mix's schedule (a song position at an audio time) and keeps it: until 1.5 s after the take-over the player's state doesn't move it (the mix seeks and holds the player meanwhile).
+- Automix on addon audio (extension): the analysis and the plans stay on YouTube's audio. What plays is the addon's file wherever a copy is ready, every song time mapped through the offset map:
+  - the outgoing song's tail is cut from the file; when the deck plays the song, the tail goes on from the deck's own sample at the hand-over (not from where YouTube's copy was found), so deck → tail is sample-exact;
+  - the incoming deck of a blend, and both loop decks of a loop mix (a copy that arrives after the loop mix was loaded is loaded into its deck before the mix), play the file;
+  - the take-over hands the new song from the incoming deck to the addon deck at the schedule's song position.
+  - Filters that are part of the graph at rest (the player's and the tail's high- and low-pass) rest at 0 Hz and Nyquist, which pass the samples through unchanged, and the mix's filter curves end there. 20 Hz / 20 kHz still filtered every song (measured −15 to −30 dB residuals).
+  - The loop decks and a glide stretch time, so what they play is the file's sound, not its samples.
 - Phone (decided 2026-11-17): Direct with the offset first. Resolve and fit happen during the previous song (the look-ahead above, then OPEN and the fit before the hand-over). ExoPlayer plays the addon file clipped at `offsetSec`, so its position equals YouTube's time; a negative offset gets a silence prefix of `−offsetSec`. Its level is YouTube's normalisation gain applied as a sample gain, times the source gain (`offset-map.md`, Level). The deck is used only for a mid-song upgrade (a file that arrives after the song started): the race plus silent audition, same recording within the slack, worth swapping (lossless, or at least +96 kbps), at least 20 s left. Reason: the emulator's deck clock problems.
 - PC stays deck-only (above).
-- Downloads use only addons with `allowDownloads` not false; a lossy row must be over 256 kbps.
+- Downloads (phone only): only addons with `allowDownloads` not false; a lossy row must be over 256 kbps.

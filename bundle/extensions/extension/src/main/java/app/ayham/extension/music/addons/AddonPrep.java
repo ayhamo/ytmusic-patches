@@ -46,15 +46,77 @@ public final class AddonPrep {
         public OffsetFit.Gain gain;
         public int rate, channels;
         public String codec;
+        /** The file's loudness (dBFS, mono RMS) every ENV_HOP seconds of its own time: where it is quiet. */
+        public float[] env;
+        public static final double ENV_HOP = Envelope.HOP;
 
+        /**
+         * The quietest ENV_HOP of the file between YouTube times [fromSec, toSec), as YouTube
+         * seconds; NaN when the window is outside the file.
+         */
+        public double quietest(double fromSec, double toSec) {
+            if (env == null) return Double.NaN;
+            int a = (int) Math.max(0, Math.ceil((fromSec + offsetSec) / ENV_HOP)), b = (int) Math.min(env.length, Math.floor((toSec + offsetSec) / ENV_HOP));
+            int best = -1;
+            for (int i = a; i < b; i++) if (best < 0 || env[i] < env[best]) best = i;
+            return best < 0 ? Double.NaN : best * ENV_HOP - offsetSec;
+        }
+
+        /** The file's level at YouTube time sec (dBFS), or 0 outside it. */
+        public float levelAt(double sec) {
+            int i = (int) Math.floor((sec + offsetSec) / ENV_HOP);
+            return env == null || i < 0 || i >= env.length ? 0f : env[i];
+        }
+
+        /**
+         * The gain our player and the mix decks apply: at most 0 dB, since the player's volume stops at
+         * 1 and a boost the decks alone had would step the level at a takeover or hand-over.
+         */
         public float gainLinear() {
-            return (float) Math.pow(10, gainDb / 20);
+            return (float) Math.pow(10, Math.min(0, gainDb) / 20);
         }
 
         @Override
         public String toString() {
             return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s %d Hz %d ch, score %.3f", id, addon, offsetSec, gainDb,
                     gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", codec, rate, channels, score);
+        }
+    }
+
+    /** Mono RMS in dBFS per HOP seconds, in order. */
+    static final class Envelope {
+        static final double HOP = 0.05;
+        private int hop;
+        private double acc;
+        private int n;
+        private float[] out = new float[4096];
+        private int len;
+
+        void format(int rate) {
+            hop = Math.max(1, (int) Math.round(rate * HOP));
+        }
+
+        void add(float[][] planar, int frames) {
+            int ch = planar.length;
+            for (int f = 0; f < frames; f++) {
+                float s = 0;
+                for (int c = 0; c < ch; c++) s += planar[c][f];
+                s /= ch;
+                acc += s * (double) s;
+                if (++n == hop) push();
+            }
+        }
+
+        private void push() {
+            if (len == out.length) out = java.util.Arrays.copyOf(out, len * 2);
+            out[len++] = (float) (10 * Math.log10(acc / n + 1e-12));
+            acc = 0;
+            n = 0;
+        }
+
+        float[] done() {
+            if (n > 0) push();
+            return java.util.Arrays.copyOf(out, len);
         }
     }
 
@@ -170,9 +232,13 @@ public final class AddonPrep {
                 working = null;
                 if (p != null) {
                     ready.put(id, p);
-                    while (ready.size() > KEEP) {
-                        String eldest = ready.keySet().iterator().next();
-                        deleteFiles(ready.remove(eldest));
+                    // the eldest first, never one our player is on (its next seek reopens the file)
+                    java.util.Iterator<Map.Entry<String, Prepared>> it = ready.entrySet().iterator();
+                    while (ready.size() > KEEP && it.hasNext()) {
+                        Map.Entry<String, Prepared> e = it.next();
+                        if (app.ayham.extension.music.automix.AddonDirect.inUse(e.getKey())) continue;
+                        it.remove();
+                        deleteFiles(e.getValue());
                     }
                 } else {
                     failedAt.put(id, SystemClock.elapsedRealtime());
@@ -180,6 +246,17 @@ public final class AddonPrep {
             }
             Log.i(TAG, (p != null ? "ready: " + p : "not from an addon: " + id + " (" + why + ")") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
         }
+    }
+
+    /** The fetched file of a song not prepared (whatever its extension). */
+    private static File fileFor(Context c, String id) {
+        File[] fs = dir(c).listFiles((d, n) -> n.startsWith(id + ".") && !n.endsWith(".part"));
+        return fs == null || fs.length == 0 ? null : fs[0];
+    }
+
+    private static void deleteQuietly(File f) {
+        //noinspection ResultOfMethodCallIgnored
+        if (f != null) f.delete();
     }
 
     private static void deleteFiles(Prepared p) {
@@ -193,7 +270,7 @@ public final class AddonPrep {
     public static void clearCache(Context c) {
         new Thread(() -> {
             int n = 0;
-            for (File d : new File[]{dir(c), app.ayham.extension.music.automix.AddonPcm.tempDir(c)}) {
+            for (File d : new File[]{dir(c), new File(c.getCacheDir(), "addons/yt")}) {
                 File[] fs = d.listFiles();
                 if (fs != null) for (File f : fs) if (f.isFile() && f.delete()) n++;
             }
@@ -235,8 +312,8 @@ public final class AddonPrep {
             });
             ytFit.finish();
         } finally {
-            // fetched only for this fit (the stream deck keeps its own copies)
-            if (yt.getParentFile() != null && yt.getParentFile().equals(app.ayham.extension.music.automix.AddonPcm.tempDir(c))) //noinspection ResultOfMethodCallIgnored
+            // not kept (addons switched off during the download): nobody else needs it
+            if (yt.getParentFile() != null && "dl".equals(yt.getParentFile().getName())) //noinspection ResultOfMethodCallIgnored
                 yt.delete();
         }
         final double ytDur = ytSide.durationSec(), ytLufs = ytSide.lufs();
@@ -263,6 +340,7 @@ public final class AddonPrep {
                 got[0] = p;
                 return null;
             } catch (Throwable e) {
+                if (!app.ayham.extension.music.automix.AddonDirect.inUse(id)) deleteQuietly(fileFor(c, id));
                 return "fetch or decode failed: " + Protocol.scrub(String.valueOf(e));
             }
         };
@@ -272,7 +350,12 @@ public final class AddonPrep {
             return null;
         }
         Prepared p = got[0];
-        app.ayham.extension.music.automix.AddonPcm.write(c, p);
+        try {
+            app.ayham.extension.music.automix.AddonPcm.write(c, p);
+        } catch (Throwable e) {
+            deleteFiles(p);
+            throw e;
+        }
         return p;
     }
 
@@ -290,11 +373,12 @@ public final class AddonPrep {
             int code = h.getResponseCode();
             if (code != 200 && code != 206) throw new IOException("audio: HTTP " + code);
             byte[] b = new byte[1 << 16];
-            long total = 0;
+            long total = 0, until = t0 + 120_000;
             for (int n; (n = in.read(b)) > 0; ) {
                 out.write(b, 0, n);
                 total += n;
-                if (total > 400L << 20) throw new IOException("over 400 MB");
+                if (total > 300L << 20) throw new IOException("over 300 MB");
+                if (SystemClock.elapsedRealtime() > until) throw new IOException("download over 120 s");
             }
             done = true;
         } finally {
@@ -310,6 +394,7 @@ public final class AddonPrep {
         final AudioDecode.ToFit fit = new AudioDecode.ToFit(side);
         final OffsetFit.PeakMeter[] peaks = new OffsetFit.PeakMeter[1];
         final int[] fmt = new int[2];
+        final Envelope env = new Envelope();
         AudioDecode.decode(f, new AudioDecode.Sink() {
             @Override
             public void format(int rate, int channels) {
@@ -317,12 +402,14 @@ public final class AddonPrep {
                 fmt[1] = channels;
                 fit.format(rate);
                 peaks[0] = new OffsetFit.PeakMeter(channels);
+                env.format(rate);
             }
 
             @Override
             public void block(float[][] planar, int frames) throws IOException {
                 AddonPrep.waitWhileHeld();
                 fit.add(planar, frames);
+                env.add(planar, frames);
                 for (int ch = 0; ch < planar.length; ch++) peaks[0].add(ch, planar[ch], 0, frames);
             }
         });
@@ -338,6 +425,7 @@ public final class AddonPrep {
         p.channels = fmt[1];
         p.ytDurationSec = ytDur;
         p.addonDurationSec = side.durationSec();
+        p.env = env.done();
         Log.i(TAG, String.format(Locale.US, "%s: %s's file decoded and fitted in %d ms: %s", id, o.addon.name, SystemClock.elapsedRealtime() - t1, r));
         if (r.none != null) {
             p.score = -1;

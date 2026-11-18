@@ -356,8 +356,7 @@ public class AddonClientTest {
         assertEquals(1, hitsOf("limited", "stream").size());
         Map<String, String> want = new LinkedHashMap<>();
         want.put("X-Token", "abc");
-        want.put("User-Agent", "BitChord");
-        assertEquals(want, got.stream.headers);
+        assertEquals("the addon's User-Agent is dropped when read", want, got.stream.headers);
         Hit probe = hitsOf("limited", "file").get(0);
         assertEquals("abc", probe.headers.get("X-Token"));
         assertEquals("our agent replaces the addon's", Protocol.USER_AGENT, probe.headers.get("User-Agent"));

@@ -271,7 +271,8 @@ final class Analyzer {
     // Download and decode
 
     private static File download(Context c, String videoId) throws Exception {
-        return AudioStream.download(new File(c.getCacheDir(), "automix/dl"), videoId);
+        // shared with the addons' fit: one download per song
+        return StreamDeck.youtubeCopy(c, videoId);
     }
 
     /** One decode of a song: its mono (for the analysis) and its stereo opening and end (for the decks). */
@@ -574,8 +575,9 @@ final class Analyzer {
             d = decode(file, headTmp, tailTmp);
             decoded = true;
         } finally {
-            // kept for the stream deck ("Smooth hand-over"), else deleted
-            if (decoded) StreamDeck.keep(c, id, file);
+            // kept for the stream deck ("Smooth hand-over") and the addons' fit, else deleted; a failed
+            // decode leaves a kept copy to the fit (it reads it on its own, and fails on its own)
+            if (decoded || StreamDeck.keeps()) StreamDeck.keep(c, id, file);
             else //noinspection ResultOfMethodCallIgnored
                 file.delete();
         }

@@ -117,9 +117,53 @@ final class StreamDeck {
         return new File(c.getCacheDir(), "automix/deck");
     }
 
-    /** The analysis' download, kept for the deck (the last few songs), else deleted. */
+    /** YouTube's copies are kept for the stream deck or for the addons' fit. */
+    static boolean keeps() {
+        return on() || app.ayham.extension.music.addons.AddonSettings.on();
+    }
+
+    private static final java.util.Map<String, Object> fetching = new java.util.HashMap<>();
+
+    /**
+     * YouTube's copy of a song, downloaded once for the analysis, the stream deck and the addons'
+     * fit: a second caller for the same song waits for the first one's download. Kept (the last
+     * few songs) when keeps(), else the caller deletes it after use.
+     */
+    public static File youtubeCopy(Context c, String id) throws Exception {
+        Object lock;
+        synchronized (fetching) {
+            lock = fetching.get(id);
+            if (lock == null) fetching.put(id, lock = new Object());
+        }
+        try {
+            synchronized (lock) {
+                File f = fileOf(c, id);
+                if (f != null) {
+                    //noinspection ResultOfMethodCallIgnored
+                    f.setLastModified(System.currentTimeMillis());
+                    return f;
+                }
+                File dl = app.ayham.extension.music.features.AudioStream.download(new File(c.getCacheDir(), "automix/dl"), id);
+                if (!keeps()) {
+                    String n = dl.getName();
+                    File own = new File(dl.getParentFile(), n.replace(".", "." + System.nanoTime() + "."));
+                    return dl.renameTo(own) ? own : dl;
+                }
+                keep(c, id, dl);
+                f = fileOf(c, id);
+                if (f == null) throw new java.io.IOException("YouTube's copy could not be kept");
+                return f;
+            }
+        } finally {
+            synchronized (fetching) {
+                if (fetching.get(id) == lock) fetching.remove(id);
+            }
+        }
+    }
+
+    /** A download kept for the deck and the fit (the last few songs), else deleted. */
     static void keep(Context c, String id, File download) {
-        if (!on()) {
+        if (!keeps()) {
             //noinspection ResultOfMethodCallIgnored
             download.delete();
             return;
@@ -129,7 +173,7 @@ final class StreamDeck {
         d.mkdirs();
         String n = download.getName();
         File to = new File(d, id + n.substring(n.lastIndexOf('.')));
-        if (!download.renameTo(to)) {
+        if (!download.equals(to) && !download.renameTo(to)) {
             //noinspection ResultOfMethodCallIgnored
             download.delete();
             return;

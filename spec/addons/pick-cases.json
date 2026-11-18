@@ -944,6 +944,7 @@
   {
    "name": "settings in order, atmos=false, quality last: LOSSLESS takes the first option",
    "manifest": {
+    "id": "case.1",
     "settings": [
      {
       "key": "region",
@@ -995,6 +996,7 @@
   {
    "name": "LOSSLESS: the user's pick when still listed",
    "manifest": {
+    "id": "case.2",
     "settings": [
      {
       "key": "region",
@@ -1046,6 +1048,7 @@
   {
    "name": "LOSSLESS: a pick no longer listed falls back to the first",
    "manifest": {
+    "id": "case.3",
     "settings": [
      {
       "key": "region",
@@ -1097,6 +1100,7 @@
   {
    "name": "HIGH: by label (320)",
    "manifest": {
+    "id": "case.4",
     "settings": [
      {
       "key": "region",
@@ -1148,6 +1152,7 @@
   {
    "name": "LOW: nothing matches: the first option",
    "manifest": {
+    "id": "case.5",
     "settings": [
      {
       "key": "region",
@@ -1199,6 +1204,7 @@
   {
    "name": "no quality setting: the tier name",
    "manifest": {
+    "id": "case.6",
     "settings": []
    },
    "tier": "LOW",
@@ -1393,6 +1399,131 @@
    },
    "expect": {
     "miss": "gone"
+   }
+  },
+  {
+   "name": "an addon's User-Agent, Range and Accept-Encoding are dropped (one fixed UA; ours)",
+   "answer": {
+    "url": "https://cdn/x.flac",
+    "codec": "flac",
+    "headers": {
+     "User-Agent": "BitChord/v1.9.1",
+     "range": "bytes=5-",
+     "Accept-Encoding": "gzip",
+     "X-Key": "k"
+    }
+   },
+   "expect": {
+    "codec": "flac",
+    "transport": "file",
+    "tier": "LOSSLESS",
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {
+     "X-Key": "k"
+    },
+    "cached": false
+   }
+  },
+  {
+   "name": "a plain http stream link is refused, not probed",
+   "answer": {
+    "url": "http://cdn.example/x.flac",
+    "codec": "flac"
+   },
+   "expect": {
+    "miss": "not https"
+   }
+  },
+  {
+   "name": "a progressive file whose path has \"dash\" in a word",
+   "answer": {
+    "url": "https://cdn/Dashboard.flac"
+   },
+   "expect": {
+    "codec": "flac",
+    "transport": "file",
+    "tier": null,
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {},
+    "cached": false
+   }
+  },
+  {
+   "name": "a progressive file whose token has \"mpd\" in it",
+   "answer": {
+    "url": "https://cdn/x.flac?t=xxmpdxx"
+   },
+   "expect": {
+    "codec": "flac",
+    "transport": "file",
+    "tier": null,
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {},
+    "cached": false
+   }
+  },
+  {
+   "name": "a progressive file on a host named hls",
+   "answer": {
+    "url": "https://hls.cdn/x.mp3"
+   },
+   "expect": {
+    "codec": "mp3",
+    "transport": "file",
+    "tier": null,
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {},
+    "cached": false
+   }
+  },
+  {
+   "name": "HLS by the path extension",
+   "answer": {
+    "url": "https://cdn/a.m3u8"
+   },
+   "expect": {
+    "codec": null,
+    "transport": "hls",
+    "tier": null,
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {},
+    "cached": false
+   }
+  },
+  {
+   "name": "DASH by the path extension, a query after it",
+   "answer": {
+    "url": "https://cdn/a.mpd?t=1"
+   },
+   "expect": {
+    "codec": null,
+    "transport": "dash",
+    "tier": null,
+    "sampleRate": null,
+    "bitDepth": null,
+    "bitrate": null,
+    "headers": {},
+    "cached": false
+   }
+  },
+  {
+   "name": "HLS from the MIME type",
+   "answer": {
+    "url": "https://cdn/x",
+    "mimeType": "application/vnd.apple.mpegurl"
+   },
+   "expect": {
+    "transport": "hls"
    }
   }
  ],

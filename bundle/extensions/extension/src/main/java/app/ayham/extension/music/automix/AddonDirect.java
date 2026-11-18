@@ -1,12 +1,17 @@
 package app.ayham.extension.music.automix;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.RandomAccessFile;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,13 +30,24 @@ import app.ayham.extension.music.features.SeekAccess;
 /**
  * Direct mode (protocol.md §8, the phone): a song prepared from an addon plays on our own player
  * (YT's media3 classes, the local file), kept on YT's player's clock (addonTime = youtubeTime +
- * offsetSec) while YT's player runs on muted underneath as the clock and the fallback. Locked
- * silently first (seeks, then speed nudges while unheard), then a short crossfade from YT's audio
- * to the addon's; YT's own volume (its normalisation, Morphe's and automix's fades, the gate)
- * times the source gain sets ours. Any trouble hands the song back to YT's player at once.
+ * offsetSec) while YT's player runs on muted underneath as the clock, for seek, next and history,
+ * and as the fallback. YT's own volume (its normalisation, Morphe's and automix's fades, the gate)
+ * times the source gain sets ours.
  *
- * <p>No speed change while the addon is heard: a change re-plans ExoPlayer's audio and is heard as
- * a cut (phone, 2026-11-17). A drift is corrected by a silent re-lock (crossfade to YT and back).
+ * <ul>
+ * <li>A prepared song that starts (after a song ends, a skip, a hand-over) plays from its start on
+ * the addon, YT's audio never heard: the next song's player is armed ahead, paused at its start.
+ * <li>A song started cold (prepared while it plays, or its player not ready yet) is upgraded
+ * mid-song: locked silently (a seek only when far off; else a short silent speed nudge, measured on
+ * both players' clocks), then a 200 ms crossfade.
+ * <li>In an automix mix the incoming song's player locks silently while the decks play, and the
+ * engine hands over to it (it waits for it as it does for the stream deck).
+ * <li>Drift: no speed nudges while heard (a speed change re-plans ExoPlayer's audio, heard as a cut);
+ * a drift over 20 ms is set right at the quietest point of the next seconds: a 30 ms crossfade to
+ * YT (in step underneath, so nothing goes silent), the silent lock, the crossfade back.
+ * <li>Any failure (player error, file gone, a stall) hands the song back to YT's player, which is in
+ * step underneath, at once; the song is not played from the addon again for 10 min.
+ * </ul>
  */
 public final class AddonDirect {
     private static final String TAG = "AyhamDirect";
@@ -39,15 +55,32 @@ public final class AddonDirect {
     private static final long TICK_MS = 10;
     /** A length within this of YouTube's: the player holds this song. */
     private static final double SAME_SONG_SEC = 2;
-    private static final long FADE_IN_MS = 200, FADE_OUT_MS = 150;
+    /** YT's position under this: the song is starting, so it plays from its start on the addon. */
+    private static final long START_MS = 3000;
+    private static final long FADE_IN_MS = 200, START_FADE_MS = 20, RESYNC_FADE_MS = 30;
+    /**
+     * Locking: a seek when this far off; nearer, a silent speed nudge of NUDGE_MS at the rate that
+     * makes it up (at most MAX_NUDGE). A shorter speed change is lost: ExoPlayer applies speeds
+     * where its buffered audio drains, so one undone within ~0.2 s may never be heard at all.
+     */
+    private static final long SEEK_OVER_MS = 400, NUDGE_MS = 800, GROSS_MS = 1500, PAUSED_JUMP_MS = 600;
+    private static final float MAX_NUDGE = 0.5f;
+    /** A start this far off where YT is: set right by a seek before it is heard. */
+    private static final long START_OFF_MS = 150;
+    /** In step: within this (LOOSE after 4 corrections). Drift: past this, a resync. */
+    private static final long LOCK_MS = 10, LOCK_LOOSE_MS = 20, DRIFT_MS = 30;
     private static final Map<Object, Shadow> shadows = new IdentityHashMap<>();
+    /** The next song's player, opened and paused at its start, before YT gets to it. */
+    private static volatile Shadow armed;
+    /** The seek latency learned on this device (ms our audio lands behind a seek's target). */
+    private static long learnedLead;
     private static Context ctx;
     private static boolean started;
     private static long lastQueue;
     private static volatile boolean pausedByYt;
     /** When YT paused: its last reading or two still arrive just after, they aren't a resume. */
     private static volatile long pausedAt;
-    /** Debug (spike prop directTrace=1): every clock reading logged. */
+    /** Debug (spike prop directTrace=1): every clock reading and error logged. */
     private static boolean TRACE;
 
     private AddonDirect() {
@@ -61,12 +94,25 @@ public final class AddonDirect {
         started = true;
         AddonPrep.clearCache(ctx);
         TRACE = "1".equals(Features.prop("directTrace"));
+        if ("1".equals(Features.prop("directTest"))) registerTest();
         main.postDelayed(AddonDirect::tick, 2000);
     }
 
     private static Shadow get(Object host) {
         synchronized (shadows) {
             return shadows.get(host);
+        }
+    }
+
+    private static void put(Object host, Shadow s) {
+        synchronized (shadows) {
+            shadows.put(host, s);
+        }
+    }
+
+    private static List<Shadow> list() {
+        synchronized (shadows) {
+            return new ArrayList<>(shadows.values());
         }
     }
 
@@ -84,12 +130,44 @@ public final class AddonDirect {
         else main.post(() -> s.volume(Engine.gateOut(host)));
     }
 
+    /** Automix changed YT's player's speed: ours changes in the same moment. */
+    static void onSpeed(Object host, float speed) {
+        Shadow s = get(host);
+        if (s != null && Looper.myLooper() == Looper.getMainLooper()) s.followSpeed(speed, SystemClock.elapsedRealtime());
+    }
+
     /** The song's addon audio is heard now (the mix decks use it for this song's end). */
     static boolean audibleFor(String id) {
         synchronized (shadows) {
-            for (Shadow s : shadows.values()) if (s.p.id.equals(id) && s.share >= 0.5f) return true;
+            for (Shadow s : shadows.values()) if (s.p.id.equals(id) && s.share >= 0.5f && s.heard()) return true;
         }
         return false;
+    }
+
+    /** A player of ours (playing or armed) is on this song: its files must stay. */
+    public static boolean inUse(String id) {
+        Shadow a = armed;
+        if (a != null && !a.done && a.p.id.equals(id)) return true;
+        synchronized (shadows) {
+            for (Shadow s : shadows.values()) if (!s.done && s.p.id.equals(id)) return true;
+        }
+        return false;
+    }
+
+    /** The player for this YT player is in step: a mix can hand over to it. */
+    static boolean inStep(Object host) {
+        Shadow s = get(host);
+        return s != null && !s.done && s.mode == Mode.ON && s.ready();
+    }
+
+    /** Automix holds YT's next player silent for a mix: the addon's player locks on it now. */
+    static void follow(Object host, String id) {
+        AddonPrep.Prepared p = AddonPrep.get(id);
+        if (host == null || p == null || !AddonSettings.on() || AddonPrep.failed(id)) return;
+        Shadow s = get(host);
+        if (s != null && s.p == p && !s.done) return;
+        Shadow n = begin(host, p, Automix.position(host), false, true);
+        if (s != null && n != null) s.end("the mix's next song", false);
     }
 
     /** Morphe's onPauseVideo: our players stop with YT's at once (the clock check is the backup). */
@@ -101,17 +179,12 @@ public final class AddonDirect {
         });
     }
 
-    private static List<Shadow> list() {
-        synchronized (shadows) {
-            return new ArrayList<>(shadows.values());
-        }
-    }
-
     private static void tick() {
         long next = TICK_MS;
         try {
             if (!AddonSettings.on()) {
                 for (Shadow s : list()) s.end("addons off", false);
+                disarm();
                 AddonPrep.held = false;
                 next = 500;
             } else {
@@ -121,6 +194,12 @@ public final class AddonDirect {
             Log.e(TAG, "tick failed", t);
         }
         main.postDelayed(AddonDirect::tick, next);
+    }
+
+    private static void disarm() {
+        Shadow a = armed;
+        armed = null;
+        if (a != null) a.end("not needed", false);
     }
 
     private static void step() throws Exception {
@@ -136,36 +215,58 @@ public final class AddonDirect {
             AddonPrep.request(ctx, next, q[4], q[5], Features.isMusicVideo(next), false);
 
         Object host = PlayerTap.current();
+        AddonPrep.Prepared onHost = null;
         if (host != null) {
             // the song on the host: the prepared one (current first, then next: right after YT moves on
             // the queue can still name the song before) whose length is the host's
             double dur = Automix.duration(host) / 1000.0;
-            AddonPrep.Prepared p = null;
+            long pos = Automix.position(host);
             for (String id : new String[]{cur, next}) {
                 AddonPrep.Prepared c = AddonPrep.get(id);
-                if (c != null && dur > 0 && Math.abs(dur - c.ytDurationSec) <= SAME_SONG_SEC) {
-                    p = c;
+                if (c != null && dur > 0 && Math.abs(dur - c.ytDurationSec) <= SAME_SONG_SEC && !AddonPrep.failed(id)) {
+                    onHost = c;
                     break;
                 }
             }
             Shadow s = get(host);
-            if (s != null && p != null && s.p != p) s.end("the next song", false);
-            if (p != null && (s == null || s.done) && Automix.position(host) < (p.ytDurationSec - 20) * 1000) {
-                s = new Shadow(host, p);
-                synchronized (shadows) {
-                    shadows.put(host, s);
-                }
-                s.open();
+            // in a mix the incoming song is the engine's: follow() locks it on the held player, silent
+            // until the hand-over; it never starts here as a song starting on its own
+            boolean mix = Automix.mixing();
+            // the length tells songs apart only when they differ by over 2 s: one the queue no longer names
+            // (refreshed every 1.5 s) is gone too
+            boolean named = cur == null || s == null || s.p.id.equals(cur) || s.p.id.equals(next);
+            if (s != null && !s.done && s.p != onHost && dur > 0 && (Math.abs(dur - s.p.ytDurationSec) > SAME_SONG_SEC || !named)) {
+                // YT's player moved to another song: a prepared one carries on on the addon from its
+                // start with YT kept silent; else YT's audio comes back
+                Shadow n = onHost == null || mix ? null : begin(host, onHost, pos, s.share >= 0.5f, false);
+                s.end(n != null ? "the next song is on the addon" : "another song on YT's player", false);
+            } else if ((s == null || s.done) && onHost != null && !mix) {
+                begin(host, onHost, pos, false, false);
             }
+        }
+        // the next song's player, armed ahead: a prepared song YT moves to starts on it at once
+        AddonPrep.Prepared pn = next == null ? null : AddonPrep.get(next);
+        if (armed != null && (pn == null || armed.p != pn || AddonPrep.failed(next))) disarm();
+        if (pn != null && pn != onHost && !AddonPrep.failed(next) && armed == null) {
+            armed = new Shadow(pn);
+            armed.open(0, false);
+            if (armed.done) armed = null;
         }
         boolean locking = false;
         for (Shadow s : list()) {
-            if (!s.done) s.tick(now);
+            if (!s.done) {
+                try {
+                    s.tick(now);
+                } catch (Throwable t) {
+                    Log.e(TAG, s.p.id + ": tick failed", t);
+                    s.end("an error (" + t + ")", true);
+                }
+            }
             if (s.done) {
                 synchronized (shadows) {
                     if (shadows.get(s.host) == s) shadows.remove(s.host);
                 }
-            } else if (s.host == host && s.share < 1) {
+            } else if (s.host == host && s.mode != Mode.ON) {
                 locking = true;
             }
         }
@@ -173,38 +274,111 @@ public final class AddonDirect {
         AddonPrep.held = Automix.mixing();
     }
 
-    /** Our player for one of YT's players. */
+    /**
+     * Our player takes the song on [host]. A song starting (or YT already silent under the addon)
+     * plays from where YT is, heard at once; one under way locks silently first. Null when it is
+     * too late in the song for an upgrade.
+     */
+    private static Shadow begin(Object host, AddonPrep.Prepared p, long ytPos, boolean ytSilent, boolean forMix) {
+        boolean fromStart = !forMix && (ytPos < START_MS || ytSilent);
+        if (!fromStart && ytPos > (p.ytDurationSec - 20) * 1000) return null;
+        Shadow n = null;
+        if (armed != null && armed.p == p && !armed.done) {
+            n = armed;
+            armed = null;
+        }
+        if (n == null) {
+            n = new Shadow(p);
+            n.open(Math.max(0, ytPos), false);
+            if (n.done) return null;
+        }
+        n.host = host;
+        n.forMix = forMix;
+        put(host, n);
+        // a player not ready yet would start late, and one off YT's start can't be set right
+        // unheard: YT carries the start (it is heard anyway) and ours locks on it. Only under a
+        // silent YT (the song before was on the addon) ours seeks there, a moment silent.
+        if (fromStart && (!n.ready() || (!ytSilent && n.offBy(ytPos) > START_OFF_MS))) fromStart = false;
+        if (fromStart) n.startHeard(ytPos, ytSilent);
+        else n.startLocking(ytPos);
+        return n;
+    }
+
+    enum Mode {ARMED, LOCKING, ON, TAIL}
+
+    /** Our player for one of YT's players (host null while armed). */
     private static final class Shadow {
-        final Object host;
+        Object host;
         final AddonPrep.Prepared p;
         final float gain;
         Object pl;
         Method state, pos, play, vol, speed;
-        boolean done, on, playing;
+        Mode mode = Mode.ARMED;
+        volatile boolean done;
+        boolean playing;
+        /** Locks on a mix's held incoming player (never started heard). */
+        boolean forMix;
         volatile float share;
         float fadeFrom, fadeTo;
         long fadeAt, fadeMs;
-        long lastYt = -1, lastYtAt;
+        long lastYt = Long.MIN_VALUE, lastYtAt;
         boolean moving;
         final StepClock ytClock = new StepClock(), ourClock = new StepClock();
-        int seeks, nudges, relocks;
-        long seekLead, settleUntil, nudgeUntil, stallFrom, openedAt;
+        int seeks, resyncs;
+        long lead = learnedLead, settleUntil, stallFrom, openedAt, tailUntil;
+        /** A resync waits for this YT time (ms), the quietest point ahead; MIN_VALUE when none. */
+        long resyncAt = Long.MIN_VALUE;
+        /** A silent speed nudge runs until then (0: none); a start's seek may buffer until then. */
+        long nudgeUntil, startGraceUntil;
+        boolean lastWasSeek, pausedJump;
+        /** Our player's audio session (the equalizer), 0 when none. */
+        int session;
+        int grossSeeks;
+        long lastM;
         float speedSet = 1f;
+        /** The running nudge's rate as a factor of YT's speed (1: none). */
+        float nudgeFactor = 1f;
         float lastVol = -1;
-        boolean justSeeked, cappedLogged;
+        boolean cappedLogged;
         final StringBuilder log = new StringBuilder();
 
-        Shadow(Object host, AddonPrep.Prepared p) {
-            this.host = host;
+        Shadow(AddonPrep.Prepared p) {
             this.p = p;
             this.gain = p.gainLinear();
         }
 
-        double target(long yt) {
+        double target(double yt) {
             return yt + p.offsetSec * 1000;
         }
 
-        void open() {
+        boolean ready() {
+            try {
+                return pl != null && (int) state.invoke(pl) == 3;
+            } catch (Throwable t) {
+                return false;
+            }
+        }
+
+        /** How far our player is from where a seek to YouTube time ytMs puts it (lead, clamped at 0). */
+        long offAt(long ytMs) {
+            try {
+                return Math.abs((long) pos.invoke(pl) - Math.max(0, Math.round(target(ytMs)) + lead));
+            } catch (Throwable t) {
+                return Long.MAX_VALUE;
+            }
+        }
+
+        /** How far our player is from YouTube time ytMs. */
+        long offBy(long ytMs) {
+            try {
+                return Math.abs((long) pos.invoke(pl) - Math.round(target(ytMs)));
+            } catch (Throwable t) {
+                return Long.MAX_VALUE;
+            }
+        }
+
+        /** Opens the file at YouTube time ytMs, paused (play: playing). */
+        void open(long ytMs, boolean playNow) {
             try {
                 openedAt = SystemClock.elapsedRealtime();
                 ClassLoader cl = ctx.getClassLoader();
@@ -226,18 +400,63 @@ public final class AddonDirect {
                 Object mib = cdv.getConstructor().newInstance();
                 cdv.getField("b").set(mib, Uri.fromFile(p.file));
                 Object src = dme.getMethod("a", ceg).invoke(factory, cdv.getMethod("a").invoke(mib));
-                long at = Math.max(0, Math.round(target(Automix.position(host))));
+                long at = Math.max(0, Math.round(target(ytMs)));
                 ctb.getMethod("ae", List.class, long.class).invoke(pl, Collections.singletonList(src), at);
                 ctb.getMethod("z").invoke(pl);
                 vol.invoke(pl, 0f);
                 lastVol = 0;
-                justSeeked = true;
-                AddonPlayback.playing(pl, p.addon, false);
-                Log.i(TAG, "addon player for " + p);
+                // YT's equalizer preset on our audio too (its sessions get it from their broadcasts;
+                // ours is never announced). "a": the player's audio session (probed: matches audioflinger's)
+                try {
+                    Method m = pl.getClass().getMethod("a");
+                    if (m.getReturnType() == int.class) {
+                        session = (int) m.invoke(pl);
+                        if (session > 0) app.ayham.extension.music.features.EqPresets.attachDeck(session);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "no audio session for the equalizer", t);
+                }
+                if (playNow) play(true);
+                Log.i(TAG, "addon player for " + p + " opened at " + at + " ms");
             } catch (Throwable t) {
                 Log.e(TAG, "addon player failed to open", t);
                 end("could not open the file", true);
             }
+        }
+
+        /** A song starting: heard at once, YT silent; the start error is set right at a quiet point. */
+        void startHeard(long ytPos, boolean ytSilent) {
+            mode = Mode.ON;
+            // a skip pauses YT for a moment (onPauseVideo): not a pause of this song
+            if (SystemClock.elapsedRealtime() - pausedAt < 400) pausedByYt = false;
+            // a nudge running from the lock: off, at YT's speed
+            if (nudgeUntil != 0) {
+                nudgeUntil = 0;
+                nudgeFactor = 1f;
+                try {
+                    speed.invoke(pl, speedSet, 1f);
+                } catch (Throwable ignored) {
+                }
+            }
+            AddonPlayback.playing(pl, p.addon, true);
+            if (offBy(ytPos) > START_OFF_MS && pl instanceof SeekAccess) {
+                // under a silent YT: a seek there, its buffering waited out silently (a moment at a song's start)
+                ((SeekAccess) pl).ayham_seekTo(Math.max(0, Math.round(target(ytPos)) + lead));
+                startGraceUntil = SystemClock.elapsedRealtime() + 1000;
+            }
+            // YT already silent under the addon before: it stays silent (the share at once)
+            if (ytSilent) setShare(1f);
+            else fade(1f, START_FADE_MS);
+            Log.i(TAG, p.id + ": starts on the addon (YT at " + ytPos + " ms), YouTube's audio not heard");
+        }
+
+        /** A song under way: locked silently, then a crossfade. */
+        void startLocking(long ytPos) {
+            mode = Mode.LOCKING;
+            // a mix's held player is not the song heard yet: the badge stays on the playing one
+            if (!forMix) AddonPlayback.playing(pl, p.addon, false);
+            // opened (or armed) where it is; the first reading of both clocks says how far off
+            Log.i(TAG, p.id + ": locking on YT at " + ytPos + " ms");
         }
 
         void play(boolean on) {
@@ -248,16 +467,17 @@ public final class AddonDirect {
             ourClock.reset();
             // both players' first readings after a start jump about: not read for a moment
             if (on) settleUntil = SystemClock.elapsedRealtime() + 600;
-            Log.i(TAG, p.id + (on ? ": plays on with YT" : pausedByYt ? ": paused with YT (its pause)" : ": paused with YT (its clock stopped)"));
+            if (mode != Mode.ARMED) Log.i(TAG, p.id + (on ? ": plays on with YT" : pausedByYt ? ": paused with YT (its pause)" : ": paused with YT (its clock stopped)"));
             try {
                 play.invoke(pl, on);
             } catch (Throwable ignored) {
             }
         }
 
-        /** Our volume from YT's: what the gate gives YT's player without us, times our share and the gain. */
+        /** YT's player's base volume (the gate's, before our share) times share and gain. */
         void volume(float base) {
-            if (pl == null || done) return;
+            if (pl == null || done || mode == Mode.ARMED) return;
+            AddonPlayback.audible(pl, share >= 0.5f && base > 0);
             float want = base * share * gain;
             if (want > 1f && !cappedLogged) {
                 cappedLogged = true;
@@ -276,7 +496,7 @@ public final class AddonDirect {
             fadeFrom = share;
             fadeTo = to;
             fadeAt = SystemClock.elapsedRealtime();
-            fadeMs = ms;
+            fadeMs = Math.max(1, ms);
         }
 
         private void setShare(float s) {
@@ -285,10 +505,35 @@ public final class AddonDirect {
             // YT's player turned down by our share (through the gate), ours set from it
             Engine.reapply(host);
             volume(Engine.gateOut(host));
-            AddonPlayback.audible(pl, s >= 0.5f);
+        }
+
+        /** Heard now: YT lets it through and our share is up. */
+        private boolean heard() {
+            return share > 0 && Engine.gateOut(host) > 0;
+        }
+
+        void followSpeed(float s, long now) {
+            if (pl == null || Math.abs(s - speedSet) < 0.0005f) return;
+            speedSet = s;
+            // a nudge running carries on at the new speed: automix's steps (a second apart) would
+            // cut every one short and the lock never get there (m5: 11 corrections, 5 s late)
+            if (nudgeUntil == 0) nudgeFactor = 1f;
+            // both clocks' lines change speed now, not at their next reading (up to 1 s later)
+            ytClock.speed(now, s);
+            ourClock.speed(now, s);
+            try {
+                speed.invoke(pl, s * nudgeFactor, 1f);
+            } catch (Throwable ignored) {
+            }
+            // both clocks follow the speed (StepClock's time line) and both players change it alike, so
+            // neither starts again: automix's nudges of a held player (a second apart) would keep the
+            // lock from ever reading enough. Their first readings after it are skipped.
+            settleUntil = now + 300;
+            log.append(String.format(Locale.US, " speed x%.3f;", s));
         }
 
         void tick(long now) throws Exception {
+            if (mode == Mode.ARMED || host == null) return;
             // the crossfade
             if (fadeMs > 0) {
                 float k = Math.min(1f, (now - fadeAt) / (float) fadeMs);
@@ -297,20 +542,27 @@ public final class AddonDirect {
                 if (k >= 1) fadeMs = 0;
             }
             int hs = (int) host.getClass().getMethod("patch_getPlaybackState").invoke(host);
-            if (hs == 1 || hs == 4) {
-                end(hs == 1 ? "YT's player stopped" : "the song ended", false);
+            if (hs == 1) {
+                end("YT's player stopped", false);
                 return;
             }
             double hd = Automix.duration(host) / 1000.0;
             if (hd > 0 && Math.abs(hd - p.ytDurationSec) > SAME_SONG_SEC) {
-                end("another song on YT's player", false);
+                // the current host's change of song is handled by step(); this is an older player
+                if (host != PlayerTap.current()) end("another song on YT's player", false);
                 return;
             }
             long yt = Automix.position(host);
             boolean fresh = yt != lastYt;
+            long prevYt = lastYt;
             if (fresh && pausedByYt && now - pausedAt < 400) {
                 lastYt = yt;   // the pause's last reading
                 moving = false;
+            } else if (fresh && !moving && prevYt != Long.MIN_VALUE && Math.abs(yt - prevYt) > PAUSED_JUMP_MS) {
+                // YT seeked while paused (a scrub): not playing; ours goes there silently below
+                lastYt = yt;
+                lastYtAt = now;
+                pausedJump = true;
             } else if (fresh) {
                 lastYt = yt;
                 lastYtAt = now;
@@ -319,110 +571,214 @@ public final class AddonDirect {
             } else if (now - lastYtAt > 300 || pausedByYt) {
                 moving = false;
             }
+            if (hs == 4) moving = false;
             int st = (int) state.invoke(pl);
             if (st == 1) {
                 end("the addon player failed", true);
                 return;
             }
+            if (mode == Mode.TAIL) {
+                // the file ended a little before YouTube's song: YT stays silent to its end, unless its
+                // player moved on (a next song of the same length, repeat one)
+                if (now > tailUntil || (fresh && prevYt != Long.MIN_VALUE && yt < prevYt - 2000)) end("the song ended", false);
+                return;
+            }
             if (st == 4) {
-                // the file ended before YouTube's song (its end is cut a little short)
-                end("the file ended", false);
+                long left = Math.round(p.ytDurationSec * 1000) - yt;
+                if (left < 3000) {
+                    mode = Mode.TAIL;
+                    tailUntil = now + left + 1500;
+                    Log.i(TAG, p.id + ": the file ended " + left + " ms before YT's song; YT stays silent to its end");
+                } else {
+                    end("the file ended " + left + " ms early", true);
+                }
                 return;
             }
             play(moving && target(yt) >= 0);
-            if (!moving) return;
+            if (!moving) {
+                stallFrom = 0;
+                if (pausedJump) {
+                    // ours plays YT's new spot from the resume on: YT's audio until it is in step
+                    pausedJump = false;
+                    log.append(" YT seeked to ").append(yt).append(" while paused;");
+                    if (mode == Mode.ON && heard()) resync("YT seeked while paused", 1);
+                    else if (mode == Mode.ON) relock();
+                    ytClock.reset();
+                    seek(yt, now);
+                    lastWasSeek = true;
+                    return;
+                }
+                // a mix's held player: ours waits where it is (the engine seeks it there before it moves)
+                if (mode == Mode.LOCKING && forMix && !heard() && st == 3 && offAt(yt) > START_OFF_MS) seek(yt, now);
+                // YT paused at the song's start, ours ready there now: it starts heard from it
+                if (mode == Mode.LOCKING && !forMix && share == 0 && fadeMs == 0 && yt < START_MS && st == 3
+                        && offBy(yt) <= START_OFF_MS) startHeard(yt, false);
+                return;
+            }
             if (st != 3) {
+                // a start's seek under a silent YT: waited out silently
+                if (now < startGraceUntil) return;
+                // buffering: YT (in step underneath) is heard at once while it lasts
                 if (stallFrom == 0) stallFrom = now;
-                if (on && now - stallFrom > 1000) end("the addon player stalled", true);
-                else if (!on && now - stallFrom > 15_000) end("the addon player never got ready", true);
+                if (mode == Mode.ON) {
+                    boolean was = heard();
+                    fadeMs = 0;
+                    setShare(0f);
+                    mode = Mode.LOCKING;
+                    seeks = 0;
+                    if (was) Log.w(TAG, p.id + ": the addon player is buffering: YT's audio while it does");
+                }
+                if (now - stallFrom > (mode == Mode.LOCKING ? 15_000 : 1000)) end("the addon player stalled", true);
                 return;
             }
             stallFrom = 0;
-            // follow YT's speed (automix's silent nudges on a held player); never while heard
             float ys = Engine.speedOf(host);
-            if (nudgeUntil == 0 && Math.abs(ys - speedSet) > 0.0005f && share == 0) setSpeed(ys, now);
-            if (nudgeUntil > 0) {
-                if (now < nudgeUntil) return;
+            if (Math.abs(ys - speedSet) > 0.0005f) followSpeed(ys, now);
+            startGraceUntil = 0;
+            long ours = (long) pos.invoke(pl);
+            // silent and far off (a mix's held player seeked before its clock has readings): there at once
+            if (mode == Mode.LOCKING && !heard() && fadeMs == 0 && fresh && Math.abs(ours - target(yt)) > GROSS_MS) {
+                if (++grossSeeks > 5) {
+                    end("its seeks don't land", true);
+                    return;
+                }
                 nudgeUntil = 0;
-                setSpeed(ys, now);
+                nudgeFactor = 1f;
+                speed.invoke(pl, speedSet, 1f);
+                ytClock.reset();
+                seek(yt, now);
+                lastWasSeek = true;
+                return;
+            }
+            if (nudgeUntil != 0) {
+                if (now < nudgeUntil) return;
+                // the nudge is over: back to YT's speed, both clocks read afresh
+                nudgeUntil = 0;
+                nudgeFactor = 1f;
+                try {
+                    speed.invoke(pl, speedSet, 1f);
+                } catch (Throwable ignored) {
+                }
+                ourClock.reset(); // YT's clock reads on
+                settleUntil = now + 300;
                 return;
             }
             if (now < settleUntil) return;
-            long ours = (long) pos.invoke(pl);
-            // both players' readings move in steps (~250 ms on the emulator): each clock's line is
-            // found from the moments its reading changes, and the two lines are compared at one time
             boolean ytNew = ytClock.see(yt, now, ys), ourNew = ourClock.see(ours, now, speedSet);
-            if (TRACE && (ytNew || ourNew)) Log.i(TAG, "trace " + now + " yt " + yt + " ours " + ours + (ytNew ? " Y" : "") + (ourNew ? " O" : "") + (on ? " on" : ""));
-            if (!ytNew || ytClock.n() < 6 || ourClock.n() < 6) return;
-            long m = Math.round(ourClock.at(now, speedSet) - target(Math.round(ytClock.at(now, ys))));
-            if (!on) {
+            // YT jumped (a seek, automix lining it up): both clocks start again, ours goes there
+            if (ytNew && ytClock.n() >= 3 && Math.abs(yt - ytClock.at(now, ys)) > 400) {
+                log.append(" YT jumped to ").append(yt).append(';');
                 ytClock.reset();
-                ourClock.reset();
-            }
-            if (!on) lock(m, yt, ys, now);
-            else if (Math.abs(m) > 30) {
-                // off YT's clock (a seek, a stall, a drift): back to YT's audio, re-lock silently
-                relocks++;
-                log.append(" off ").append(m).append(" ms;");
-                Log.i(TAG, p.id + ": " + m + " ms off YT's clock: YT's audio while it locks again");
-                on = false;
-                fade(0f, Math.abs(m) > 250 ? 30 : FADE_OUT_MS);
-                if (Math.abs(m) > 250) seek(yt, now);
-            }
-        }
-
-        private void lock(long m, long yt, float ys, long now) {
-            if (Math.abs(m) > 150 && seeks < 6) {
-                // right after a seek the error is its latency: the next seek leads by it
-                if (justSeeked && seeks > 0) seekLead -= m;
-                log.append(" err ").append(m).append(';');
+                if (mode == Mode.ON && heard()) resync("YT jumped", 1);
+                else if (mode == Mode.ON) relock();
                 seek(yt, now);
+                lastWasSeek = true;
                 return;
             }
-            justSeeked = false;
-            if (Math.abs(m) > 6) {
-                // unheard: up to 8% off YT's speed for up to 1 s takes ~70% of the error
-                double take = 0.7 * m;
-                float sp = (float) Math.max(0.92, Math.min(1.08, 1 - take / 1000));
-                long dur = Math.max(80, Math.min(1000, Math.abs(Math.round(take / (1 - sp)))));
-                setSpeed(ys * sp, now);
-                nudgeUntil = now + dur;
-                nudges++;
-                log.append(String.format(Locale.US, " err %d -> x%.3f %d ms;", m, sp, dur));
+            if (TRACE && (ytNew || ourNew)) Log.i(TAG, "trace " + now + " yt " + yt + " ours " + ours + (ytNew ? " Y" : "") + (ourNew ? " O" : "") + " " + mode);
+            if (!ytNew || ytClock.n() < 4 || ourClock.n() < 4) return;
+            double ytAt = ytClock.at(now, ys);
+            long m = Math.round(ourClock.at(now, speedSet) - target(ytAt));
+            lastM = m;
+            if (TRACE) Log.i(TAG, "clock " + now + " yt " + Math.round(ytAt) + " err " + m + " " + mode);
+            if (mode == Mode.LOCKING) {
+                // still crossing to YT (a resync): nothing decided until ours is silent
+                if (fadeMs > 0) return;
+                if (lastWasSeek) lead -= m; // the seek landed m off: the next one leads by it
+                lastWasSeek = false;
+                if (Math.abs(m) <= LOCK_MS || (seeks >= 4 && Math.abs(m) <= LOCK_LOOSE_MS)) {
+                    mode = Mode.ON;
+                    grossSeeks = 0;
+                    learnedLead = lead;
+                    if (forMix) AddonPlayback.playing(pl, p.addon, false);
+                    // a held player (a mix's next song) takes its share at once; it is silent anyway
+                    fade(1f, Engine.gateOut(host) > 0 ? FADE_IN_MS : 1);
+                    Log.i(TAG, String.format(Locale.US, "%s: in step (%d ms, %d corrections, lead %d ms, %d ms after opening): the addon's audio now;%s",
+                            p.id, m, seeks, lead, now - openedAt, log));
+                    log.setLength(0);
+                } else {
+                    log.append(" err ").append(m).append(';');
+                    correct(m, ytAt, now);
+                }
                 return;
             }
-            // in step; with the host held silent by a mix, wait for its handover
-            if (Engine.gateOut(host) <= 0f && Engine.holding) {
-                settleUntil = now + 100;
-                return;
+            // heard: drifted? set right at the quietest point of the next seconds
+            // a silent one (a mix's held player) is held to the lock's own tolerance for the hand-over
+            if (Math.abs(m) > (heard() ? DRIFT_MS : LOCK_LOOSE_MS)) {
+                if (!heard()) {
+                    // silent (a mix's held player): locked again before a hand-over can take it
+                    relock();
+                    log.append(" err ").append(m).append(';');
+                    correct(m, ytAt, now);
+                    return;
+                }
+                if (resyncAt == Long.MIN_VALUE) {
+                    double ahead = Math.abs(m) > 80 ? 2 : 10;
+                    double q = p.quietest(ytAt / 1000 + 0.3, Math.min(ytAt / 1000 + ahead, p.ytDurationSec - 1));
+                    resyncAt = Double.isNaN(q) ? Math.round(ytAt) : Math.round(q * 1000);
+                    Log.i(TAG, String.format(Locale.US, "%s: %d ms off YT's clock: resync at %.2f s (%.1f dBFS there)", p.id, m, resyncAt / 1000.0, p.levelAt(resyncAt / 1000.0)));
+                }
+            } else {
+                resyncAt = Long.MIN_VALUE;
             }
-            on = true;
-            fade(1f, FADE_IN_MS);
-            Log.i(TAG, String.format(Locale.US, "%s: in step (%d ms, %d seeks, lead %d ms, %d nudges, %d ms after opening): the addon's audio now;%s",
-                    p.id, m, seeks, seekLead, nudges, SystemClock.elapsedRealtime() - openedAt, log));
-            log.setLength(0);
+            if (resyncAt != Long.MIN_VALUE && ytAt >= resyncAt) {
+                Log.i(TAG, String.format(Locale.US, "%s: resync at %.2f s (%.1f dBFS there)", p.id, ytAt / 1000.0, p.levelAt(ytAt / 1000.0)));
+                resync(String.format(Locale.US, "%d ms off", m), RESYNC_FADE_MS);
+            }
         }
 
-        private void seek(long yt, long now) {
-            long at = Math.max(0, Math.round(target(yt)) + seekLead);
+        /**
+         * A resync: the sound crosses to YT (in step underneath, so nothing goes silent), ours locks
+         * silently and crosses back. fadeMs 1: at once (YT jumped, ours plays the wrong spot).
+         */
+        private void resync(String why, long fadeMs) {
+            resyncs++;
+            resyncAt = Long.MIN_VALUE;
+            mode = Mode.LOCKING;
+            seeks = 0;
+            fade(0f, fadeMs);
+            log.append(" resync (").append(why).append(");");
+        }
+
+        /** Not heard and off: locking again, so inStep() says no until it is in step. */
+        private void relock() {
+            // silent while it locks (a gate opening now lets YT through, not our corrections)
+            fadeMs = 0;
+            setShare(0f);
+            mode = Mode.LOCKING;
+            seeks = 0;
+            resyncAt = Long.MIN_VALUE;
+        }
+
+        /** Silent: a seek when far off, else a speed nudge for as long as m takes. */
+        private void correct(long m, double ytAt, long now) {
+            if (Math.abs(m) > SEEK_OVER_MS) {
+                seek(Math.round(ytAt), now);
+                lastWasSeek = true;
+                return;
+            }
+            float k = Math.min(MAX_NUDGE, Math.abs(m) / (float) (NUDGE_MS * speedSet));
+            nudgeFactor = 1 + (m > 0 ? -k : k);
+            float r = speedSet * nudgeFactor;
+            try {
+                speed.invoke(pl, r, 1f);
+            } catch (Throwable t) {
+                seek(Math.round(ytAt), now);
+                lastWasSeek = true;
+                return;
+            }
+            seeks++;
+            nudgeUntil = now + Math.max(1, Math.round(Math.abs(m) / (speedSet * k)));
+            log.append(String.format(Locale.US, " nudge x%.3f %d ms;", r, nudgeUntil - now));
+        }
+
+        private void seek(long ytAt, long now) {
+            long at = Math.max(0, Math.round(target(ytAt)) + lead);
             if (pl instanceof SeekAccess) ((SeekAccess) pl).ayham_seekTo(at);
             seeks++;
-            justSeeked = true;
-            ytClock.reset();
-            ourClock.reset();
-            settleUntil = now + 250;
-            log.append(" seek ").append(at).append(" (lead ").append(seekLead).append(");");
-        }
-
-        private void setSpeed(float s, long now) {
-            speedSet = s;
-            try {
-                speed.invoke(pl, s, 1f);
-            } catch (Throwable ignored) {
-            }
-            ytClock.reset();
-            ourClock.reset();
-            settleUntil = now + 300;
+            ourClock.reset(); // YT's clock reads on (a jump of YT's resets it where it is seen)
+            settleUntil = now + 200;
+            log.append(" seek ").append(at).append(" (lead ").append(lead).append(");");
         }
 
         void end(String why, boolean failed) {
@@ -430,12 +786,19 @@ public final class AddonDirect {
             done = true;
             share = 0;
             fadeMs = 0;
-            try {
-                Engine.reapply(host);
-            } catch (Throwable ignored) {
+            if (host != null) {
+                try {
+                    // YT's volume set again: another player of ours may carry on on this host (its share)
+                    Engine.reapply(host);
+                } catch (Throwable ignored) {
+                }
             }
             Object x = pl;
             pl = null;
+            if (session > 0) {
+                app.ayham.extension.music.features.EqPresets.releaseDeck(session);
+                session = 0;
+            }
             if (x != null) {
                 try {
                     x.getClass().getMethod("A", boolean.class).invoke(x, false);
@@ -446,8 +809,60 @@ public final class AddonDirect {
                 PlayerTap.forget(x);
                 AddonPlayback.stopped(x);
             }
-            Log.i(TAG, p.id + ": YT's audio again (" + why + (relocks > 0 ? ", " + relocks + " re-locks" : "") + ")");
+            if (mode != Mode.ARMED || failed)
+                Log.i(TAG, p.id + ": " + (failed ? "YT's audio again" : "done") + " (" + why + (resyncs > 0 ? ", " + resyncs + " resyncs" : "") + ")");
             if (failed) AddonPrep.dropped(p.id, why);
         }
+    }
+
+    // ---- debug (spike prop directTest=1) ----
+
+    /**
+     * adb shell am broadcast -p PKG -a app.ayham.ADDON_TEST [--ef speed 1.05] [--el seekMs 60000 | --el leftMs 45000]
+     * [--es fail release|truncate]: YT's speed or position, or a failure of our player (released as
+     * by a crash; its file cut short and read again).
+     */
+    private static void registerTest() {
+        BroadcastReceiver r = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                try {
+                    Object host = PlayerTap.current();
+                    if (host == null) return;
+                    if (i.hasExtra("speed")) {
+                        float s = i.getFloatExtra("speed", 1f);
+                        Engine.speed(host, s);
+                        Log.i(TAG, "test: YT's speed x" + s);
+                    }
+                    if ((i.hasExtra("seekMs") || i.hasExtra("leftMs")) && host instanceof SeekAccess) {
+                        // leftMs: that far before the song's end
+                        long to = i.hasExtra("leftMs") ? Automix.duration(host) - i.getLongExtra("leftMs", 0) : i.getLongExtra("seekMs", 0);
+                        ((SeekAccess) host).ayham_seekTo(Math.max(0, to));
+                        Log.i(TAG, "test: YT seeked to " + to);
+                    }
+                    String fail = i.getStringExtra("fail");
+                    Shadow s = get(host);
+                    if (fail != null && s != null && s.pl != null) {
+                        Log.i(TAG, "test: fail " + fail + " at YT " + Automix.position(host) + " ms");
+                        if ("release".equals(fail)) {
+                            s.pl.getClass().getMethod("L").invoke(s.pl);
+                        } else if ("truncate".equals(fail)) {
+                            try (RandomAccessFile f = new RandomAccessFile(s.p.file, "rw")) {
+                                f.setLength(4096);
+                            }
+                            // behind the played part, which the player no longer holds: it reads the file again
+                            long at = (long) s.pos.invoke(s.pl);
+                            ((SeekAccess) s.pl).ayham_seekTo(Math.max(0, at - 2000));
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.e(TAG, "test failed", t);
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter("app.ayham.ADDON_TEST");
+        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(r, f, Context.RECEIVER_EXPORTED);
+        else ctx.registerReceiver(r, f);
+        Log.i(TAG, "test hooks armed: app.ayham.ADDON_TEST");
     }
 }

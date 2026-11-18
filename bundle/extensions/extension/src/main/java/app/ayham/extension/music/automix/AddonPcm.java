@@ -50,16 +50,9 @@ public final class AddonPcm {
         tailFile(c, id).delete();
     }
 
-    /** YouTube's copy of the song: the stream deck's when kept, else fetched for the fit (a temp file). */
+    /** YouTube's copy of the song: the one the analysis downloads too (kept while addons are on). */
     public static File youtubeFile(Context c, String id) throws Exception {
-        File f = StreamDeck.fileOf(c, id);
-        if (f != null) return f;
-        return app.ayham.extension.music.features.AudioStream.download(tempDir(c), id);
-    }
-
-    /** Where youtubeFile's own downloads go: the caller deletes them after the decode. */
-    public static File tempDir(Context c) {
-        return new File(c.getCacheDir(), "addons/yt");
+        return StreamDeck.youtubeCopy(c, id);
     }
 
     /** Decodes the prepared file again and writes its opening and end on YouTube's timeline. */

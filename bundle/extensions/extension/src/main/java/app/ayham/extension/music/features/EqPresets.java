@@ -44,6 +44,8 @@ public final class EqPresets {
                 boolean open = AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION.equals(intent.getAction());
                 Log.i(TAG, (open ? "open" : "close") + " session " + session + " from " + from);
                 if (session <= 0) return;
+                // the broadcast is system-wide: another app's player is not ours to change
+                if (from != null && !from.equals(c.getPackageName())) return;
                 synchronized (EqPresets.class) {
                     if (open) live.add(session); else live.remove(session);
                 }
@@ -104,8 +106,10 @@ public final class EqPresets {
             Log.i(TAG, "session " + session + ": equalizer switched off, not attached");
             return;
         }
+        Equalizer eq = null;
+        AudioEffect reverb = null;
         try {
-            Equalizer eq = new Equalizer(0, session);
+            eq = new Equalizer(0, session);
             short bands = eq.getNumberOfBands();
             short[] range = eq.getBandLevelRange();
             StringBuilder levels = new StringBuilder();
@@ -118,7 +122,6 @@ public final class EqPresets {
                 levels.append(hz).append("Hz=").append(mB / 100).append("dB ");
             }
             eq.setEnabled(true);
-            AudioEffect reverb = null;
             if (preset.equals("room")) {
                 PresetReverb r = new PresetReverb(0, session);
                 r.setPreset(PresetReverb.PRESET_MEDIUMROOM);
@@ -133,6 +136,15 @@ public final class EqPresets {
                     + eq.getEnabled() + ") " + levels + (reverb != null ? "+ room reverb" : ""));
         } catch (Throwable t) {
             Log.e(TAG, "equalizer on session " + session + " failed", t);
+            // not kept: released, so no unreachable effect stays on the session
+            for (AudioEffect e : new AudioEffect[]{eq, reverb}) {
+                if (e == null) continue;
+                try {
+                    e.setEnabled(false);
+                    e.release();
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 

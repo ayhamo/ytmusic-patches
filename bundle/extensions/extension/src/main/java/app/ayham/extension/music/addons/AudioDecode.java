@@ -55,6 +55,7 @@ public final class AudioDecode {
             long frames = 0;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             float[][] planar = null;
+            long lastOut = android.os.SystemClock.elapsedRealtime();
             while (true) {
                 if (!inputDone) {
                     int in = codec.dequeueInputBuffer(10_000);
@@ -78,7 +79,12 @@ public final class AudioDecode {
                     enc = of.containsKey(MediaFormat.KEY_PCM_ENCODING) ? of.getInteger(MediaFormat.KEY_PCM_ENCODING) : AudioFormat.ENCODING_PCM_16BIT;
                     continue;
                 }
-                if (out < 0) continue;
+                if (out < 0) {
+                    // a decoder that never answers would hold the one prep (or download) worker for good
+                    if (android.os.SystemClock.elapsedRealtime() - lastOut > 30_000) throw new IOException("the decoder stalled");
+                    continue;
+                }
+                lastOut = android.os.SystemClock.elapsedRealtime();
                 if (!told) {
                     told = true;
                     sink.format(rate, channels);

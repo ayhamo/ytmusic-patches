@@ -315,6 +315,8 @@ public final class AddonPrep {
     }
 
     /** The song from the addons, fitted and levelled; null when none fits. */
+    static final double DOWNLOAD_SLACK_SEC = 2.0;
+
     static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo) throws Exception {
         return prepare(c, id, title, artist, isVideo, null);
     }
@@ -358,6 +360,8 @@ public final class AddonPrep {
         AddonClient.Options opt = new AddonClient.Options();
         opt.slackSec = AddonSettings.slackSec();
         if (dl != null) {
+            // a download keeps the file: its length must be YouTube's within 2 s (the user's slack is for playback)
+            opt.slackSec = Math.min(opt.slackSec, DOWNLOAD_SLACK_SEC);
             opt.forDownload = true;
             opt.tier = dl.tier;
         }
@@ -409,6 +413,21 @@ public final class AddonPrep {
             } else {
                 f = Fetch.download(o, new File(dl.dir, id + "." + ext));
             }
+            try {
+                return checkAndFit(id, o, f, reuse, ext, ytSide, ytDur, ytLufs, slack, dl);
+            } catch (Throwable e) {
+                // a fetched file that failed its check or fit has no record: nothing else would delete it
+                if (f != reuse) deleteQuietly(f);
+                throw e;
+            }
+        }
+        return fetchAndFitPlayback(c, id, o, s, ext, ytSide, ytDur, ytLufs, slack);
+    }
+
+    private static Prepared checkAndFit(String id, AddonClient.Opened o, File f, File reuse, String ext, OffsetFit.Side ytSide,
+                                        double ytDur, double ytLufs, double slack, Download dl) throws Exception {
+        Protocol.Stream s = o.stream;
+        {
             String bad = Fetch.formatRefusal(f, ext, dl.tier, s);
             if (bad != null) {
                 if (f != reuse) deleteQuietly(f);
@@ -425,6 +444,10 @@ public final class AddonPrep {
             p.isrc = o.row == null ? null : o.row.isrc;
             return p;
         }
+    }
+
+    private static Prepared fetchAndFitPlayback(Context c, String id, AddonClient.Opened o, Protocol.Stream s, String ext, OffsetFit.Side ytSide,
+                                                double ytDur, double ytLufs, double slack) throws Exception {
         File f = new File(dir(c), id + "." + ext), part = new File(dir(c), id + "." + ext + ".part");
         long t0 = SystemClock.elapsedRealtime();
         HttpURLConnection h = HttpTransport.open(Protocol.audio(s.url, s.headers, null));

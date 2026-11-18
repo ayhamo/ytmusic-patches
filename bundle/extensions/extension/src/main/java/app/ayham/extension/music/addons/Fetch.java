@@ -72,7 +72,8 @@ final class Fetch {
                         if (total > MAX_BYTES) throw new IllegalStateException("over 1 GB");
                         if (SystemClock.elapsedRealtime() > until) throw new IllegalStateException("download over 15 minutes");
                     }
-                    if (code == 200 && expected > 0 && total < expected) throw new IOException("ended at " + total + " of " + expected);
+                    // a resumed (206) answer that ends short is as cut off as a short 200
+                    if (expected > 0 && total < expected) throw new IOException("ended at " + total + " of " + expected);
                     done = true;
                 } catch (IOException e) {
                     last = e;
@@ -112,10 +113,32 @@ final class Fetch {
         }
         if (n < 42) return "not an audio file";
         Info i = info(head, n);
+        if (i == null && n > 10 && head[0] == 'I' && head[1] == 'D' && head[2] == '3') {
+            // an ID3 tag (cover art) longer than the head: the FLAC marker is read after it
+            long at = 10L + ((head[6] & 0x7f) << 21 | (head[7] & 0x7f) << 14 | (head[8] & 0x7f) << 7 | (head[9] & 0x7f));
+            byte[] after = readAt(f, at, 1 << 16);
+            if (after != null) i = info(after, after.length);
+        }
+        if (i == null && n > 8 && head[4] == 'f' && head[5] == 't' && head[6] == 'y' && head[7] == 'p') {
+            // an MP4 with its 'moov' (and so its 'alac' box) at the end
+            long len = f.length(), from = Math.max(0, len - (4L << 20));
+            byte[] tail = readAt(f, from, (int) (len - from));
+            if (tail != null) i = alac(tail, 0, tail.length);
+        }
         if (i == null) return "not lossless (the file is " + sniff(head, n) + ")";
         if (Pick.HIRES.equals(tier) && !i.hiRes()) return "not Hi-Res (" + i + ")";
         Log.i(TAG, f.getName() + ": " + i + (s != null && s.codec != null ? " (stated " + s.codec + ")" : ""));
         return null;
+    }
+
+    private static byte[] readAt(File f, long at, int max) throws IOException {
+        if (at < 0 || at >= f.length()) return null;
+        try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r")) {
+            byte[] b = new byte[(int) Math.min(max, f.length() - at)];
+            r.seek(at);
+            r.readFully(b);
+            return b;
+        }
     }
 
     /** A lossless file's format. */
@@ -139,6 +162,26 @@ final class Fetch {
         }
     }
 
+    /** The 'alac' sample entry from [from]: its config box (also 'alac') holds bit depth and rate; null when none. */
+    static Info alac(byte[] b, int from, int n) {
+        for (int i = from; i + 36 < n; i++) {
+            if (b[i] == 'a' && b[i + 1] == 'l' && b[i + 2] == 'a' && b[i + 3] == 'c') {
+                int j = i + 4;
+                // the second 'alac' (the magic cookie box): version(4) frameLength(4) compat(1) bitDepth(1)... sampleRate at +20
+                for (int k = j; k + 28 < n; k++) {
+                    if (b[k] == 'a' && b[k + 1] == 'l' && b[k + 2] == 'a' && b[k + 3] == 'c') {
+                        int c = k + 4 + 4;
+                        int bits = b[c + 5] & 0xff;
+                        int rate = (b[c + 20] & 0xff) << 24 | (b[c + 21] & 0xff) << 16 | (b[c + 22] & 0xff) << 8 | (b[c + 23] & 0xff);
+                        return new Info("ALAC", rate, bits);
+                    }
+                }
+                return new Info("ALAC", 0, 0);
+            }
+        }
+        return null;
+    }
+
     /** FLAC from its STREAMINFO, ALAC from its 'alac' box; null for anything else. */
     static Info info(byte[] b, int n) {
         int at = 0;
@@ -150,25 +193,7 @@ final class Fetch {
             int bits = ((b[d + 12] & 1) << 4 | (b[d + 13] & 0xff) >> 4) + 1;
             return new Info("FLAC", rate, bits);
         }
-        if (n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') {
-            // the 'alac' sample entry: its config box (also 'alac') holds bit depth and rate
-            for (int i = 4; i + 36 < n; i++) {
-                if (b[i] == 'a' && b[i + 1] == 'l' && b[i + 2] == 'a' && b[i + 3] == 'c') {
-                    int j = i + 4;
-                    // the second 'alac' (the magic cookie box): version(4) frameLength(4) compat(1) bitDepth(1)... sampleRate at +20
-                    for (int k = j; k + 28 < n; k++) {
-                        if (b[k] == 'a' && b[k + 1] == 'l' && b[k + 2] == 'a' && b[k + 3] == 'c') {
-                            int c = k + 4 + 4;
-                            int bits = b[c + 5] & 0xff;
-                            int rate = (b[c + 20] & 0xff) << 24 | (b[c + 21] & 0xff) << 16 | (b[c + 22] & 0xff) << 8 | (b[c + 23] & 0xff);
-                            return new Info("ALAC", rate, bits);
-                        }
-                    }
-                    return new Info("ALAC", 0, 0);
-                }
-            }
-            return null;
-        }
+        if (n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') return alac(b, 4, n);
         if (n > 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' && b[9] == 'A' && b[10] == 'V' && b[11] == 'E') {
             for (int i = 12; i + 24 < n; i++) {
                 if (b[i] == 'f' && b[i + 1] == 'm' && b[i + 2] == 't' && b[i + 3] == ' ') {

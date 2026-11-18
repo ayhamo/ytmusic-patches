@@ -160,11 +160,21 @@ public class ExportDownloadsPreference extends Preference {
                 try {
                     bytes += copy(r, parent, name, s.file);
                     copied++;
-                    File lrc = OfflineIndex.lyricsFile(c, s.id);
-                    if (lrc != null && !there.contains(base + ".lrc")) copy(r, parent, base + ".lrc", lrc);
+                    there.add(name);
                 } catch (Exception e) {
                     failed++;
                     Log.w(TAG, "export of " + s.id + " failed: " + e);
+                    continue;
+                }
+                // the lyrics are extra: a failure here leaves the song exported
+                File lrc = OfflineIndex.lyricsFile(c, s.id);
+                if (lrc != null && !there.contains(base + ".lrc")) {
+                    try {
+                        copy(r, parent, base + ".lrc", lrc);
+                        there.add(base + ".lrc");
+                    } catch (Exception e) {
+                        Log.w(TAG, "export of " + s.id + "'s lyrics failed: " + e);
+                    }
                 }
             }
         } catch (Exception e) {

@@ -377,7 +377,8 @@ final class AnimatedCover {
     static void ahead(java.util.List<String[]> next) {
         if (cacheDir == null) return;
         for (String[] s : next) {
-            if (s[0] == null || s[1] == null || !aheadAsked.add(s[0])) continue;
+            // no artist: no search (a "no video" answer would be saved for a day)
+            if (s[0] == null || s[1] == null || s.length < 3 || s[2] == null || s[2].isEmpty() || !aheadAsked.add(s[0])) continue;
             main.postDelayed(() -> aheadWorker.execute(() -> {
                 try {
                     android.net.ConnectivityManager cm = (android.net.ConnectivityManager) app.ayham.extension.music.automix.Automix.context()
@@ -387,9 +388,12 @@ final class AnimatedCover {
                         return;
                     }
                     String mvKey = "mv:" + s[0];
-                    if (CanvasCache.lookup(mvKey) != null) return;
                     boolean[] none = {false};
-                    java.io.File f = VideoCanvas.clip(s[0], s[1], s[2], cacheDir, 1080, none);
+                    java.io.File f;
+                    synchronized (VideoCanvas.class) {
+                        if (CanvasCache.lookup(mvKey) != null) return;
+                        f = VideoCanvas.clip(s[0], s[1], s[2], cacheDir, 1080, none);
+                    }
                     if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
                     Log.i(TAG, "canvas ahead: '" + s[1] + "' " + (f != null ? "loop cached" : none[0] ? "has no video" : "not this time"));
                 } catch (Throwable t) {
@@ -475,7 +479,23 @@ final class AnimatedCover {
                 if (had == null) {
                     try {
                         boolean[] none = {false};
-                        java.io.File f = VideoCanvas.clip(vid, title, artist, cacheDir, artPx, none);
+                        java.io.File f;
+                        synchronized (VideoCanvas.class) {
+                            // one cut at a time: by the time this one's turn comes the queue may have moved
+                            // on, or the look-ahead may have cut it already
+                            if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
+                                Log.i(TAG, "canvas: the queue moved on before its cut: none made");
+                                return;
+                            }
+                            String now = CanvasCache.lookup(mvKey);
+                            if (now != null && !now.isEmpty() && new java.io.File(now).length() > 0) {
+                                main.post(() -> {
+                                    if (forKey.equals(key)) play(now);
+                                });
+                                return;
+                            }
+                            f = VideoCanvas.clip(vid, title, artist, cacheDir, artPx, none);
+                        }
                         // still this song: a clip cut while the queue moved on is not saved under its id
                         if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
                             Log.i(TAG, "canvas: the queue moved on while cutting: not saved");
@@ -582,6 +602,11 @@ final class AnimatedCover {
 
     private static void play(String url) {
         stop();
+        // the player page is gone (its activity destroyed): played again when it comes back
+        if (view == null) return;
+        // a clip shown again counts as used for the cache trim (least recently shown go first)
+        if (url != null && url.startsWith("/")) //noinspection ResultOfMethodCallIgnored
+            new java.io.File(url).setLastModified(System.currentTimeMillis());
         playingUrl = url;
         final long start = System.currentTimeMillis();
         MediaPlayer mp = new MediaPlayer();
@@ -620,6 +645,24 @@ final class AnimatedCover {
         } catch (Exception e) {
             Log.w(TAG, "canvas: play failed", e);
             stop();
+        }
+    }
+
+    /** The app went to the background: the clip stops decoding (the next frame of the page starts it again). */
+    static void background() {
+        if (player != null && player.isPlaying()) {
+            player.pause();
+            Log.i(TAG, "canvas: paused (the app is in the background)");
+        }
+    }
+
+    /** The activity is destroyed: its view and the clip's player go, so they don't keep it alive. */
+    static void forget(Activity a) {
+        if (view != null && view.getContext() == a) {
+            stop();
+            key = "";
+            if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
+            view = null;
         }
     }
 

@@ -164,9 +164,12 @@ final class SongVersion {
         String json = request(NEXT_URL, body).toString();
         int at = json.indexOf("\"lengthText\"");
         if (at < 0) return 0;
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"(\\d+):(\\d\\d)\"")
+        // m:ss, or h:mm:ss for an hour or more
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"(?:(\\d+):)?(\\d+):(\\d\\d)\"")
                 .matcher(json.substring(at, Math.min(json.length(), at + 400)));
-        return m.find() ? Long.parseLong(m.group(1)) * 60 + Long.parseLong(m.group(2)) : 0;
+        if (!m.find()) return 0;
+        long h = m.group(1) == null ? 0 : Long.parseLong(m.group(1));
+        return h * 3600 + Long.parseLong(m.group(2)) * 60 + Long.parseLong(m.group(3));
     }
 
     private static String query(String title, String author) {

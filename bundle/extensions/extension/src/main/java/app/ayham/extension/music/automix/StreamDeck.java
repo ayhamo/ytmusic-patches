@@ -551,6 +551,12 @@ final class StreamDeck {
                 int o = codec.dequeueOutputBuffer(info, 5000);
                 if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     MediaFormat f = codec.getOutputFormat();
+                    if (f.containsKey(MediaFormat.KEY_SAMPLE_RATE) && f.getInteger(MediaFormat.KEY_SAMPLE_RATE) != rate) {
+                        // HE-AAC: the decoder's rate is not the container's; the deck's track and clock were built on it
+                        int r = f.getInteger(MediaFormat.KEY_SAMPLE_RATE), was = rate;
+                        main.post(() -> handBack("the deck's audio decodes at " + r + " Hz, not " + was + " Hz"));
+                        break;
+                    }
                     ch = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
                     floatPcm = f.containsKey(MediaFormat.KEY_PCM_ENCODING) && f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT;
                     continue;

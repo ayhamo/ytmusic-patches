@@ -235,8 +235,9 @@ final class AppleCanvas {
             }
         }
         if (now < retryAfter) return null;
-        retryAfter = now + 30 * 60_000L;
+        retryAfter = now + 2 * 60_000L; // the network failed: tried again soon
         String html = get("https://music.apple.com/us/browse", null);
+        retryAfter = now + 30 * 60_000L; // Apple answered: a page with no token is not asked again for a while
         Matcher js = Pattern.compile("/assets/index(?:-legacy)?[~-][A-Za-z0-9_-]+\\.js").matcher(html);
         while (js.find()) {
             String script = get("https://music.apple.com" + js.group(), null);

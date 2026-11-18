@@ -263,8 +263,30 @@ final class Engine {
         });
     }
 
+    private long startedAt;
+
     private void start() {
         started = true;
+        startedAt = android.os.SystemClock.uptimeMillis();
+        try {
+            startDecks();
+        } catch (Throwable t) {
+            // no audio track (the track limit, a dead audio server): no mix, YT plays on
+            Log.e(TAG, "mix engine could not start", t);
+            if (track != null) {
+                try {
+                    app.ayham.extension.music.features.EqPresets.releaseDeck(track.getAudioSessionId());
+                    track.release();
+                } catch (Throwable ignored) {
+                }
+                track = null;
+            }
+            started = false;
+            finish(false, "the audio track could not start: " + t);
+        }
+    }
+
+    private void startDecks() {
         int min = AudioTrack.getMinBufferSize(SR, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT);
         track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
@@ -411,7 +433,7 @@ final class Engine {
     private final AudioTimestamp ts = new AudioTimestamp();
 
     private double heardFrames() {
-        if (!track.getTimestamp(ts)) return -1;
+        if (track == null || !track.getTimestamp(ts)) return -1;
         return ts.framePosition + (System.nanoTime() - ts.nanoTime) * SR / 1e9;
     }
 
@@ -429,6 +451,11 @@ final class Engine {
             levelInTarget = v;
         }
         double heard = heardFrames();
+        // the decks never got on YT's clock: no takeover happened, YT plays on (and nothing stays held)
+        if (offsetFrames == Long.MIN_VALUE && !tookOver && android.os.SystemClock.uptimeMillis() - startedAt > 8000) {
+            abort("no clock from the audio track or YT's player within 8 s", true);
+            return;
+        }
         if (heard < 0 || heard < SR * 0.1) return;
         if (offsetFrames == Long.MIN_VALUE) {
             long p = Automix.position(outPlayer);
@@ -696,6 +723,12 @@ final class Engine {
         holding = false;
         released = null;
         if (inPlayer != null && setSpeed != 1) speed(inPlayer, 1f);
+        // a mix that failed after the takeover: YT's playing player gets its volume back (the
+        // incoming one when it came, else the outgoing one), never left silent
+        if (!ok && tookOver && !handedOver) {
+            Object p = inPlayer != null ? inPlayer : outPlayer;
+            if (p != null) restoreVolume(p);
+        }
         if (deck != null && !(ok && deckTook)) deck.handBack("the mix ended without it");
         // the outgoing deck was let go for a takeover that never came: it stops now and YT's
         // player (no longer muted by it) gets its volume back

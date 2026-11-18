@@ -50,6 +50,7 @@ final class ArtistArt {
         }
     });
     private static String shownFor;
+    private static final ThreadLocal<Boolean> failedLookup = ThreadLocal.withInitial(() -> false);
     private static FrameLayout backdrop;
     private static ImageView hero;
 
@@ -119,6 +120,7 @@ final class ArtistArt {
         new Thread(() -> {
             long t0 = System.currentTimeMillis();
             boolean known = cache.containsKey(artist);
+            failedLookup.set(false);
             // A band name with a comma or "&" ("Earth, Wind & Fire") is tried whole first, by its exact
             // name only; then the first artist of the credit, as before.
             Art found = known ? cache.get(artist) : whole.equals(artist) ? lookup(artist, false) : null;
@@ -127,7 +129,8 @@ final class ArtistArt {
                 if (found == null) found = lookup(artist, false);
             }
             final Art art = found;
-            if (!known) cache.put(artist, art);
+            // a lookup that failed (the network) is asked again next time, not saved as "no art"
+            if (!known && !failedLookup.get()) cache.put(artist, art);
             long ms = System.currentTimeMillis() - t0;
             main.post(() -> {
                 if (!artist.equals(shownFor)) return;
@@ -177,6 +180,15 @@ final class ArtistArt {
     }
 
     /** [exact]: only an artist with exactly this name (else the first search hit is taken). */
+    /** The activity is destroyed: our views of its page go, so they don't keep it alive. */
+    static void forget(android.app.Activity a) {
+        if (backdrop != null && backdrop.getContext() == a) {
+            if (backdrop.getParent() instanceof ViewGroup) ((ViewGroup) backdrop.getParent()).removeView(backdrop);
+            backdrop = null;
+            hero = null;
+        }
+    }
+
     private static Art lookup(String artist, boolean exact) {
         try {
             JSONArray results = new JSONObject(get("https://itunes.apple.com/search?term="
@@ -215,6 +227,7 @@ final class ArtistArt {
             return art;
         } catch (Throwable t) {
             Log.w(TAG, "Apple artist lookup failed for " + artist, t);
+            failedLookup.set(true);
             return null;
         }
     }

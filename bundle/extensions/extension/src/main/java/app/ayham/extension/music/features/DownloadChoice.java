@@ -56,7 +56,10 @@ public final class DownloadChoice {
     }
 
     private static final Map<String, Choice> songs = new HashMap<>();
-    private static Choice playlist;
+    /** Each playlist answered, newest last: two albums tapped one after the other keep their own answers. */
+    private static final java.util.List<Choice> playlists = new java.util.ArrayList<>();
+    /** A playlist's answer also holds for its songs saved later than PLAYLIST_MS (a big playlist), up to this, when YT lists them in it. */
+    private static final long PLAYLIST_LISTED_MS = 12 * 3600_000L;
     private static WeakReference<Activity> activity = new WeakReference<>(null);
     /** Set while the answered command runs again, so it goes through. */
     private static boolean passing;
@@ -125,7 +128,25 @@ public final class DownloadChoice {
             final String fid = id;
             final boolean fpl = isPlaylist;
             final Method fresolve = resolve;
-            new Handler(Looper.getMainLooper()).post(() -> show(a, fid, fpl, resolver, fresolve, command, map));
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    if (a.isFinishing() || a.isDestroyed()) throw new IllegalStateException("the activity is gone");
+                    show(a, fid, fpl, resolver, fresolve, command, map);
+                } catch (Throwable t) {
+                    // no popup: the tap goes on as YT's own download
+                    Log.w(TAG, "download popup could not show, YT's download goes on: " + t);
+                    asking = null;
+                    passing = true;
+                    try {
+                        fresolve.setAccessible(true);
+                        fresolve.invoke(resolver, command, map);
+                    } catch (Throwable e) {
+                        Log.w(TAG, "download of " + fid + ": YT's command failed", e);
+                    } finally {
+                        passing = false;
+                    }
+                }
+            });
             Log.i(TAG, "download tap on " + (isPlaylist ? "playlist " : "song ") + id + ": popup");
             return true;
         } catch (Throwable t) {
@@ -229,7 +250,8 @@ public final class DownloadChoice {
         if (isPlaylist) {
             ch.until = now + PLAYLIST_MS;
             ch.playlistId = id;
-            playlist = ch;
+            playlists.removeIf(p -> id.equals(p.playlistId) || p.until + PLAYLIST_LISTED_MS - PLAYLIST_MS < now);
+            playlists.add(ch);
         } else {
             ch.until = now + SONG_MS;
             songs.put(id, ch);
@@ -244,13 +266,19 @@ public final class DownloadChoice {
         long now = System.currentTimeMillis();
         Choice c = songs.remove(videoId);
         if (c != null && c.until > now) return c;
-        if (playlist != null && playlist.until > now) {
-            // a song of that playlist, not one smart downloads saves meanwhile
-            Context a = Features.appContext;
-            Boolean in = a == null ? null : OfflineIndex.inPlaylist(a, playlist.playlistId, videoId);
-            if (!Boolean.FALSE.equals(in)) return playlist;
-            Log.i(TAG, videoId + " is not in playlist " + playlist.playlistId + ": its answer not used");
+        // a song of an answered playlist, not one smart downloads saves meanwhile: YT lists it in the
+        // playlist; within PLAYLIST_MS, a playlist not listed yet counts too (the newest such one)
+        Context a = Features.appContext;
+        Choice unknown = null;
+        for (int i = playlists.size() - 1; i >= 0; i--) {
+            Choice p = playlists.get(i);
+            if (p.until + PLAYLIST_LISTED_MS - PLAYLIST_MS < now) continue;
+            Boolean in = a == null ? null : OfflineIndex.inPlaylist(a, p.playlistId, videoId);
+            if (Boolean.TRUE.equals(in)) return p;
+            if (in == null && p.until > now && unknown == null) unknown = p;
         }
+        if (unknown != null) return unknown;
+        if (!playlists.isEmpty()) Log.i(TAG, videoId + " is in no answered playlist: no popup answer");
         return null;
     }
 

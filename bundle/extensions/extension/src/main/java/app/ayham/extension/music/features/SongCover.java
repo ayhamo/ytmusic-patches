@@ -35,6 +35,14 @@ final class SongCover {
         }
     };
     private static ImageView view;
+
+    /** The activity is destroyed: our view of its page goes, so it doesn't keep it alive. */
+    static void forget(android.app.Activity a) {
+        if (view != null && view.getContext() == a) {
+            if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
+            view = null;
+        }
+    }
     private static String shownFor = "", wantedFor = "";
 
     private SongCover() {

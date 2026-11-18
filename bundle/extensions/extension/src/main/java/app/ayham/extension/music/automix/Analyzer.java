@@ -333,7 +333,8 @@ final class Analyzer {
         int ringFrames = 0;
         boolean configured = false;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        boolean inputDone = false;
+        boolean inputDone = false, whole = false;
+        long lastOut = SystemClock.elapsedRealtime();
         try {
             while (true) {
                 if (!inputDone) {
@@ -357,7 +358,11 @@ final class Analyzer {
                     rate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE);
                     floatPcm = of.containsKey(MediaFormat.KEY_PCM_ENCODING)
                             && of.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT;
-                } else if (outIndex >= 0) {
+                } else if (outIndex < 0) {
+                    // a decoder that never answers would hold the analysis thread for good
+                    if (SystemClock.elapsedRealtime() - lastOut > 30_000) throw new IOException("the decoder stalled");
+                } else {
+                    lastOut = SystemClock.elapsedRealtime();
                     if (!configured) {
                         configured = true;
                         step = rate >= 44100 ? 2 : 1;
@@ -395,7 +400,10 @@ final class Analyzer {
                     }
                     codec.releaseOutputBuffer(outIndex, false);
                     if (frame > MAX_SONG_SEC * rate) throw new TooLong("over " + MAX_SONG_SEC + " s, not analysed");
-                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        whole = true;
+                        break;
+                    }
                 }
             }
         } finally {
@@ -406,6 +414,8 @@ final class Analyzer {
             codec.release();
             extractor.release();
             if (headOut != null) headOut.close();
+            // a decode cut off leaves no short opening that an older end file would pass as ready
+            if (!whole && headFile.exists() && !headFile.delete()) Log.w(TAG, "could not delete " + headFile.getName());
         }
         if (!configured || frame == 0) throw new IOException("nothing decoded");
         d.rate = rate;

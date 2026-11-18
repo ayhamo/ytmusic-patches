@@ -38,6 +38,10 @@ public final class AddonDownloads {
     private static Thread worker;
     private static Context ctx;
     private static volatile String working;
+    /** Failed tries per song this run: a network failure is tried again, at most TRIES times. */
+    private static final java.util.Map<String, Integer> tries = new java.util.HashMap<>();
+    private static final int TRIES = 3;
+    private static java.util.Timer later;
 
     private AddonDownloads() {
     }
@@ -137,9 +141,15 @@ public final class AddonDownloads {
                 if (info == null || info.length < 4) continue;
                 working = id;
             }
+            // no network (a dropped Wi-Fi): wait for it rather than fail every song left
+            for (int waited = 0; !online(ctx); waited++) {
+                if (waited == 0) Log.i(TAG, "downloads: offline, waiting for the network");
+                SystemClock.sleep(15_000);
+            }
             long t0 = SystemClock.elapsedRealtime();
             AddonPrep.Prepared got = null;
             String why = null;
+            boolean retry = false;
             try {
                 for (String tier : steps(info[0])) {
                     AddonPrep.Download dl = new AddonPrep.Download();
@@ -154,15 +164,48 @@ public final class AddonDownloads {
                 else why = "no addon has it lossless: YouTube's download only";
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
+                retry = true;
             }
             synchronized (AddonDownloads.class) {
                 working = null;
-                // a failure is not retried at every start: the user downloads it again to retry
-                Properties p = pending(ctx);
-                p.remove(id);
-                savePending(ctx, p);
+                int n = tries.containsKey(id) ? tries.get(id) + 1 : 1;
+                if (retry && n < TRIES) {
+                    // a failure (network, a refused fetch) is tried again in a minute or two; kept on disk meanwhile
+                    tries.put(id, n);
+                    final String again = id;
+                    if (later == null) later = new java.util.Timer("addon-downloads-retry", true);
+                    later.schedule(new java.util.TimerTask() {
+                        @Override
+                        public void run() {
+                            synchronized (AddonDownloads.class) {
+                                if (pending(ctx).getProperty(again) != null && !queue.contains(again) && !again.equals(working)) {
+                                    queue.addLast(again);
+                                    start();
+                                }
+                            }
+                        }
+                    }, 60_000L * n);
+                    why += " (tried again in " + n + " min)";
+                } else {
+                    // "no addon has it", or tried TRIES times: YouTube's download is all it has
+                    tries.remove(id);
+                    Properties p = pending(ctx);
+                    p.remove(id);
+                    savePending(ctx, p);
+                }
             }
             Log.i(TAG, (got != null ? "downloaded: " + got : "download " + id + ": " + why) + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean online(Context c) {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) c.getSystemService(Context.CONNECTIVITY_SERVICE);
+            android.net.NetworkCapabilities nc = cm.getNetworkCapabilities(cm.getActiveNetwork());
+            return nc != null && nc.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        } catch (Throwable t) {
+            return true; // unknown: tried, and a failure is tried again
         }
     }
 

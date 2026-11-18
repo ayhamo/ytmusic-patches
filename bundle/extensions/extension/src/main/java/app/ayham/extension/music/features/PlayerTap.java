@@ -90,6 +90,8 @@ public final class PlayerTap {
         main.postDelayed(PlayerTap::poll, 1000);
     }
 
+    private static long nextSearch;
+
     private static String line() throws Exception {
         Object[] q = AddonPlayback.now();
         badge = (Quality.Badge) q[0];
@@ -99,8 +101,11 @@ public final class PlayerTap {
         if (player == null) return null;
         Object format;
         if (path == null) {
+            // the deep search runs on the main thread: not more than every 5 s while it finds nothing
+            if (android.os.SystemClock.uptimeMillis() < nextSearch) return null;
             format = search(player);
             if (format != null) path = lastFound;
+            else nextSearch = android.os.SystemClock.uptimeMillis() + 5000;
         } else {
             format = follow(player, path);
         }

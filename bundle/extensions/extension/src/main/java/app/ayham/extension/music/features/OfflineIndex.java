@@ -96,8 +96,8 @@ public final class OfflineIndex {
                     }
                 }
                 if (back > 0) Log.i(TAG, back + " downloaded songs' lyrics put back in Morphe's cache");
-                reconcile(c, null);
                 watch(c);
+                reconcile(c, null);
                 app.ayham.extension.music.addons.AddonDownloads.resume(c);
             } catch (Throwable t) {
                 Log.w(TAG, "offline start failed", t);

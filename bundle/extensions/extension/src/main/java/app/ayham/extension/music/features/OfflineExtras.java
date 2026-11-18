@@ -44,7 +44,19 @@ final class OfflineExtras {
         new Thread(() -> {
             OfflineIndex.touch(c, videoId);
             try {
-                JSONObject d = details(videoId);
+                JSONObject d = null;
+                for (int t = 1; ; t++) {
+                    // the popup's answer is used once: a failed lookup is tried again here, not at a later save
+                    try {
+                        d = details(videoId);
+                        if (!d.optString("title", "").isEmpty()) break;
+                    } catch (Exception e) {
+                        if (t >= 3) throw e;
+                    }
+                    if (t >= 3) break;
+                    Log.i(TAG, "offline extras " + videoId + ": YT's details not there, tried again (" + t + ")");
+                    android.os.SystemClock.sleep(10_000L * t);
+                }
                 String title = d.optString("title", ""), artist = d.optString("author", "");
                 int length = d.optInt("lengthSeconds", 0);
                 String type = d.optString("musicVideoType", "");

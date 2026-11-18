@@ -63,7 +63,7 @@ final class SpotifyCanvas {
         String url = canvasUrl(title, artist);
         if (url == null) return null;
         File dir = new File(cacheDir, "canvas");
-        if (!dir.isDirectory() && !dir.mkdirs()) return null;
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("canvas: no folder");
         File out = new File(dir, "sp-" + Integer.toHexString(url.hashCode()) + ".mp4");
         if (out.length() > 0) {
             out.setLastModified(System.currentTimeMillis());
@@ -89,7 +89,7 @@ final class SpotifyCanvas {
             h.disconnect();
             if (!done && part.exists() && !part.delete()) Log.w(TAG, "canvas: could not delete " + part.getName());
         }
-        if (!part.renameTo(out)) return null;
+        if (!part.renameTo(out)) throw new java.io.IOException("canvas: could not keep the file");
         if (trim) HlsClip.trim(dir, out);
         Log.i(TAG, "canvas: spotify clip " + out.length() / 1024 + " KB in " + (System.currentTimeMillis() - start) + " ms");
         return out;
@@ -151,7 +151,10 @@ final class SpotifyCanvas {
         if (!trackId.matches("[A-Za-z0-9]{22}")) return null;
         HttpURLConnection h = open(MIRROR_URL + URLEncoder.encode(trackId, "UTF-8"));
         try {
-            if (h.getResponseCode() != 200) return null;
+            int code = h.getResponseCode();
+            if (code == 404) return null; // the mirror has none
+            // busy or down (429, 5xx): an error, so the song is asked again later instead of saved as "no canvas"
+            if (code != 200) throw new java.io.IOException("canvas mirror: HTTP " + code);
             JSONArray list = new JSONObject(read(h)).optJSONArray("canvasesList");
             for (int i = 0; list != null && i < list.length(); i++) {
                 JSONObject c = list.optJSONObject(i);

@@ -174,6 +174,7 @@ public final class Features {
                 rewrapCurrentResolver();
                 startLyricsPoll();
                 EqPresets.register(appContext);
+                watchLifecycle(activity.getApplication());
                 OfflineIndex.start(appContext); // downloads: lyrics put back, removed songs' files, unfinished ones
                 // Phase 4 debug: the Direct-mode spike, only with directSpike=1 in spike.properties
                 if ("1".equals(readProps().getProperty("directSpike"))) {
@@ -487,6 +488,53 @@ public final class Features {
 
     private static int rehides;
     private static volatile TextView overlayView;
+
+    /** The app's activities: in the background the canvas clip stops; a destroyed one is let go by our views. */
+    private static void watchLifecycle(android.app.Application app) {
+        app.registerActivityLifecycleCallbacks(new android.app.Application.ActivityLifecycleCallbacks() {
+            @Override
+            public void onActivityStopped(Activity a) {
+                try {
+                    AnimatedCover.background();
+                } catch (Throwable t) {
+                    Log.w(TAG, "canvas pause failed", t);
+                }
+            }
+
+            @Override
+            public void onActivityDestroyed(Activity a) {
+                try {
+                    AnimatedCover.forget(a);
+                    SongCover.forget(a);
+                    ArtistArt.forget(a);
+                    TextView tv = overlayView;
+                    if (tv != null && tv.getContext() == a) overlayView = null;
+                } catch (Throwable t) {
+                    Log.w(TAG, "letting the old page go failed", t);
+                }
+            }
+
+            @Override
+            public void onActivityCreated(Activity a, android.os.Bundle b) {
+            }
+
+            @Override
+            public void onActivityStarted(Activity a) {
+            }
+
+            @Override
+            public void onActivityResumed(Activity a) {
+            }
+
+            @Override
+            public void onActivityPaused(Activity a) {
+            }
+
+            @Override
+            public void onActivitySaveInstanceState(Activity a, android.os.Bundle b) {
+            }
+        });
+    }
 
     private static volatile String statsText;
 

@@ -24,6 +24,13 @@ final class LyricTiming {
     private static final long SHORT_GAP_MS = 2500;
 
     private static boolean ready, broken;
+    private static long brokenAt;
+
+    /** Word timing is off for a minute after a failure (a passing one recovers; a lasting one fails again). */
+    private static boolean broken() {
+        if (broken && android.os.SystemClock.uptimeMillis() - brokenAt > 60_000) broken = false;
+        return broken;
+    }
     private static Method getInstance, positionMs, isPlaying, lines, words, lineStart, lineText, hasWordTimings,
             wStart, wEnd, wText, wSpace, synced, isEmpty, provider;
     private static Field current, state, lyricsVideo;
@@ -140,7 +147,7 @@ final class LyricTiming {
      * singing is.
      */
     static String deckLine() {
-        if (broken) return null;
+        if (broken()) return null;
         try {
             init();
             Object manager = getInstance.invoke(null);
@@ -174,7 +181,7 @@ final class LyricTiming {
 
     /** What Morphe has for the song: lyrics (timed or plain), a lookup running, none found. */
     static int status() {
-        if (broken) return UNKNOWN;
+        if (broken()) return UNKNOWN;
         try {
             init();
             Object manager = getInstance.invoke(null);
@@ -200,7 +207,7 @@ final class LyricTiming {
      * 0 = singing, or not known. A line Morphe already shows a little early counts as singing.
      */
     static int phase(String shown) {
-        if (broken) return 0;
+        if (broken()) return 0;
         try {
             init();
             Object manager = getInstance.invoke(null);
@@ -228,7 +235,7 @@ final class LyricTiming {
 
     /** @return the characters of [shown] sung so far, or -1 when the line has no word timings. */
     static float fill(String shown) {
-        if (broken || shown == null || shown.trim().isEmpty()) return -1;
+        if (broken() || shown == null || shown.trim().isEmpty()) return -1;
         try {
             init();
             Object manager = getInstance.invoke(null);
@@ -244,6 +251,7 @@ final class LyricTiming {
             return LyricWords.shown(LyricWords.sung(start, end, chars, pos + FILL_LEAD_MS), total, shown.length());
         } catch (Throwable t) {
             broken = true;
+            brokenAt = android.os.SystemClock.uptimeMillis();
             spanEnd = -1;
             Log.w(TAG, "word timings unreadable: the lyric line stays plain", t);
             return -1;
@@ -321,7 +329,7 @@ final class LyricTiming {
     private static String lastOut;
 
     private static String pickShown(String shown) {
-        if (broken || shown == null) return shown;
+        if (broken() || shown == null) return shown;
         if (stale != null && !stale.equals(shown)) stale = null; // Morphe has moved on
         try {
             init();
@@ -402,7 +410,7 @@ final class LyricTiming {
 
     /** Milliseconds until the next sung line comes up (its start less [LEAD_MS]); -1: none, or now. */
     static long msToNext() {
-        if (broken) return -1;
+        if (broken()) return -1;
         try {
             init();
             Object manager = getInstance.invoke(null);

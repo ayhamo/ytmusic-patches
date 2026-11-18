@@ -1556,7 +1556,22 @@ final class PlayerScreen {
         buttonLookedAt = now;
         View b = a.getWindow().getDecorView().findViewById(id(a, "player_control_play_pause_replay_button"));
         if (b == null) return;
-        final View.AccessibilityDelegate yt = android.os.Build.VERSION.SDK_INT >= 29 ? b.getAccessibilityDelegate() : null;
+        final View.AccessibilityDelegate yt;
+        if (android.os.Build.VERSION.SDK_INT >= 29) yt = b.getAccessibilityDelegate();
+        else {
+            // no getter before Android 10: its field, else no watching (YT's own delegate is never dropped)
+            View.AccessibilityDelegate f;
+            try {
+                java.lang.reflect.Field fd = View.class.getDeclaredField("mAccessibilityDelegate");
+                fd.setAccessible(true);
+                f = (View.AccessibilityDelegate) fd.get(b);
+            } catch (Throwable t) {
+                Log.i(TAG, "YT's play button delegate unreadable here: taps not watched");
+                buttonLookedAt = now + 3_600_000L;
+                return;
+            }
+            yt = f;
+        }
         // the same button back on the window: it already carries ours (wrapping again would count taps twice)
         if (!(yt instanceof PlayTapDelegate)) b.setAccessibilityDelegate(new PlayTapDelegate(yt));
         watchedButton = new java.lang.ref.WeakReference<>(b);

@@ -258,8 +258,28 @@ final class NativeCheck {
         return AudioStream.download(new File(ctx.getCacheDir(), "spike"), videoId);
     }
 
+    private static void release(MediaExtractor extractor, MediaCodec codec) {
+        if (codec != null) {
+            try {
+                codec.stop();
+            } catch (Throwable ignored) {
+            }
+            codec.release();
+        }
+        extractor.release();
+    }
+
     static float[] decodeMono(File file, int[] rateOut) throws Exception {
         MediaExtractor extractor = new MediaExtractor();
+        MediaCodec[] held = new MediaCodec[1];
+        try {
+            return decodeMono(file, rateOut, extractor, held);
+        } finally {
+            release(extractor, held[0]);
+        }
+    }
+
+private static float[] decodeMono(File file, int[] rateOut, MediaExtractor extractor, MediaCodec[] held) throws Exception {
         extractor.setDataSource(file.getPath());
         int track = -1;
         MediaFormat format = null;
@@ -277,6 +297,7 @@ final class NativeCheck {
         Log.i(TAG, "decoding " + mime + " " + format);
 
         MediaCodec codec = MediaCodec.createDecoderByType(mime);
+        held[0] = codec;
         codec.configure(format, null, null, 0);
         codec.start();
 
@@ -329,9 +350,6 @@ final class NativeCheck {
                 if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
             }
         }
-        codec.stop();
-        codec.release();
-        extractor.release();
         rateOut[0] = rate;
         float[] result = new float[size];
         System.arraycopy(out, 0, result, 0, size);
@@ -356,6 +374,15 @@ final class NativeCheck {
      */
     static Region decodeRegion(File file, double from, double to) throws Exception {
         MediaExtractor extractor = new MediaExtractor();
+        MediaCodec[] held = new MediaCodec[1];
+        try {
+            return decodeRegion(file, from, to, extractor, held);
+        } finally {
+            release(extractor, held[0]);
+        }
+    }
+
+private static Region decodeRegion(File file, double from, double to, MediaExtractor extractor, MediaCodec[] held) throws Exception {
         extractor.setDataSource(file.getPath());
         int track = -1;
         MediaFormat format = null;
@@ -376,6 +403,7 @@ final class NativeCheck {
             to = duration + 1;
         }
         MediaCodec codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
+        held[0] = codec;
         codec.configure(format, null, null, 0);
         codec.start();
         int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
@@ -433,9 +461,6 @@ final class NativeCheck {
                 if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0 || frame >= last) break;
             }
         }
-        codec.stop();
-        codec.release();
-        extractor.release();
         Region region = new Region();
         region.left = java.util.Arrays.copyOf(l, size);
         region.right = java.util.Arrays.copyOf(r, size);

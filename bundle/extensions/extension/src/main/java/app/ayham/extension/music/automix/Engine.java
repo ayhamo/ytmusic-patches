@@ -59,6 +59,14 @@ final class Engine {
     private static final java.util.Map<Object, Float> gateIn = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>()),
             gateOut = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>()),
             speeds = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    /** Each held player's running speed nudge: when it ends (elapsedRealtime). */
+    private static final java.util.Map<Object, Long> nudgeEnds = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** A speed nudge of automix's runs on this player now (the addon's held player reads no lock meanwhile). */
+    static boolean nudging(Object player) {
+        Long end = nudgeEnds.get(player);
+        return end != null && SystemClock.elapsedRealtime() < end;
+    }
 
     static float gate(Object player, float volume) {
         if (player != null && app.ayham.extension.music.features.PlayerTap.isOurs(player)) return volume; // our addon player
@@ -720,6 +728,7 @@ final class Engine {
         if (addonIn) AddonDirect.follow(player, m.inId);
         settleUntil = 0;
         nudgeUntil = 0;
+        nudgeEnds.remove(player);
         errs.clear();
         alignReads = 0;
         Log.i(TAG, "incoming player held silent at " + Automix.position(player) + " ms");
@@ -892,6 +901,7 @@ final class Engine {
             speed(inPlayer, base);
             speedSetAt = now;
             nudgeUntil = 0;
+            nudgeEnds.remove(inPlayer);
             settleUntil = now + 300;
             errs.clear();
             alignReads = 0;
@@ -955,6 +965,7 @@ final class Engine {
         speed(inPlayer, setSpeed);
         speedSetAt = now;
         nudgeUntil = now + dur;
+        nudgeEnds.put(inPlayer, nudgeUntil);
         nudges++;
         alignLog.append(String.format(Locale.US, " err %d ms -> x%.3f for %d ms;", err, sp, dur));
     }

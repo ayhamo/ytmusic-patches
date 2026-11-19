@@ -2,9 +2,11 @@ name: Tests
 
 # On every push: the extension's JVM unit tests (the shared spec cases included), and spec/
 # against the master copy in the YT Music Extension's public repo (scripts/check-spec.ps1).
-# (push only: a pull request's branch is pushed here too, so pull_request would run it twice)
+# A pull request runs them only from a fork: a branch of this repo is pushed here too, and its
+# push already ran them (pull_request would run them twice).
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,7 @@ concurrency:
 
 jobs:
   unit-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +61,7 @@ jobs:
           retention-days: 7
 
   spec:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

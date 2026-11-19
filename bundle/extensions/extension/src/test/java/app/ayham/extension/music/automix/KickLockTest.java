@@ -1,6 +1,7 @@
 package app.ayham.extension.music.automix;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -43,6 +44,20 @@ public class KickLockTest {
         assertNotNull(r);
         assertNull(r.toString(), r.none);
         assertEquals(r.toString(), 0.03, r.shift, 0.004);
+    }
+
+    @Test
+    public void aMixInPlacedInTheEditorIsNotShifted() {
+        // a late kick would move the cue, but the user placed the mix-in: it stays where they put it
+        KickLock.Side out = KickLock.kickSource(kicks(0.5, 0), SR, 0, 0, 40);
+        KickLock.Side in = KickLock.kickSource(kicks(0.5, 0.03), SR, 0, 0, 40);
+        Planner.Plan p = blend(0.5);
+        p.windowIn = true;
+        KickLock.Result r = KickLock.kickLock(p, out, in);
+        assertNotNull(r);
+        assertEquals("the mix-in was placed in the editor", r.none);
+        assertTrue(Double.isNaN(r.shift));
+        assertFalse(Planner.kickLockAllowed(p));
     }
 
     @Test

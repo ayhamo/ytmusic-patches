@@ -334,6 +334,9 @@ final class MixOverview {
         card.addView(actions);
         note = text(a, "", 12, 0xB3FFFFFF, false);
         note.setPadding(0, dp(a, 8), 0, 0);
+        // three lines kept from the start: a note that first wraps would lift the chips above it
+        // (the sheet sits on the bottom), and folding Customize lets the sheet's height go
+        note.setMinLines(3);
         card.addView(note);
 
         // the sheet sits on the bottom: it only grows while open, so nothing in it moves down under a
@@ -594,7 +597,7 @@ final class MixOverview {
      * saved too, where the plan on screen has it, so the planner's own moves of an unsaved side
      * (capIncomingSkip, the vocal re-route) don't move it once the window is the user's.
      */
-    private static void windowWith(Overview s, MixOverride o, boolean out, MixOverride.Position pos) {
+    static void windowWith(Overview s, MixOverride o, boolean out, MixOverride.Position pos) {
         if (out) o.out = pos;
         else o.in = pos;
         if (out && o.in == null) o.in = positionOf(s, false, s.plan.mixInTrackTime, false, false);

@@ -30,7 +30,10 @@ public final class Automix {
     private static final long TICK_MS = 250;
     /** The mix is built this long before its takeover. */
     private static final double TAIL_LEAD = 14;
-    /** The earliest a mix may start, from the playhead (the engine needs a few seconds to get onto YT's clock). */
+    /**
+     * The earliest a mix may start, from the playhead: the takeover's lead and 2.5 s for the engine to get
+     * the incoming player onto YT's clock. Per platform (the PC: 4.5 s); docs/phone-vs-spec.md.
+     */
     private static final double EARLIEST_LEAD = Mix.HAND_LEAD + 2.5;
 
     private static Context app;

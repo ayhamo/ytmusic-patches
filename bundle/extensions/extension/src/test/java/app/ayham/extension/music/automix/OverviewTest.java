@@ -7,7 +7,15 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class OverviewTest {
-    private static Planner.Plan plan(Planner.Pick pick, double inBpm) {
+    /** A pick as saved before the editor ({style, bars}), migrated as it's read (editor.md §1). */
+    static MixOverride pick(String style, int bars) {
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("style", style);
+        m.put("bars", bars);
+        return MixOverride.fromJson(m);
+    }
+
+    private static Planner.Plan plan(MixOverride pick, double inBpm) {
         return Planner.plan(new Planner.Settings(), "a", "b", PlannerTest.song("a", 120, 200, 0.9), PlannerTest.song("b", inBpm, 180, 0.9),
                 200, 60, 60 + PlannerTest.EARLIEST_LEAD, null, pick);
     }
@@ -16,7 +24,7 @@ public class OverviewTest {
 
     @Test
     public void aFadePickedIsAPlainCrossfade() {
-        Planner.Plan p = plan(new Planner.Pick("crossfade", 0), 120);
+        Planner.Plan p = plan(pick("crossfade", 0), 120);
         assertTrue(p.fallback);
         assertEquals("crossfade", p.style);
         assertEquals("picked in the overview", p.reason);
@@ -24,7 +32,7 @@ public class OverviewTest {
 
     @Test
     public void aFilterPickedIsAFilterMixOfAtMostEightBars() {
-        Planner.Plan p = plan(new Planner.Pick("filter", 16), 120);
+        Planner.Plan p = plan(pick("filter", 16), 120);
         assertEquals("filter", p.style);
         assertEquals("picked in the overview", p.reason);
         assertTrue(p.bars <= Planner.FILTER_MAX_BARS);
@@ -32,7 +40,7 @@ public class OverviewTest {
 
     @Test
     public void aLengthPickedComesBeforeTheSetting() {
-        Planner.Plan auto = plan(null, 120), four = plan(new Planner.Pick(null, 4), 120);
+        Planner.Plan auto = plan(null, 120), four = plan(pick(null, 4), 120);
         assertEquals("blend", four.style);
         assertEquals(4, four.bars);
         assertTrue(auto.bars != 4 || auto.durationSec == four.durationSec);
@@ -40,12 +48,13 @@ public class OverviewTest {
 
     @Test
     public void onlyAPickedLoopOrAutoLeavesTheLoopMixIn() {
-        assertTrue(new Planner.Pick("blend", 0).noLoop());
-        assertTrue(new Planner.Pick("filter", 0).noLoop());
-        assertTrue(new Planner.Pick("crossfade", 0).noLoop());
-        assertTrue(new Planner.Pick(null, 8).noLoop());
-        assertFalse(new Planner.Pick("loop", 0).noLoop());
-        assertFalse(new Planner.Pick(null, 0).noLoop());
+        // Automix: noLoop = an override that isn't Loop (crossfade.js loopPicked, noLoop)
+        assertFalse(pick("blend", 0).loop());
+        assertFalse(pick("filter", 0).loop());
+        assertFalse(pick("crossfade", 0).loop());
+        assertFalse(pick(null, 8).loop());
+        assertTrue(pick("loop", 0).loop());
+        assertEquals(null, pick(null, 0));
     }
 
     // the overview's lanes on the mix's clock (automix-overview.js lanes)

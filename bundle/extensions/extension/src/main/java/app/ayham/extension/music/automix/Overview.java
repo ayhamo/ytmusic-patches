@@ -14,7 +14,14 @@ public final class Overview {
     /** Set: nothing to draw, and why (a pick for the pair can still be shown and cleared). */
     public String why;
     public String fromId, toId, pairKey, fromTitle, fromArtist, toTitle, toArtist;
-    public Planner.Pick pick;
+    /** The user's edit of this pair (editor.md), or null: Auto. */
+    public MixOverride override;
+    /** The grids the editor snaps to: A's end grid and B's opening, {downbeatSec, beatSec, bpm}; null: none. */
+    public double[] outGrid, inGrid;
+    /** Each song's length (s), NaN unknown. */
+    public double outDur = Double.NaN, inDur = Double.NaN;
+    /** The first song time the mix can start now (the planner's earliest). */
+    public double earliest = Double.NaN;
     public Planner.Plan plan;
     public Planner.LoopPlan loop;
     public Planner.LoopSchedule x;
@@ -46,6 +53,17 @@ public final class Overview {
 
     public int bars() {
         return loop != null ? loop.totalBars : plan.bars;
+    }
+
+    /** "Auto · Blend": what the planner chose, as the preset row names it with no override (editor.md §7). */
+    public String autoName() {
+        if (loop != null) return "Auto · Loop";
+        if (plan == null) return "Auto";
+        if ("crossfade".equals(plan.style)) return plan.handoff ? "Auto · Hand-over" : plan.bridge ? "Auto · Bridge" : "Auto · Fade";
+        if ("filter".equals(plan.style)) return "Auto · Filter";
+        if ("dropin".equals(plan.shape)) return "Auto · Drop-in";
+        if ("muffle".equals(plan.shape)) return "Auto · Muffle";
+        return plan.glide != null ? "Auto · Glide" : "Auto · Blend";
     }
 
     /** "Blend · 8 bars · 120→124 BPM · 16.0 s" (automix-overview.js describe). */

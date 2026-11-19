@@ -310,10 +310,11 @@ public final class Automix {
         Planner.Sung sung = sung(id, next);
         boolean lyricsWait = (sung.out == null && SungLyrics.pending(id)) || (sung.in == null && SungLyrics.pending(next));
         Planner.Settings s = settings();
-        // the overview's pick for this pair: a blend, filter mix or fade picked means no loop mix
-        Planner.Pick pick = next == null ? null : pick(id + ">" + next);
-        boolean noLoop = pick != null && pick.noLoop();
-        Planner.Plan p = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, pick);
+        // the editor's override for this pair: Loop asks for the loop mix (planned as Auto besides);
+        // anything else means no loop mix (crossfade.js: loopPicked, noLoop)
+        MixOverride ov = next == null ? null : override(id + ">" + next);
+        boolean noLoop = ov != null && !ov.loop();
+        Planner.Plan p = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, noLoop ? ov : null);
         // a pair is looked at again when its lyrics arrive
         String pair = id + ">" + next + "|" + (sung.out != null ? "L" : "m") + (sung.in != null ? "L" : "m");
         if (!noLoop && next != null && from != null && to != null && !lyricsWait && (!pair.equals(loopKey)
@@ -322,7 +323,7 @@ public final class Automix {
         Planner.LoopPlan lp = !noLoop && pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
         amx.loopPending = loopPending;
         // Automix v2: the loop mix plays only when it scores over the blend (automix.js loopOrBlend)
-        Planner.Choice choice = Planner.loopOrBlend(s.version, p, lp);
+        Planner.Choice choice = lp != null && ov != null && ov.loop() ? Planner.Choice.picked(lp.none == null) : Planner.loopOrBlend(s.version, p, lp);
         boolean loop = lp != null && choice.loop && lp.out.loopStart > pos + EARLIEST_LEAD;
         amx.choice = lp != null ? choice.why : null;
         double takeover = loop ? lp.out.loopStart : p.mixOutTrackTime - Mix.HAND_LEAD - (p.style.equals("blend") ? p.rampSongSec : 0);
@@ -441,10 +442,10 @@ public final class Automix {
     // ---------------------------------------------------------------------------------------------
     // The Automix overview (the extension's automix-overview.js reads crossfade.js the same way)
 
+    /** The editor's overrides (editor.md §1), the same key the overview's picks had: old picks migrate as read. */
     private static final String KEY_PICKS = "ayham_automix_pair_picks";
-    private static final int MAX_PICKS = 300;
-    /** "a>b" → what the overview asked for that pair; oldest first. */
-    private static java.util.LinkedHashMap<String, Planner.Pick> picks;
+    /** "a>b" → the user's override for that pair; oldest saved first. */
+    private static java.util.LinkedHashMap<String, MixOverride> overrides;
     private static final java.util.Map<String, String[]> names = new java.util.LinkedHashMap<String, String[]>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(java.util.Map.Entry<String, String[]> e) {
@@ -467,51 +468,69 @@ public final class Automix {
         }
     }
 
-    private static java.util.LinkedHashMap<String, Planner.Pick> picks() {
-        if (picks != null) return picks;
-        picks = new java.util.LinkedHashMap<>();
-        if (app == null) return picks;
+    private static synchronized java.util.LinkedHashMap<String, MixOverride> overrides() {
+        if (overrides != null) return overrides;
+        overrides = new java.util.LinkedHashMap<>();
+        if (app == null) return overrides;
         try {
-            org.json.JSONObject o = new org.json.JSONObject(prefs(app).getString(KEY_PICKS, "{}"));
-            for (java.util.Iterator<String> it = o.keys(); it.hasNext(); ) {
-                String k = it.next();
-                org.json.JSONObject v = o.getJSONObject(k);
-                String style = v.isNull("style") ? null : v.optString("style", null);
-                picks.put(k, new Planner.Pick(style, v.optInt("bars", 0)));
+            Object o = Json.parse(prefs(app).getString(KEY_PICKS, "{}"));
+            if (o instanceof java.util.Map) {
+                for (java.util.Map.Entry<?, ?> e : ((java.util.Map<?, ?>) o).entrySet()) {
+                    MixOverride ov = MixOverride.fromJson(e.getValue());
+                    if (ov != null) overrides.put(String.valueOf(e.getKey()), ov);
+                }
             }
         } catch (Throwable t) {
-            Log.w(TAG, "pair picks unreadable", t);
+            Log.w(TAG, "pair overrides unreadable", t);
         }
-        return picks;
+        return overrides;
     }
 
-    /** The overview's pick for a pair ("a>b"), or null: Auto. */
-    public static Planner.Pick pick(String pairKey) {
-        return picks().get(pairKey);
+    /** The user's override for a pair ("a>b"), or null: Auto. */
+    public static synchronized MixOverride override(String pairKey) {
+        MixOverride o = overrides().get(pairKey);
+        return o == null ? null : o.copy();
     }
 
     /**
-     * A pick for a pair (style null and bars 0: Auto, the pick removed), kept for the next time
-     * the pair plays. The pair playing now is planned again, unless its mix has begun.
+     * Saves a pair's override (null, or nothing but Auto: removed), kept for the next time the pair
+     * plays; returns why it was refused, or null. The pair playing now is planned again, unless its
+     * mix has begun (editor.md §8). Unlocked overrides past MAX_UNLOCKED go oldest first; a lock
+     * past MAX_LOCKED is refused.
      */
-    public static void setPairPick(String pairKey, String style, int bars) {
-        java.util.LinkedHashMap<String, Planner.Pick> m = picks();
-        m.remove(pairKey);
-        if (style != null || bars > 0) m.put(pairKey, new Planner.Pick(style, bars));
-        while (m.size() > MAX_PICKS) m.remove(m.keySet().iterator().next());
-        try {
-            org.json.JSONObject o = new org.json.JSONObject();
-            for (java.util.Map.Entry<String, Planner.Pick> e : m.entrySet()) {
-                org.json.JSONObject v = new org.json.JSONObject();
-                v.put("style", e.getValue().style == null ? org.json.JSONObject.NULL : e.getValue().style);
-                v.put("bars", e.getValue().bars);
-                o.put(e.getKey(), v);
+    public static String setOverride(String pairKey, MixOverride ov) {
+        ov = MixOverride.normalize(ov);
+        synchronized (Automix.class) {
+            java.util.LinkedHashMap<String, MixOverride> m = overrides();
+            MixOverride was = m.get(pairKey);
+            if (ov != null && ov.lock && (was == null || !was.lock)) {
+                int locked = 0;
+                for (MixOverride o : m.values()) if (o.lock) locked++;
+                if (locked >= MixOverride.MAX_LOCKED) return "Already " + MixOverride.MAX_LOCKED + " locked pairs: unlock one first";
             }
-            if (app != null) prefs(app).edit().putString(KEY_PICKS, o.toString()).apply();
-        } catch (Throwable t) {
-            Log.w(TAG, "pair picks not saved", t);
+            m.remove(pairKey);
+            if (ov != null) {
+                ov.engine = settings().version == 3 ? 3 : 2;
+                ov.savedAt = System.currentTimeMillis();
+                m.put(pairKey, ov);
+            }
+            int unlocked = 0;
+            for (MixOverride o : m.values()) if (!o.lock) unlocked++;
+            for (java.util.Iterator<MixOverride> it = m.values().iterator(); unlocked > MixOverride.MAX_UNLOCKED && it.hasNext(); ) {
+                if (!it.next().lock) {
+                    it.remove();
+                    unlocked--;
+                }
+            }
+            try {
+                java.util.Map<String, Object> o = new java.util.LinkedHashMap<>();
+                for (java.util.Map.Entry<String, MixOverride> e : m.entrySet()) o.put(e.getKey(), e.getValue().toJson());
+                if (app != null) prefs(app).edit().putString(KEY_PICKS, Json.write(o)).apply();
+            } catch (Throwable t) {
+                Log.w(TAG, "pair overrides not saved", t);
+            }
         }
-        Log.i(TAG, "overview pick for " + pairKey + ": " + (style == null ? "auto" : style) + ", " + (bars > 0 ? bars + " bars" : "auto length"));
+        Log.i(TAG, "override for " + pairKey + ": " + (ov == null ? "auto" : Json.write(ov.toJson())));
         // planned afresh (an armed mix, not started yet, is dropped for the new plan)
         if (pairKey.equals(curId + ">" + nextId)) {
             Engine e = engine;
@@ -521,6 +540,7 @@ public final class Automix {
                 amx.shown = null;
             }
         }
+        return null;
     }
 
     /** The playing song jumps to [sec] (the overview's preview: just before the mix). */
@@ -543,6 +563,12 @@ public final class Automix {
         } catch (Throwable t) {
             return -1;
         }
+    }
+
+    /** A song's grid as the editor snaps to it (automix.js editorGrid): its end grid for the mix-out, its opening for the mix-in. */
+    static double[] editorGrid(Analysis a, boolean out) {
+        Planner.Grid g = a == null ? null : Planner.gridOf(out ? Planner.asOutgoing(a) : a);
+        return g == null ? null : new double[]{g.downbeatSec, g.beatSec, g.bpm};
     }
 
     /** The coming mix, or the one playing, for the overview (crossfade.js overviewSnapshot). */
@@ -581,7 +607,14 @@ public final class Automix {
             o.toId = next;
         }
         o.pairKey = o.fromId + ">" + o.toId;
-        o.pick = pick(o.pairKey);
+        o.override = override(o.pairKey);
+        if (app != null) {
+            Analysis fa = Analyzer.get(app, o.fromId), ta = Analyzer.get(app, o.toId);
+            o.outGrid = editorGrid(fa, true);
+            o.inGrid = editorGrid(ta, false);
+            o.outDur = fa != null ? fa.durationSec : Double.NaN;
+            o.inDur = ta != null ? ta.durationSec : Double.NaN;
+        }
         if (!live) {
             Object[] pf = Analyzer.progress(o.fromId), pt = Analyzer.progress(o.toId);
             if (pf != null || pt != null) {
@@ -630,6 +663,7 @@ public final class Automix {
                 if (pos >= 0) {
                     o.at = pos - start;
                     o.left = takeover - pos;
+                    o.earliest = pos + EARLIEST_LEAD;
                 }
             } catch (Throwable ignored) {
             }

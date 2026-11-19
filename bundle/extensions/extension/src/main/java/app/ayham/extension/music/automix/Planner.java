@@ -28,25 +28,6 @@ public final class Planner {
         public int bars;
     }
 
-    /**
-     * What the Automix overview asked for one pair of songs (automix.js plan's pick): a style
-     * (loop | blend | filter | crossfade; null: Auto) and a length in bars (0: Auto).
-     */
-    public static final class Pick {
-        public String style;
-        public int bars;
-
-        public Pick(String style, int bars) {
-            this.style = style;
-            this.bars = bars;
-        }
-
-        /** A blend, filter mix or fade picked (or a length): no loop mix for this pair. */
-        public boolean noLoop() {
-            return "blend".equals(style) || "filter".equals(style) || "crossfade".equals(style) || (style == null && bars > 0);
-        }
-    }
-
     /** Sung spans of each song from synced lyrics ([start, end] seconds), or null: the vocal mask. */
     public static final class Sung {
         public double[][] out, in;
@@ -56,6 +37,10 @@ public final class Planner {
         public String style;            // blend | filter | crossfade | loop
         public boolean fallback;
         public String reason;
+        /** The editor's preset whose curves replaced the planner's (editor.md §9), or null. */
+        public String preset;
+        /** What an override asked for that the planner would have refused or had to move (editor.md §6). */
+        public List<String> warnings;
         public boolean v2;
         /** Automix v2's blend (its evidence fields below are set). */
         public boolean v3;
@@ -104,6 +89,11 @@ public final class Planner {
             if (glide != null) b.append(String.format(Locale.US, ", glide x%.4f over %d beats", glide.q, glide.beats));
             if (trim != null && (trim.outDb != 0 || trim.inDb != 0)) b.append(String.format(Locale.US, ", trim out %.1f / in %.1f dB", trim.outDb, trim.inDb));
             if (reason != null) b.append(" (").append(reason).append(')');
+            if (preset != null || warnings != null) {
+                b.append(" [editor: ").append(preset != null ? preset : "auto");
+                if (warnings != null) for (String w : warnings) b.append("; ").append(w);
+                b.append(']');
+            }
             if (v2 && !style.equals("crossfade")) {
                 b.append(String.format(Locale.US, " [AutoDJ: both sing %d%%", Math.round(clash * 100)));
                 if (vocalsBy != null) b.append(" (").append(vocalsBy).append(')');
@@ -253,24 +243,75 @@ public final class Planner {
         return plan(s, fromId, toId, from, to, durationSec, pos, earliest, sung, null);
     }
 
-    /** With the overview's pick for this pair: a length picked comes before the setting. */
+    /**
+     * With the editor's override for this pair (editor.md §9; a pick from before the editor is
+     * migrated as it's read). Its length comes before the setting; a preset other than Auto
+     * replaces the plan's gain, shelves and filters, and the planner's tempo stays.
+     */
     public static Plan plan(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
-                            double pos, double earliest, Sung sung, Pick pick) {
-        if (pick != null && pick.bars > 0) {
-            Settings pinned = new Settings();
-            pinned.version = s.version;
-            pinned.keyAware = s.keyAware;
-            pinned.bars = pick.bars;
-            s = pinned;
+                            double pos, double earliest, Sung sung, MixOverride ov) {
+        int pinned = ov != null ? ov.pinnedBars() : 0;
+        if (pinned > 0) {
+            Settings p = new Settings();
+            p.version = s.version;
+            p.keyAware = s.keyAware;
+            p.bars = pinned;
+            s = p;
         }
-        Plan p = planFor(s, fromId, toId, from, to, durationSec, pos, earliest, sung, pick);
+        List<String> warnings = new ArrayList<>();
+        Plan p = planFor(s, fromId, toId, from, to, durationSec, pos, earliest, sung, ov, warnings);
         p.curves = Curves.blend(p);
+        if (ov != null && !ov.loop()) {
+            if (!warnings.isEmpty()) p.warnings = warnings;
+            boolean both = from != null && to != null;
+            Curves pc = !(p.fallback && !both) ? MixOverride.presetCurves(ov, p.durationSec, p.style.equals("crossfade") ? Double.NaN : p.beatSec) : null;
+            if (pc != null) {
+                // the preset's gain, shelves and filters; the planner's tempo stays
+                if (p.curves.out.containsKey("rate")) pc.out.put("rate", p.curves.out.get("rate"));
+                if (p.curves.in.containsKey("rate")) pc.in.put("rate", p.curves.in.get("rate"));
+                p.curves = pc;
+                p.preset = ov.preset;
+                // the phone: Morphe's crossfade can't play a preset, our decks can
+                if (both) p.fallback = false;
+            }
+        }
         return p;
     }
 
+    /**
+     * Beat match Off (or Sync/Glide out of range): both songs at their own speed, overlapping over
+     * the window and length asked for; with neither asked for, the plain crossfade at the song's end.
+     */
+    static Plan overlap(Analysis cur, Analysis next, Grid fromGrid, MixOverride ov, double earliest, String reason, List<String> warnings) {
+        Plan base = fallback(cur, next, earliest, reason);
+        MixOverride.Resolved outW = ov != null ? MixOverride.resolveWindow(ov.out, null) : null;
+        MixOverride.Resolved inW = ov != null ? MixOverride.resolveWindow(ov.in, null) : null;
+        int bars = ov != null ? ov.bars : 0;
+        if (bars == 0 && outW == null && inW == null) return base;
+        double end = musicEnd(cur).durationSec;
+        double D = Math.max(1, Math.min(bars > 0 && fromGrid != null ? bars * fromGrid.barSec : base.durationSec > 0 ? base.durationSec : FALLBACK_SEC,
+                end - 0.3 - earliest));
+        double mixOut = clampWindow(outW != null ? outW.sec : end - 0.3 - D, earliest, Math.max(earliest, end - 0.3 - D), "the mix-out", warnings);
+        double mixIn = inW != null ? clampWindow(inW.sec, 0, Math.max(0, next.durationSec - 10 - D), "the mix-in", warnings) : base.mixInTrackTime;
+        base.fallback = false;
+        base.mixOutTrackTime = mixOut;
+        base.durationSec = D;
+        base.mixInTrackTime = mixIn;
+        base.trim = loudnessTrim(cur, mixOut, D, next, mixIn, D);
+        return base;
+    }
+
+    static double clampWindow(double t, double lo, double hi, String what, List<String> warnings) {
+        double c = clamp(t, lo, hi);
+        if (Math.abs(c - t) > 0.01 && warnings != null) {
+            warnings.add(String.format(Locale.US, "%s moved to %.1f s (%s)", what, c,
+                    t < lo ? (what.equals("the mix-out") ? "already played" : "before the song") : "too close to the end"));
+        }
+        return c;
+    }
+
     private static Plan planFor(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
-                                double pos, double earliest, Sung sung, Pick pick) {
-        String picked = pick == null ? null : pick.style;
+                                double pos, double earliest, Sung sung, MixOverride pick, List<String> warnings) {
         boolean both = from != null && to != null;
         Analysis cur;
         if (both) {
@@ -283,44 +324,74 @@ public final class Planner {
         Analysis next = both ? to : stub(toId, 0);
         Grid fromGrid = gridOf(cur), toGrid = gridOf(next);
         if (sung == null) sung = new Sung();
+        boolean forced = pick != null && pick.forced();
+        String bm = pick != null ? pick.beatMatchOrAuto() : "auto";
+        String family = pick != null ? pick.family : null;
 
-        if ("crossfade".equals(picked) && both) return fallback(cur, next, earliest, "picked in the overview");
+        if (bm.equals("off") && both) {
+            return overlap(cur, next, fromGrid, pick, earliest, family != null || pick.preset == null ? "picked in the overview" : "beat match off", warnings);
+        }
         boolean v3 = s.version == 3;
         if (fromGrid == null || cur.gridConfidence < MIN_GRID_CONFIDENCE) {
+            if (forced && both) {
+                warnings.add("no beat grid at this song's end: plays without beat match");
+                return overlap(cur, next, null, pick, earliest, "this song has no beat grid at its end", warnings);
+            }
             if (v3 && both) return handoff(cur, next, earliest, "this song has no beat grid at its end", sung);
             return fallback(cur, next, earliest, both ? "this song has no beat grid at its end" : "songs not analysed in time");
         }
-        if ("filter".equals(picked)) {
-            Grid g = toGrid != null && next.gridConfidence >= MIN_GRID_CONFIDENCE ? toGrid : null;
+        boolean toWeak = toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE;
+        if (forced && both && toWeak) {
+            warnings.add("the next song has no beat grid: plays without beat match");
+            return overlap(cur, next, fromGrid, pick, earliest, "next song has no beat grid", warnings);
+        }
+        if (both && (bm.equals("sync") || bm.equals("glide"))) {
+            double st = stretchOf(foldRate(fromGrid.bpm / toGrid.bpm));
+            if (st > V2_MAX_STRETCH) {
+                String why = "tempos " + Math.round(st * 100) + "% apart: " + (bm.equals("sync") ? "Sync" : "Glide") + " stretches at most "
+                        + Math.round(V2_MAX_STRETCH * 100) + "%, so this plays without beat match";
+                warnings.add(why);
+                return overlap(cur, next, fromGrid, pick, earliest, why, warnings);
+            }
+        }
+        if ("filter".equals(family)) {
+            Grid g = !toWeak ? toGrid : null;
             return filterMix(s, cur, next, fromGrid, g, requestedBars(s, cur, next, fromGrid, toGrid != null ? toGrid.downbeatSec : 0, true), pos, earliest,
                     "picked in the overview", sung);
         }
-        if (v3 && (toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE)) return handoff(cur, next, earliest, "next song has no beat grid", sung);
-        if (toGrid == null || next.gridConfidence < MIN_GRID_CONFIDENCE) {
+        if (v3 && toWeak) return handoff(cur, next, earliest, "next song has no beat grid", sung);
+        if (toWeak) {
             return filterMix(s, cur, next, fromGrid, null, requestedBars(s, cur, next, fromGrid, 0, true), pos, earliest, "next song has no beat grid", sung);
         }
 
         double ratio = foldRate(fromGrid.bpm / toGrid.bpm);
         // v2: never more than V2_MAX_STRETCH of speed-up, never two 808 styles at once, never
-        // keys that clash badly; it can't beatmatch those, so it hands over instead
+        // keys that clash badly; it can't beatmatch those, so it hands over instead (an override
+        // is the user's choice: the style gates warn instead)
         if (v3 && stretchOf(ratio) > V2_MAX_STRETCH) {
             return handoff(cur, next, earliest, "tempos " + Math.round(stretchOf(ratio) * 100) + "% apart (v2 stretches at most "
                     + Math.round(V2_MAX_STRETCH * 100) + "%)", sung);
         }
         double contrast = subBassContrast(cur, next);
         if (v3 && contrast >= V2_SUB_BASS_VETO) {
-            return handoff(cur, next, earliest, "different sub-bass styles (" + String.format(Locale.US, "%.2f", contrast) + " apart)", sung);
+            if (!forced) return handoff(cur, next, earliest, "different sub-bass styles (" + String.format(Locale.US, "%.2f", contrast) + " apart)", sung);
+            warnings.add("the productions clash (sub-bass " + String.format(Locale.US, "%.2f", contrast) + " apart)");
         }
         Harmonic harmonic = v3 ? harmonicEvidence(cur, next) : null;
         if (harmonic != null && harmonic.severeClash) {
-            return handoff(cur, next, earliest, "the keys clash (" + cur.keyName + " → " + next.keyName + ", " + js(harmonic.score) + ")", sung);
+            if (!forced) return handoff(cur, next, earliest, "the keys clash (" + cur.keyName + " → " + next.keyName + ", " + js(harmonic.score) + ")", sung);
+            warnings.add("the keys clash (" + cur.keyName + " → " + next.keyName + ")");
         }
         if (!stretchAllowed(ratio)) {
             return filterMix(s, cur, next, fromGrid, toGrid, requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, true), pos, earliest,
                     "tempos " + Math.round(Math.abs(ratio - 1) * 100) + "% apart", sung);
         }
-        // Automix v2: over 4% apart, a glide on both songs instead of the speed-up (glideSteps)
-        double glideQ = v3 && stretchOf(ratio) > V2_MAX_CONSTANT ? 1 / ratio : Double.NaN;
+        // Tempo only moves up: the next song faster, the playing one is brought up to it before the
+        // blend; slower, it is sped up. Automix v2: over 4% apart, a glide on both songs instead
+        // (glideSteps). The editor's Sync: always the speed-up; Glide: always the glide.
+        double glideQ = bm.equals("sync") ? Double.NaN
+                : bm.equals("glide") ? (Math.abs(ratio - 1) > 1e-4 ? 1 / ratio : Double.NaN)
+                : v3 && stretchOf(ratio) > V2_MAX_CONSTANT ? 1 / ratio : Double.NaN;
         boolean gliding = !Double.isNaN(glideQ);
         double rate = gliding ? 1 : ratio < 1 ? 1 : ratio;
         double outRate = gliding ? 1 : ratio < 1 ? 1 / ratio : 1;
@@ -329,7 +400,7 @@ public final class Planner {
         // AutoDJ's key-aware length (its own toggle); Automix v2: Orchard's key score, always on
         String keyClash = v3 ? (harmonic.shortBlend ? cur.keyName + " → " + next.keyName + ", " + js(harmonic.score) : null)
                 : s.version >= 2 && s.keyAware ? keysClash(cur, next) : null;
-        boolean pinnedBars = pick != null && pick.bars > 0;
+        boolean pinnedBars = pick != null && pick.pinnedBars() > 0;
         int bars = keyClash != null && !pinnedBars ? keyClashBars(fromGrid) : requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, false);
         int effBars = effectiveBlendBars(bars, cur.gridConfidence, next.gridConfidence);
         double outSpan = effBars * fromGrid.barSec;
@@ -342,7 +413,17 @@ public final class Planner {
         double mixOut = naturalMixOut(fromGrid, v2 ? musicEnd(cur) : cur, outSpan);
         if (mixOut < pos + rampSongSec) mixOut = phraseAtOrAfter(fromGrid, first);
         if (mixOut < first) mixOut = downbeatAtOrAfter(fromGrid, first);
+        // the editor's window (editor.md §6): A's mix-out on A's end grid, clamped to what can still play
+        MixOverride.Resolved wOut = pick != null ? MixOverride.resolveWindow(pick.out, fromGrid) : null;
+        if (wOut != null) {
+            mixOut = clampWindow(wOut.sec, first, Math.max(first, Math.min(musicEnd(cur).durationSec, cur.durationSec - 0.3) - outSpan), "the mix-out", warnings);
+            if (wOut.moved) warnings.add("the mix-out moved with a new beat grid");
+        }
         if (mixOut + outSpan > cur.durationSec - 0.3) {
+            if (forced) {
+                warnings.add("too close to the end for the window asked for");
+                return overlap(cur, next, fromGrid, pick, earliest, "too close to the end for a blend", warnings);
+            }
             if (v3) return handoff(cur, next, earliest, "too close to the end for a blend", sung);
             return filterMix(s, cur, next, fromGrid, toGrid, bars, pos, earliest, "too close to the end for a blend", sung);
         }
@@ -354,7 +435,12 @@ public final class Planner {
         if (mixIn < toGrid.downbeatSec) mixIn = toGrid.downbeatSec;
 
         Reroute dj = null;
-        if (v2) {
+        MixOverride.Resolved wIn = pick != null ? MixOverride.resolveWindow(pick.in, toGrid) : null;
+        if (wIn != null) {
+            mixIn = clampWindow(wIn.sec, 0, Math.max(0, next.durationSec - 10 - outSpan * inPerOut), "the mix-in", warnings);
+            if (wIn.moved) warnings.add("the mix-in moved with a new beat grid");
+        }
+        if (v2 && wIn == null && wOut == null) {
             mixIn = capIncomingSkip(next, toGrid, mixIn);
             dj = rerouteForVocals(cur, next, fromGrid, toGrid, mixOut, mixIn, outSpan, inPerOut, Math.max(first, pos + rampSongSec), sung);
             mixOut = dj.mixOut;
@@ -364,11 +450,19 @@ public final class Planner {
         Swap swap = v3 && effBars >= 2 ? vocalSafeSwap(cur, mixOut, outSpan, effBars, sung.out) : null;
 
         // v2's fallback ladder for a pair that beatmatches but can't blend: a drop-in, then a
-        // muffle, else the hand-over
+        // muffle, else the hand-over (an override plays as asked, with the reason as a warning)
         String shape = null, shapeWhy = null;
         double muffleLead = Double.NaN;
         double djClash = dj != null ? dj.clash : 0;
-        if (v3 && (introShort || djClash > V2_CLASH_MAX)) {
+        if (forced && v3) {
+            if (dj == null) {
+                double bothSing = vocalOverlap(cur, next, mixOut, outSpan, mixIn, inPerOut, sung);
+                djClash = Double.isNaN(bothSing) ? 0 : bothSing;
+            }
+            if (djClash > V2_CLASH_MAX) warnings.add("both sing over " + Math.round(djClash * 100) + "% of the window");
+            if (introShort && wIn == null) warnings.add("no intro in the next song to blend over");
+        }
+        if (v3 && !forced && (introShort || djClash > V2_CLASH_MAX)) {
             String why = introShort ? "no intro in the next song to blend over" : "both would sing " + Math.round(djClash * 100) + "% of a blend";
             double dSpan = DROP_IN_BARS * fromGrid.barSec;
             GlideSteps dGlide = gliding ? glideSteps(glideQ, DROP_IN_BARS * 4, fromGrid.beatSec) : null;
@@ -1022,6 +1116,11 @@ public final class Planner {
         Choice(boolean loop, String why) {
             this.loop = loop;
             this.why = why;
+        }
+
+        /** The editor's Loop preset: the loop mix whenever one was found (crossfade.js loopPicked). */
+        static Choice picked(boolean found) {
+            return new Choice(found, "Loop picked for these two");
         }
     }
 

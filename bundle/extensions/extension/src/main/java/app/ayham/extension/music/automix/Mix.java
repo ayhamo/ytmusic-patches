@@ -400,6 +400,24 @@ public final class Mix {
 
     /** The blend's gains, EQ and filters, and its names (scheduleDeckBlend, blendShape). */
     private static void shape(Mix m, Planner.Plan p, double rate) {
+        if (p.preset != null && p.curves != null) {
+            preset(m, p);
+        } else {
+            planned(m, p);
+        }
+        String name = p.v3 ? "Automix v2" : m.v2 ? "Automix Classic" : "Automix";
+        String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : p.glide != null ? " · glide" : "";
+        m.title = p.style.equals("blend") ? name + kind : p.style.equals("filter") ? name + " · filter mix"
+                : p.handoff ? "Automix v2 · hand-over" : p.bridge ? "Automix v2 · beatless bridge" : "Automix · crossfade";
+        m.sub = p.style.equals("crossfade")
+                ? String.format(Locale.US, "%.1f s%s", m.D, p.reason != null ? " · " + p.reason : "")
+                : String.format(Locale.US, "%d bars · %.1f s · %d BPM%s", p.bars, m.D, Math.round(p.bpm),
+                p.glide != null ? String.format(Locale.US, " · glide ×%.3f", p.glide.q) : p.style.equals("blend") && Math.abs(rate - 1) > 0.002 ? String.format(Locale.US, " · ×%.3f", rate) : "");
+        m.note = p.toString() + (p.kick != null ? "; " + p.kick : "");
+    }
+
+    /** The planner's own fader, EQ and filters (scheduleDeckBlend, blendShape). */
+    private static void planned(Mix m, Planner.Plan p) {
         // gains: AutoDJ's fader for a version 2 blend or filter mix, else equal power; Automix v2's loudness trim on either
         float[][] dj = m.v2 ? djShape(p, m.D) : null;
         float[][] g = Curves.trimmed(p, dj != null ? dj[0] : ep(true), dj != null ? dj[1] : ep(false));
@@ -425,16 +443,63 @@ public final class Mix {
                 m.in.lpHz.set(350, 0).set(350, m.t0).exp(20000, m.t0 + m.D);
             }
         }
+    }
 
-        String name = p.v3 ? "Automix v2" : m.v2 ? "Automix Classic" : "Automix";
-        String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : p.glide != null ? " · glide" : "";
-        m.title = p.style.equals("blend") ? name + kind : p.style.equals("filter") ? name + " · filter mix"
-                : p.handoff ? "Automix v2 · hand-over" : p.bridge ? "Automix v2 · beatless bridge" : "Automix · crossfade";
-        m.sub = p.style.equals("crossfade")
-                ? String.format(Locale.US, "%.1f s%s", m.D, p.reason != null ? " · " + p.reason : "")
-                : String.format(Locale.US, "%d bars · %.1f s · %d BPM%s", p.bars, m.D, Math.round(p.bpm),
-                p.glide != null ? String.format(Locale.US, " · glide ×%.3f", p.glide.q) : p.style.equals("blend") && Math.abs(rate - 1) > 0.002 ? String.format(Locale.US, " · ×%.3f", rate) : "");
-        m.note = p.toString() + (p.kick != null ? "; " + p.kick : "");
+    /**
+     * The editor's preset (editor.md §9): the plan's own curves play as points (linear; Hz
+     * exponential; two points at one t a step), the loudness trim on the faders (crossfade.js
+     * presetGains, presetShape). A curve the preset leaves out stays neutral.
+     */
+    private static void preset(Mix m, Planner.Plan p) {
+        Curves c = p.curves;
+        Planner.Trim t = p.trim;
+        boolean trim = t != null && (t.inDb != 0 || t.outDb != 0);
+        double gi = trim ? Math.pow(10, t.inDb / 20) : 1, go = trim ? Math.pow(10, t.outDb / 20) : 1;
+        m.out.gain.set(0, -H).lin(1, 0).set(1, m.t0);
+        play(m.out.gain, c.out.get("gain"), m.t0, m.D, false, trim ? x -> 1 + (go - 1) * x * x * (3 - 2 * x) : null);
+        m.out.gain.set(0, m.t0 + m.D);
+        m.in.gain.set(0, 0);
+        play(m.in.gain, c.in.get("gain"), m.t0, m.D, false, trim ? x -> gi + (1 - gi) * x * x * (3 - 2 * x) : null);
+        m.in.gain.set(1, m.t0 + m.D);
+        play(m.out.lowDb, c.out.get("bassDb"), m.t0, m.D, false, null);
+        play(m.in.lowDb, c.in.get("bassDb"), m.t0, m.D, false, null);
+        play(m.out.highDb, c.out.get("highDb"), m.t0, m.D, false, null);
+        play(m.in.highDb, c.in.get("highDb"), m.t0, m.D, false, null);
+        play(m.out.hpHz, c.out.get("highpassHz"), m.t0, m.D, true, null);
+        play(m.in.hpHz, c.in.get("highpassHz"), m.t0, m.D, true, null);
+        play(m.out.lpHz, c.out.get("lowpassHz"), m.t0, m.D, true, null);
+        play(m.in.lpHz, c.in.get("lowpassHz"), m.t0, m.D, true, null);
+    }
+
+    /** A curve's points onto a lane from t0, [mul] scaling them by the window's fraction (sampled in 32 steps too). */
+    static void play(Lane lane, double[][] pts, double t0, double D, boolean geo, java.util.function.DoubleUnaryOperator mul) {
+        if (pts == null || pts.length == 0) return;
+        java.util.TreeSet<Double> ts = new java.util.TreeSet<>();
+        for (double[] q : pts) ts.add(Math.round(q[0] * 1e6) / 1e6);
+        if (mul != null) for (int k = 0; k <= 32; k++) ts.add(Math.round(D * k / 32 * 1e6) / 1e6);
+        boolean first = true;
+        for (double tt : ts) {
+            double k = mul != null ? mul.applyAsDouble(clamp(tt / D, 0, 1)) : 1;
+            int n = 0;
+            double v0 = 0, v1 = 0;
+            for (double[] q : pts) {
+                if (Math.abs(q[0] - tt) < 1e-6) {
+                    if (n == 0) v0 = q[1];
+                    v1 = q[1];
+                    n++;
+                }
+            }
+            if (n == 0) v0 = v1 = Overview.value(pts, tt, 0);
+            if (first) {
+                lane.set(v0 * k, t0 + tt);
+                first = false;
+            } else if (geo && v0 > 0) {
+                lane.exp(v0 * k, t0 + tt);
+            } else {
+                lane.lin(v0 * k, t0 + tt);
+            }
+            if (n > 1) lane.set(v1 * k, t0 + tt);
+        }
     }
 
     /** The loop mix, its clock from the outgoing loop's start (scheduleLoopMix). */

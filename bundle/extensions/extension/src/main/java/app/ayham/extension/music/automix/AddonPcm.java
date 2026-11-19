@@ -55,6 +55,9 @@ public final class AddonPcm {
         return StreamDeck.youtubeCopy(c, id);
     }
 
+    /** The decks' safety ceiling for a boosted song (the fit's boost already keeps it under -1 dBTP). */
+    static final double DECK_CEILING_DBFS = -0.3;
+
     /** Decodes the prepared file again and writes its opening and end on YouTube's timeline. */
     public static void write(Context c, final AddonPrep.Prepared p) throws Exception {
         long t0 = System.currentTimeMillis();
@@ -117,8 +120,17 @@ public final class AddonPcm {
             throw t;
         }
         Analyzer.Pcm h = head(c, p.id), t = tail(c, p.id);
-        Log.i(TAG, String.format(Locale.US, "%s: deck audio from %s written in %d ms (opening %.1f-%.1f s, end %.1f-%.1f s at %d Hz)", p.id, p.addon,
-                System.currentTimeMillis() - t0, h.start(), h.end(), t.start(), t.end(), h.rate));
+        // the boost toward YouTube's loudness, as our player has it (LoudnessEnhancer): in the samples.
+        // The fit's boost keeps the true peak at -1 dBTP, so the limiter is only a safety net
+        String boost = "";
+        double db = p.boostDb();
+        if (db > 0.005) {
+            app.ayham.extension.music.addons.AtmosWav.Limited a = app.ayham.extension.music.addons.AtmosWav.limit(hf, 16, 2, h.rate, db, DECK_CEILING_DBFS);
+            app.ayham.extension.music.addons.AtmosWav.Limited b = app.ayham.extension.music.addons.AtmosWav.limit(tf, 16, 2, t.rate, db, DECK_CEILING_DBFS);
+            boost = String.format(Locale.US, ", boost: opening %s, end %s", a, b);
+        }
+        Log.i(TAG, String.format(Locale.US, "%s: deck audio from %s written in %d ms (opening %.1f-%.1f s, end %.1f-%.1f s at %d Hz)%s", p.id, p.addon,
+                System.currentTimeMillis() - t0, h.start(), h.end(), t.start(), t.end(), h.rate, boost));
     }
 
     /** One deck file: source-rate frames in, written at the output rate as 16-bit stereo. */

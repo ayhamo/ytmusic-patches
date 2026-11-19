@@ -528,6 +528,34 @@ public final class AddonDirect {
             session = s;
             // the old session (if any) is closed and released with it
             app.ayham.extension.music.features.EqPresets.attachDeck(this, s);
+            boost(s);
+        }
+
+        /** The fit's boost toward YouTube's loudness (the player's volume stops at 1): Android's LoudnessEnhancer. */
+        private android.media.audiofx.LoudnessEnhancer enhancer;
+
+        private void boost(int s) {
+            releaseBoost();
+            double db = p.boostDb();
+            if (db < 0.005) return;
+            try {
+                enhancer = new android.media.audiofx.LoudnessEnhancer(s);
+                enhancer.setTargetGain((int) Math.round(db * 100));
+                enhancer.setEnabled(true);
+                Log.i(TAG, String.format(Locale.US, "%s: boosted %+.2f dB toward YouTube's loudness (LoudnessEnhancer on session %d)", p.id, db, s));
+            } catch (Throwable t) {
+                releaseBoost();
+                Log.w(TAG, p.id + ": no LoudnessEnhancer: it plays " + String.format(Locale.US, "%.2f", db) + " dB under YouTube", t);
+            }
+        }
+
+        private void releaseBoost() {
+            if (enhancer == null) return;
+            try {
+                enhancer.release();
+            } catch (Throwable ignored) {
+            }
+            enhancer = null;
         }
 
         void play(boolean on) {
@@ -928,6 +956,7 @@ public final class AddonDirect {
             Object x = pl;
             pl = null;
             app.ayham.extension.music.features.EqPresets.releaseDeck(this);
+            releaseBoost();
             session = 0;
             if (x != null) {
                 try {

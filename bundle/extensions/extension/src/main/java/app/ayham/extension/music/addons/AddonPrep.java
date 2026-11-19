@@ -82,6 +82,16 @@ public final class AddonPrep {
             return (float) Math.pow(10, Math.min(0, gainDb) / 20);
         }
 
+        /**
+         * The boost over 0 dB (offset-map.md, Level: at most +6 dB, lowered until the true peak stays
+         * at or under -1 dBTP; the fit's gainDb is that). The player's volume stops at 1, so our
+         * player applies it with Android's LoudnessEnhancer and the decks in their samples: 0 for a
+         * cut, or for our own decode, which has it baked in.
+         */
+        public double boostDb() {
+            return ownDecode() ? 0 : Math.max(0, gainDb);
+        }
+
         /** Dolby Atmos: the fit's gain, in the WAV's samples (AtmosWav); gainDb is then 0. */
         public double bakedDb;
         /** Dolby Atmos: the WAV our decode was written to (AtmosWav), deleted with the song even when saved. */
@@ -94,8 +104,8 @@ public final class AddonPrep {
 
         @Override
         public String toString() {
-            return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s%s %d Hz %d ch, score %.3f", id, addon, offsetSec, gainDb + bakedDb,
-                    gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", atmos ? "Dolby Atmos " : "", codec, rate, channels, score)
+            return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s%s %d Hz %d ch, score %.3f", id, addon, offsetSec,
+                    gainDb + bakedDb, gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", atmos ? "Dolby Atmos " : "", codec, rate, channels, score)
                     + (ownDecode() ? " (from our decode)" : "");
         }
     }

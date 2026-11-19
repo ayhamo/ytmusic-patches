@@ -140,19 +140,31 @@ public final class AtmosWav {
         // a WAV that is gone or empty must not pass as the song's audio (RandomAccessFile would
         // create it)
         if (wav == null || wav.length() <= HEADER) throw new IOException("Atmos WAV missing or empty: " + wav);
+        int channels, rate;
+        try (RandomAccessFile f = new RandomAccessFile(wav, "r"); FileChannel ch = f.getChannel()) {
+            ByteBuffer hdr = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN);
+            ch.read(hdr, 0);
+            channels = Math.max(1, hdr.getShort(22));
+            rate = hdr.getInt(24) > 0 ? hdr.getInt(24) : 48000;
+        }
+        return limit(wav, HEADER, channels, rate, gainDb, CEILING_DBFS);
+    }
+
+    /**
+     * The gain into a file of 16-bit little-endian samples after a [header] of that many bytes, in
+     * place, under the look-ahead limiter (see scale) with its ceiling at [ceilingDbfs].
+     */
+    public static Limited limit(File file, long header, int channels, int rate, double gainDb, double ceilingDbfs) throws IOException {
         Limited out = new Limited();
         out.gainDb = gainDb;
         if (Math.abs(gainDb) < 0.005) return out;
-        try (RandomAccessFile f = new RandomAccessFile(wav, "rw"); FileChannel ch = f.getChannel()) {
-            ByteBuffer hdr = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN);
-            ch.read(hdr, 0);
-            int channels = Math.max(1, hdr.getShort(22));
-            int rate = hdr.getInt(24) > 0 ? hdr.getInt(24) : 48000;
-            long len = (ch.size() - HEADER) & ~1L;
-            MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_WRITE, HEADER, len);
+        try (RandomAccessFile f = new RandomAccessFile(file, "rw"); FileChannel ch = f.getChannel()) {
+            long len = (ch.size() - header) & ~1L;
+            if (len <= 0) return out;
+            MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_WRITE, header, len);
             ShortBuffer s = m.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
             int frames = s.limit() / channels;
-            new Limiter(rate, (float) Math.pow(10, gainDb / 20), (float) (32768 * Math.pow(10, CEILING_DBFS / 20))).run(s, channels, frames, out);
+            new Limiter(rate, (float) Math.pow(10, gainDb / 20), (float) (32768 * Math.pow(10, ceilingDbfs / 20))).run(s, channels, frames, out);
             m.force();
         }
         return out;

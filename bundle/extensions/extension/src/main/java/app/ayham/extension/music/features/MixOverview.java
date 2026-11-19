@@ -20,6 +20,7 @@ import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -73,6 +74,7 @@ final class MixOverview {
     private static final String[] LANE_TITLES = {"Volume", "EQ", "Effect"};
     private static final int NUDGE_MS = 10, NUDGE_MAX_MS = 2000;
     private static final long FRAME_MS = 50, LONG_PRESS_MS = 400;
+    private static final double MAX_ZOOM = 8;
 
     private static Dialog dialog;
     private static Activity owner;
@@ -830,7 +832,8 @@ final class MixOverview {
     /**
      * The drawing (automix-overview.js draw/drawStatic): the static picture (waveforms, grid, frame,
      * the lanes' curves, the bars chip) once per plan, then each frame only the playhead. A song's
-     * lane follows the finger while it is dragged under the frame.
+     * lane follows the finger while it is dragged under the frame. Two fingers zoom the picture (up
+     * to 8x) around where they are and move it as they move; a new pair starts zoomed out.
      */
     private static final class MixView extends View {
         String sig = "";
@@ -847,9 +850,36 @@ final class MixOverview {
         };
         private float downX;
         private boolean moved;
+        /** The part of the picture in view, as fractions of the whole (pad, mix, pad). */
+        private double f0 = 0, f1 = 1, anchor;
+        private String zoomPair;
+        private boolean pinching;
+        private final ScaleGestureDetector pinch;
 
         MixView(Context c) {
             super(c);
+            pinch = new ScaleGestureDetector(c, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                @Override
+                public boolean onScaleBegin(ScaleGestureDetector g) {
+                    int w = getWidth();
+                    if (w == 0) return false;
+                    anchor = f0 + (g.getFocusX() / w) * (f1 - f0);
+                    return true;
+                }
+
+                @Override
+                public boolean onScale(ScaleGestureDetector g) {
+                    int w = getWidth();
+                    if (w == 0) return false;
+                    // the point under the fingers stays under them
+                    double span = Math.max(1 / MAX_ZOOM, Math.min(1, (f1 - f0) / g.getScaleFactor()));
+                    double a = Math.max(0, Math.min(1 - span, anchor - (g.getFocusX() / w) * span));
+                    f0 = a;
+                    f1 = a + span;
+                    invalidate();
+                    return true;
+                }
+            });
         }
 
         void show(Overview o) {
@@ -861,9 +891,22 @@ final class MixOverview {
         public boolean onTouchEvent(MotionEvent e) {
             Overview o = s;
             int w = getWidth();
+            if (o == null || o.why != null || w == 0) return false;
+            pinch.onTouchEvent(e);
             switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_POINTER_DOWN: {
+                    // a second finger: a zoom, not a drag (the drag is dropped, nothing saved)
+                    pinching = true;
+                    removeCallbacks(longPress);
+                    drag = null;
+                    refusedNote = "";
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                    invalidate();
+                    return true;
+                }
                 case MotionEvent.ACTION_DOWN: {
-                    if (!windowEditable(o) || w == 0) return false;
+                    pinching = false;
+                    if (!windowEditable(o)) return true;
                     Drag d = new Drag();
                     d.out = e.getY() < getHeight() / 2f;
                     d.x0 = e.getX();
@@ -881,7 +924,7 @@ final class MixOverview {
                 }
                 case MotionEvent.ACTION_MOVE: {
                     Drag d = drag;
-                    if (d == null) return false;
+                    if (d == null || pinching) return true;
                     if (!moved && Math.abs(e.getX() - downX) > 8 * getResources().getDisplayMetrics().density) {
                         moved = true;
                         // a long-press is a hold before the drag; moving first keeps downbeats
@@ -896,12 +939,13 @@ final class MixOverview {
                     removeCallbacks(longPress);
                     Drag d = drag;
                     drag = null;
-                    if (d != null && moved && e.getActionMasked() == MotionEvent.ACTION_UP) dragEnd(d);
+                    if (d != null && moved && !pinching && e.getActionMasked() == MotionEvent.ACTION_UP) dragEnd(d);
+                    pinching = false;
                     invalidate();
                     return true;
                 }
                 default:
-                    return false;
+                    return true;
             }
         }
 
@@ -911,12 +955,18 @@ final class MixOverview {
             int w = getWidth(), h = getHeight();
             if (o == null || o.why != null || w == 0 || h == 0) return;
             double pad = Math.max(4, o.D * 0.24);
-            t0 = -pad;
-            t1 = o.D + pad;
+            if (!java.util.Objects.equals(zoomPair, o.pairKey)) {
+                zoomPair = o.pairKey;
+                f0 = 0;
+                f1 = 1;
+            }
+            double all = o.D + 2 * pad;
+            t0 = -pad + f0 * all;
+            t1 = -pad + f1 * all;
             Waves.Wave wa = Waves.get(o.fromId, () -> sig = ""), wb = Waves.get(o.toId, () -> sig = "");
             String want = o.pairKey + "|" + o.style() + "|" + (o.plan != null ? String.format(Locale.ROOT, "%.2f|%.2f|%s", o.plan.mixOutTrackTime, o.plan.mixInTrackTime, o.plan.preset) : o.loop.out.loopStart)
                     + "|" + String.format(Locale.ROOT, "%.2f", o.D) + "|" + o.bars() + "|" + w + "x" + h + "|" + (wa != null) + (wb != null) + "|" + o.provisional
-                    + "|" + System.identityHashCode(o.curves);
+                    + "|" + System.identityHashCode(o.curves) + String.format(Locale.ROOT, "|%.4f|%.4f", f0, f1);
             if (!want.equals(sig) || layer == null || layer.getWidth() != w || layer.getHeight() != h) {
                 sig = want;
                 layer = drawStatic(o, w, h, wa, wb);

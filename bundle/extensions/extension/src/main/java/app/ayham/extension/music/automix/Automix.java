@@ -796,7 +796,11 @@ public final class Automix {
      * there is nothing to move or the audio is missing.
      */
     private static Planner.Plan kickLocked(Planner.Plan p, String id, String next) {
-        if (!"blend".equals(p.style) || !(p.beatSec > 0)) return p;
+        if (p.windowIn && "blend".equals(p.style)) {
+            Log.i(TAG, "kick lock: none (the mix-in was placed in the editor)");
+            return p;
+        }
+        if (!Planner.kickLockAllowed(p) || !(p.beatSec > 0)) return p;
         try {
             long t = SystemClock.elapsedRealtime();
             double b = p.beatSec, span = p.durationSec * 1.2 + 10 * b + 1;

@@ -142,7 +142,13 @@ public final class KickLock {
     /** null for a plan that isn't a beatmatched blend. */
     public static Result kickLock(Planner.Plan m, Side outSide, Side inSide) {
         double interval = m.beatSec;
-        if (!"blend".equals(m.style) || !(interval > 0)) return null;
+        if (m.windowIn) {
+            // a mix-in placed in the editor: a shift of up to an eighth of a beat would undo a nudge
+            Result r = new Result();
+            r.none = "the mix-in was placed in the editor";
+            return r;
+        }
+        if (!Planner.kickLockAllowed(m) || !(interval > 0)) return null;
         Clocks ck = blendClocks(m);
         double context = CONTEXT_BEATS * interval;
         Onsets outAt = kickOnsets(outSide, ck.out.applyAsDouble(-context) - 0.05, ck.out.applyAsDouble(ck.D + context) + 0.05);

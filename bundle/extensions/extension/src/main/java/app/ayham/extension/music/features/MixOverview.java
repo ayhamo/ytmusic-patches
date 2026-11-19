@@ -567,16 +567,27 @@ final class MixOverview {
         // the song changed under the finger: the drag was on another pair's songs, nothing saved
         if (d.s.pairKey == null || !d.s.pairKey.equals(Automix.overview().pairKey)) return;
         MixOverride o = d.s.override != null ? d.s.override.copy() : new MixOverride();
-        if (d.out) o.out = d.pos;
-        else o.in = d.pos;
+        windowWith(d.s, o, d.out, d.pos);
         save(d.s.pairKey, o);
+    }
+
+    /**
+     * A window edit of one side (editor.md §6, automix-overview.js windowWith): the other side is
+     * saved too, where the plan on screen has it, so the planner's own moves of an unsaved side
+     * (capIncomingSkip, the vocal re-route) don't move it once the window is the user's.
+     */
+    private static void windowWith(Overview s, MixOverride o, boolean out, MixOverride.Position pos) {
+        if (out) o.out = pos;
+        else o.in = pos;
+        if (out && o.in == null) o.in = positionOf(s, false, s.plan.mixInTrackTime, false, false);
+        if (!out && o.out == null) o.out = positionOf(s, true, s.plan.mixOutTrackTime, false, false);
     }
 
     /** A 10 ms step of one song's position (from where the plan has it, when nothing is saved yet). */
     private static void nudge(boolean out, int dir) {
         Overview s = Automix.overview();
         if (!windowEditable(s)) return;
-        MixOverride o = s.override != null ? s.override : new MixOverride();
+        MixOverride o = s.override != null ? s.override.copy() : new MixOverride();
         MixOverride.Position now = out ? o.out : o.in;
         if (now == null) now = positionOf(s, out, out ? s.plan.mixOutTrackTime : s.plan.mixInTrackTime, false, false);
         int n = now.nudgeMs + dir * NUDGE_MS;
@@ -585,8 +596,7 @@ final class MixOverview {
             return;
         }
         MixOverride.Position p = new MixOverride.Position(now.bar, now.beat, n, Math.round((now.sec + dir * NUDGE_MS / 1000.0) * 1000) / 1000.0);
-        if (out) o.out = p;
-        else o.in = p;
+        windowWith(s, o, out, p);
         save(o);
     }
 
@@ -685,10 +695,11 @@ final class MixOverview {
             enable(b, pair && !(PRESETS[i].equals("loop") && loopNone));
             if (i == 0) set(b, preset.equals("auto") && has ? s.autoName() : "Auto");
         }
-        String[] lanes = ov != null ? ov.lanes() : null;
+        // the lanes a first change starts from: Auto shows Smooth's (lanesNow)
+        String[] lanes = lanesNow(ov);
         for (int k = 0; k < LANES.length; k++) {
             TextView c = laneChips[k];
-            set(c, (lanes != null ? shapeName(lanes[k]) : "Planner's") + " ▾");
+            set(c, shapeName(lanes[k]) + " ▾");
             lit(c, preset.equals("custom"), new int[]{VOLUME, EQ, EFFECT}[k]);
             enable(c, pair && !preset.equals("loop"));
         }

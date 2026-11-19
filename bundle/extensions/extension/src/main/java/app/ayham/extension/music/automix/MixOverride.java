@@ -179,7 +179,8 @@ public final class MixOverride {
         MixOverride n = new MixOverride();
         if (o.preset != null && !o.preset.equals("auto") && Arrays.asList(PRESETS).contains(o.preset)) n.preset = o.preset;
         if ("custom".equals(n.preset)) {
-            if (o.volume != null && o.eq != null && o.effect != null) {
+            // only the schema's values (override.schema.json lanes)
+            if (Arrays.asList(VOLUMES).contains(o.volume) && Arrays.asList(EQS).contains(o.eq) && Arrays.asList(EFFECTS).contains(o.effect)) {
                 n.volume = o.volume;
                 n.eq = o.eq;
                 n.effect = o.effect;
@@ -204,7 +205,7 @@ public final class MixOverride {
     private static Position clean(Position p) {
         if (p == null || Double.isNaN(p.sec) || Double.isInfinite(p.sec)) return null;
         int nudge = (int) Math.max(-2000, Math.min(2000, Math.round(p.nudgeMs / 10.0) * 10));
-        int beat = Math.max(0, Math.min(3, p.beat));
+        int beat = p.beat >= 1 && p.beat <= 3 ? p.beat : 0; // as normalizeOverride: beats 1 to 3, else on the downbeat
         return new Position(p.bar, beat, nudge, Math.round(p.sec * 1e3) / 1e3);
     }
 

@@ -1,5 +1,5 @@
 {
- "notes": "editor.md: every preset and lane shape at a window of D seconds and a beat of beatSec (null: beat match Off) → the curves both engines play (plan.schema.json curves; seconds from the window start). windows: a saved position (override.schema.json $defs.position) on a song grid {downbeatSec, beatSec} → song seconds. expect null: the override is refused (Auto plays).",
+ "notes": "editor.md: every preset and lane shape at a window of D seconds and a beat of beatSec (null: beat match Off) → the curves both engines play (plan.schema.json curves; seconds from the window start). windows: a saved position (override.schema.json $defs.position) on a song grid {downbeatSec, beatSec} → song seconds. expect null: the override is refused (Auto plays). plans: an override (pick) on two steady songs {bpm, sec, downbeatSec} (every beat sure, flat energy, intro 0, outro 20 s before the end), planned at pos (earliest pos + 4.5 s) on Automix engine 2 (Classic) or 3 (v2) → the window played and glide (the plan carries one) and kickLock (Automix v2 only, kickLockAllowed: may its kick lock move the mix-in).",
  "curves": [
   {
    "name": "preset smooth, 8 bars at 120 BPM",
@@ -1863,6 +1863,256 @@
     "sec": 33.26,
     "moved": false,
     "snapped": false
+   }
+  }
+ ],
+ "plans": [
+  {
+   "name": "Slam with beat match Off: still its 2 bars",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 126,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "preset": "slam",
+    "beatMatch": "off"
+   },
+   "expect": {
+    "style": "crossfade",
+    "bars": 0,
+    "durationSec": 4,
+    "mixOutTrackTime": 195.7,
+    "mixInTrackTime": 0,
+    "glide": false,
+    "kickLock": false,
+    "warnings": []
+   }
+  },
+  {
+   "name": "Off with 8 bars: songs at their own speed",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 126,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "beatMatch": "off",
+    "bars": 8
+   },
+   "expect": {
+    "style": "crossfade",
+    "bars": 0,
+    "durationSec": 16,
+    "mixOutTrackTime": 183.7,
+    "mixInTrackTime": 0,
+    "glide": false,
+    "kickLock": false,
+    "warnings": []
+   }
+  },
+  {
+   "name": "a preset with no window: the kick lock may move the mix-in",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "preset": "blend",
+    "bars": 8
+   },
+   "expect": {
+    "style": "blend",
+    "bars": 8,
+    "durationSec": 16,
+    "mixOutTrackTime": 180.4,
+    "mixInTrackTime": 0.4,
+    "glide": false,
+    "kickLock": true,
+    "warnings": [
+     "no intro in the next song to blend over"
+    ]
+   }
+  },
+  {
+   "name": "a saved window: played where saved, the kick lock leaves the mix-in",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "preset": "blend",
+    "bars": 8,
+    "window": {
+     "out": {
+      "bar": 80,
+      "sec": 160.4
+     },
+     "in": {
+      "bar": 8,
+      "nudgeMs": 20,
+      "sec": 16.42
+     }
+    }
+   },
+   "expect": {
+    "style": "blend",
+    "bars": 8,
+    "durationSec": 16,
+    "mixOutTrackTime": 160.4,
+    "mixInTrackTime": 16.42,
+    "glide": false,
+    "kickLock": false,
+    "warnings": []
+   }
+  },
+  {
+   "name": "a saved mix-out past the end: back onto the last downbeat that fits",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "preset": "blend",
+    "bars": 8,
+    "window": {
+     "out": {
+      "bar": 95,
+      "sec": 190.4
+     },
+     "in": {
+      "bar": 8,
+      "sec": 16.4
+     }
+    }
+   },
+   "expect": {
+    "style": "blend",
+    "bars": 8,
+    "durationSec": 16,
+    "mixOutTrackTime": 182.4,
+    "mixInTrackTime": 16.4,
+    "glide": false,
+    "kickLock": false,
+    "warnings": [
+     "the mix-out moved to 182.4 s (too close to the end)"
+    ]
+   }
+  },
+  {
+   "name": "a saved mix-out already played: the planner's own",
+   "engine": 3,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 60,
+   "override": {
+    "v": 1,
+    "preset": "blend",
+    "bars": 8,
+    "window": {
+     "out": {
+      "bar": 2,
+      "sec": 4.4
+     },
+     "in": {
+      "bar": 8,
+      "sec": 16.4
+     }
+    }
+   },
+   "expect": {
+    "style": "blend",
+    "bars": 8,
+    "durationSec": 16,
+    "mixOutTrackTime": 180.4,
+    "mixInTrackTime": 16.4,
+    "glide": false,
+    "kickLock": false,
+    "warnings": [
+     "the mix-out at 4.4 s has already played: Auto's mix-out instead"
+    ]
+   }
+  },
+  {
+   "name": "Glide on Classic: the plan carries the glide",
+   "engine": 2,
+   "out": {
+    "bpm": 120,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "in": {
+    "bpm": 124,
+    "sec": 200,
+    "downbeatSec": 0.4
+   },
+   "pos": 20,
+   "override": {
+    "v": 1,
+    "preset": "smooth",
+    "beatMatch": "glide",
+    "bars": 8
+   },
+   "expect": {
+    "style": "blend",
+    "bars": 8,
+    "durationSec": 15.740525,
+    "mixOutTrackTime": 180.4,
+    "mixInTrackTime": 0.4,
+    "glide": true,
+    "kickLock": false,
+    "warnings": []
    }
   }
  ]

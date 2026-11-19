@@ -193,15 +193,6 @@ public class SpecFixturesTest {
             m.put("subBassContrast", p.subBassContrast);
             m.put("swapAt", p.swapAt);
             m.put("swapMoved", p.swapMoved);
-            if (p.glide == null) {
-                m.put("glide", null);
-            } else {
-                Map<String, Object> g = new LinkedHashMap<>();
-                g.put("q", p.glide.q);
-                g.put("beats", (double) p.glide.beats);
-                g.put("beatOutSec", p.glide.beatOutSec);
-                m.put("glide", g);
-            }
             if (p.harmonic == null) {
                 m.put("harmonic", null);
             } else {
@@ -215,6 +206,16 @@ public class SpecFixturesTest {
                 m.put("harmonic", h);
             }
             m.put("trim", trimJson(p.trim));
+        }
+        // every blend carries its glide (null: none), Classic's too
+        if (p.glide == null) {
+            m.put("glide", null);
+        } else {
+            Map<String, Object> g = new LinkedHashMap<>();
+            g.put("q", p.glide.q);
+            g.put("beats", (double) p.glide.beats);
+            g.put("beatOutSec", p.glide.beatOutSec);
+            m.put("glide", g);
         }
         m.put("v2", p.v2);
         m.put("clash", p.clash);

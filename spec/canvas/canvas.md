@@ -188,27 +188,22 @@ The original is the rule. Each line: what, where.
 
 ### Phone against its original
 
+The phone's 428206d (2026-11-19) brought Apple's scoring (brackets kept, no "and" split, the album in
+the term and the score, BitChord's motion urls), Spotify's album and length checks, Prism's full
+MusicVideoMatch, BestPart, `noFrames`, `choose`, the still refusal, the flash fallback's other part
+and `cropX` to the original. What is left (line numbers from before that commit; some have moved):
+
 - Source order: Apple runs only when `canvasApple=1` (off by default), and the music video is off whenever Spotify is (`canvasSpotify=0`). Metrolist switches Apple with animated covers and the other two with Canvas. `FEAT/AnimatedCover.java:423-425` vs `AnimatedCoverSelection.kt:43-46`.
 - Source order: no wait for a source still loading; each source is asked in turn. `FEAT/AnimatedCover.java:467-593` vs `AnimatedCoverSelection.kt:140`.
 - Cache key: Apple's key holds `|tall`, not the source order; BitChord's holds `spotifyFirst`. `FEAT/AnimatedCover.java:438` vs `CanvasRepository.kt:159-160`.
-- Apple: titles have their brackets stripped before scoring; BitChord keeps them (a remix in brackets scores 19 on the phone, 11 in BitChord). `FEAT/AppleCanvas.java:172-173` vs BC `:204-205`.
-- Apple: "and" splits artists; BitChord does not. `FEAT/AppleCanvas.java:186` vs `CanvasArtwork.kt:91-94`.
 - Apple: the normaliser keeps non-Latin letters; BitChord's keeps a-z and 0-9 only. `FEAT/AppleCanvas.java:189-191` vs `CanvasArtwork.kt:73-79`.
-- Apple: no album in the term or the score (+20/+10). `FEAT/AppleCanvas.java:56, 161-183` vs BC `:55-57, 214-222`.
 - Apple: at most 3 albums read per lookup. `FEAT/AppleCanvas.java:80`.
-- Apple: the alternate is always the other shape; with square and raw but no tall, BitChord's alternate is raw, the phone has none. `FEAT/AppleCanvas.java:154-159, 199-204` vs BC `:323-330`.
 - Apple: a fallback to the iTunes album page (Prism's). `FEAT/AppleCanvas.java:116-147`. Not in BitChord.
-- Spotify: album and length are never checked (passed as null and 0). `FEAT/SpotifyCanvas.java:137` vs ML `:200-211`.
+- Apple: YouTube's player gives no album, so the album part of the term and score is null in use.
 - Spotify: the primary artist is cut from the artist line; Metrolist takes YouTube's first artist. `FEAT/SpotifyCanvas.java:100`.
-- Music video: the phone's matcher is a reduced MusicVideoMatch: no length check (150 s / 4 s), no label channels, no named-source path, a shorter never-list (no `guitar`, `piano`, `drum`, `bass`, `testo`, `highlights`, `daycore`, Hz…), no `ufficiale`, no `//` tail. `FEAT/VideoCanvas.java:235-239, 303-347` vs MVM `:19-145`.
 - Music video: no pairing, no official-type check, no second try with other videos. `FEAT/VideoCanvas.java:246-260` vs `ClipFinder.kt:104-136`.
-- BestPart: a different algorithm. Absolute rise over a ±45 s median (not a ratio with a 0.05 floor), no 0.08 / 0.03 floors, head 12 s (not max(5 s, 2 segments)), tail 8 s (not 30 s), no 60 s minimum, pulled back while the curve rises (not to half the rise), and 40% in when there is no curve. `FEAT/VideoCanvas.java:434-465` vs BestPart `:68-101`.
-- No chorus step and no middle-of-video fallback without frames. `FEAT/ClipJudge.java:167-179`, `FEAT/VideoCanvas.java:78` vs FrameJudge `:72-76, 208`.
-- ClipJudge `choose`: returns none when every window scores 0 (BitChord: the earliest); ties go to the first in the list (Prism: the earlier start). `FEAT/ClipJudge.java:167-179` vs FrameJudge `:196, 203-210`.
-- A video whose every window is left out is not refused; it loops at the peak or 40%. `FEAT/VideoCanvas.java:89-94` vs FrameJudge `:64`.
-- Crop band: as wide as the picture is tall (18 of 32 cells, for square art), not 0.32. `FEAT/ClipJudge.java:211` vs FrameJudge `:247`.
-- Flashing: no earlier cut left means "never shown" at once; Prism first tries one other part. `FEAT/ClipJudge.java:296-301`, `FEAT/VideoCanvas.java:110-128` (it does try one other window) vs ClipRepository `:191-205`. Same outcome.
-- No face-based crop (ClipRefine `cropX`, `sceneCrops`, `closeUp`). `PR/canvas/ClipRefine.kt:132-224`.
+- No chorus source: `choose` takes the chorus as a parameter, null on the phone today.
+- No face-based crop (ClipRefine `sceneCrops`, `closeUp`); `cropX` is Prism's 0.32 band. `PR/canvas/ClipRefine.kt:132-224`.
 - Mesh: cells sampled every min(w, h)/96 px; the lift is applied after resampling and blur, not per cell before; rows below the seam are flipped and turned one column per row (no seeded random). `FEAT/ArtMesh.java:22, 44-61, 90-95` vs BC mesh `:605-606, 637, 677-691`.
 - Backdrop: song-change crossfade 350 ms (Metrolist 300); scrim 0 (Metrolist 0.12). `FEAT/ArtBackdrop.java:43, 46` vs `CanvasLayers.kt:26`, `PlayerArtworkBackground.kt:972`.
 - Badge: the band spans glyph, gap and text (BitChord: the text only); the glyph peaks at full white. `FEAT/PlayerScreen.java:1101-1105` vs PlayerControls `:1911-1913`.
@@ -219,7 +214,7 @@ Fixed on the PC on 2026-11-19, so the cases pass: Apple's inline motion art with
 
 - Apple: the album is added to the term unless the term (with the artist) holds it; BitChord checks the title only. `src/apple-canvas.js:207` vs BC `:55`.
 - Spotify: the length is the player's own, read by the song's id while it plays (`video-canvas-page.js` `playingLength`, passed on by `video-canvas.js`), so it is only there when the music-video lookup ran first; without it the length isn't checked. The album is the player bar's.
-- Spotify: a miss is kept 24 h in memory only, keyed `artist—title`; a hit in `chrome.storage` with no expiry. `src/plus/bg-canvas.js`.
+- Spotify: a miss is kept 24 h in memory only, keyed `artist—title`, plus the length to 10 s when known (another version is asked again); a hit in `chrome.storage` with no expiry. `src/plus/bg-canvas.js`.
 - Music video: the song's length is the player's own, by id, so lookups run for the playing song only; the PC never looks one up ahead (the page's `prefetch` op has no caller).
 - Music video: no YouTube pairing, no official-type check, no second try with other videos (as the phone). vs `ClipFinder.kt:104-136`.
 - No chorus from synced lyrics: `choose` gets none. No face-based crop.

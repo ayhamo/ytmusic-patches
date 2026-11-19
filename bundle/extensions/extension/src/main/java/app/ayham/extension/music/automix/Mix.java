@@ -455,28 +455,35 @@ public final class Mix {
         Planner.Trim t = p.trim;
         boolean trim = t != null && (t.inDb != 0 || t.outDb != 0);
         double gi = trim ? Math.pow(10, t.inDb / 20) : 1, go = trim ? Math.pow(10, t.outDb / 20) : 1;
+        // the curves are over their own window (P); the times fit to the seconds the mix has (m.D)
+        double P = c.durationSec > 0 ? c.durationSec : m.D;
         m.out.gain.set(0, -H).lin(1, 0).set(1, m.t0);
-        play(m.out.gain, c.out.get("gain"), m.t0, m.D, false, trim ? x -> 1 + (go - 1) * x * x * (3 - 2 * x) : null);
+        play(m.out.gain, c.out.get("gain"), m.t0, P, m.D, false, trim ? x -> 1 + (go - 1) * x * x * (3 - 2 * x) : null);
         m.out.gain.set(0, m.t0 + m.D);
         m.in.gain.set(0, 0);
-        play(m.in.gain, c.in.get("gain"), m.t0, m.D, false, trim ? x -> gi + (1 - gi) * x * x * (3 - 2 * x) : null);
+        play(m.in.gain, c.in.get("gain"), m.t0, P, m.D, false, trim ? x -> gi + (1 - gi) * x * x * (3 - 2 * x) : null);
         m.in.gain.set(1, m.t0 + m.D);
-        play(m.out.lowDb, c.out.get("bassDb"), m.t0, m.D, false, null);
-        play(m.in.lowDb, c.in.get("bassDb"), m.t0, m.D, false, null);
-        play(m.out.highDb, c.out.get("highDb"), m.t0, m.D, false, null);
-        play(m.in.highDb, c.in.get("highDb"), m.t0, m.D, false, null);
-        play(m.out.hpHz, c.out.get("highpassHz"), m.t0, m.D, true, null);
-        play(m.in.hpHz, c.in.get("highpassHz"), m.t0, m.D, true, null);
-        play(m.out.lpHz, c.out.get("lowpassHz"), m.t0, m.D, true, null);
-        play(m.in.lpHz, c.in.get("lowpassHz"), m.t0, m.D, true, null);
+        play(m.out.lowDb, c.out.get("bassDb"), m.t0, P, m.D, false, null);
+        play(m.in.lowDb, c.in.get("bassDb"), m.t0, P, m.D, false, null);
+        play(m.out.highDb, c.out.get("highDb"), m.t0, P, m.D, false, null);
+        play(m.in.highDb, c.in.get("highDb"), m.t0, P, m.D, false, null);
+        play(m.out.hpHz, c.out.get("highpassHz"), m.t0, P, m.D, true, null);
+        play(m.in.hpHz, c.in.get("highpassHz"), m.t0, P, m.D, true, null);
+        play(m.out.lpHz, c.out.get("lowpassHz"), m.t0, P, m.D, true, null);
+        play(m.in.lpHz, c.in.get("lowpassHz"), m.t0, P, m.D, true, null);
     }
 
-    /** A curve's points onto a lane from t0, [mul] scaling them by the window's fraction (sampled in 32 steps too). */
-    static void play(Lane lane, double[][] pts, double t0, double D, boolean geo, java.util.function.DoubleUnaryOperator mul) {
+    /**
+     * A curve's points onto a lane from t0, [mul] scaling them by the window's fraction (sampled in 32
+     * steps too). [D]: the curves' window; [Dplay]: the seconds the mix really has, the times fit to it
+     * (crossfade.js curveEvents).
+     */
+    static void play(Lane lane, double[][] pts, double t0, double D, double Dplay, boolean geo, java.util.function.DoubleUnaryOperator mul) {
         if (pts == null || pts.length == 0) return;
         java.util.TreeSet<Double> ts = new java.util.TreeSet<>();
         for (double[] q : pts) ts.add(Math.round(q[0] * 1e6) / 1e6);
         if (mul != null) for (int k = 0; k <= 32; k++) ts.add(Math.round(D * k / 32 * 1e6) / 1e6);
+        double fit = Dplay > 0 && D > 0 ? Dplay / D : 1;
         boolean first = true;
         for (double tt : ts) {
             double k = mul != null ? mul.applyAsDouble(clamp(tt / D, 0, 1)) : 1;
@@ -491,14 +498,14 @@ public final class Mix {
             }
             if (n == 0) v0 = v1 = Overview.value(pts, tt, 0);
             if (first) {
-                lane.set(v0 * k, t0 + tt);
+                lane.set(v0 * k, t0 + tt * fit);
                 first = false;
             } else if (geo && v0 > 0) {
-                lane.exp(v0 * k, t0 + tt);
+                lane.exp(v0 * k, t0 + tt * fit);
             } else {
-                lane.lin(v0 * k, t0 + tt);
+                lane.lin(v0 * k, t0 + tt * fit);
             }
-            if (n > 1) lane.set(v1 * k, t0 + tt);
+            if (n > 1) lane.set(v1 * k, t0 + tt * fit);
         }
     }
 

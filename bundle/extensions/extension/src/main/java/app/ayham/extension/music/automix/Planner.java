@@ -41,6 +41,8 @@ public final class Planner {
         public String preset;
         /** What an override asked for that the planner would have refused or had to move (editor.md §6). */
         public List<String> warnings;
+        /** The mix-in was placed in the editor: Automix v2's kick lock leaves it (editor.md §6). */
+        public boolean windowIn;
         public boolean v2;
         /** Automix v2's blend (its evidence fields below are set). */
         public boolean v3;
@@ -263,6 +265,7 @@ public final class Planner {
         p.curves = Curves.blend(p);
         if (ov != null && !ov.loop()) {
             if (!warnings.isEmpty()) p.warnings = warnings;
+            if (ov.in != null) p.windowIn = true; // placed by the user: the kick lock leaves it
             boolean both = from != null && to != null;
             Curves pc = !(p.fallback && !both) ? MixOverride.presetCurves(ov, p.durationSec, p.style.equals("crossfade") ? Double.NaN : p.beatSec) : null;
             if (pc != null) {
@@ -286,13 +289,26 @@ public final class Planner {
         Plan base = fallback(cur, next, earliest, reason);
         MixOverride.Resolved outW = ov != null ? MixOverride.resolveWindow(ov.out, null) : null;
         MixOverride.Resolved inW = ov != null ? MixOverride.resolveWindow(ov.in, null) : null;
-        int bars = ov != null ? ov.bars : 0;
+        // the length asked for, or the preset's own (Slam: 2 bars)
+        int bars = ov != null ? ov.pinnedBars() : 0;
         if (bars == 0 && outW == null && inW == null) return base;
-        double end = musicEnd(cur).durationSec;
-        double D = Math.max(1, Math.min(bars > 0 && fromGrid != null ? bars * fromGrid.barSec : base.durationSec > 0 ? base.durationSec : FALLBACK_SEC,
-                end - 0.3 - earliest));
-        double mixOut = clampWindow(outW != null ? outW.sec : end - 0.3 - D, earliest, Math.max(earliest, end - 0.3 - D), "the mix-out", warnings);
-        double mixIn = inW != null ? clampWindow(inW.sec, 0, Math.max(0, next.durationSec - 10 - D), "the mix-in", warnings) : base.mixInTrackTime;
+        double end = musicEnd(cur).durationSec, room = end - 0.3 - earliest;
+        if (room < 1) {
+            if (warnings != null) warnings.add("no room left in this song for the window asked for");
+            return base;
+        }
+        double want = bars > 0 && fromGrid != null ? bars * fromGrid.barSec : base.durationSec > 0 ? base.durationSec : FALLBACK_SEC;
+        if (bars > 0 && fromGrid != null && want > room + 0.01 && warnings != null) {
+            warnings.add(String.format(Locale.US, "%d bars don't fit before the end: %.1f s", bars, room));
+        }
+        double D = Math.min(want, room), hi = Math.max(earliest, end - 0.3 - D);
+        double mixOut = hi;
+        if (outW != null && outW.sec < earliest - 0.01) {
+            if (warnings != null) warnings.add(playedNote(outW.sec));
+        } else if (outW != null) {
+            mixOut = clampWindow(outW.sec, earliest, hi, "the mix-out", warnings, fromGrid);
+        }
+        double mixIn = inW != null ? clampWindow(inW.sec, 0, Math.max(0, next.durationSec - 10 - D), "the mix-in", warnings, gridOf(next)) : base.mixInTrackTime;
         base.fallback = false;
         base.mixOutTrackTime = mixOut;
         base.durationSec = D;
@@ -301,13 +317,31 @@ public final class Planner {
         return base;
     }
 
-    static double clampWindow(double t, double lo, double hi, String what, List<String> warnings) {
+    /**
+     * A saved position held inside [lo, hi]; one past a limit moves to the nearest downbeat inside
+     * it (the clamped second itself with no grid there), with the reason shown (editor.md §6).
+     */
+    static double clampWindow(double t, double lo, double hi, String what, List<String> warnings, Grid grid) {
         double c = clamp(t, lo, hi);
-        if (Math.abs(c - t) > 0.01 && warnings != null) {
-            warnings.add(String.format(Locale.US, "%s moved to %.1f s (%s)", what, c,
-                    t < lo ? (what.equals("the mix-out") ? "already played" : "before the song") : "too close to the end"));
+        if (Math.abs(c - t) <= 0.01) return c;
+        if (grid != null && grid.barSec > 0) {
+            double d = t < lo ? downbeatAtOrAfter(grid, lo) : downbeatAtOrBefore(grid, hi);
+            if (d >= lo - 1e-6 && d <= hi + 1e-6) c = d;
+        }
+        if (warnings != null) {
+            warnings.add(String.format(Locale.US, "%s moved to %.1f s (%s)", what, c, t < lo ? "before the song" : "too close to the end"));
         }
         return c;
+    }
+
+    /** A saved mix-out the playhead has passed: the planner's own plays (editor.md §6). */
+    static String playedNote(double sec) {
+        return String.format(Locale.US, "the mix-out at %.1f s has already played: Auto's mix-out instead", sec);
+    }
+
+    /** May Automix v2's kick lock move this plan's mix-in (automix.js kickLockAllowed): a blend not placed in the editor. */
+    public static boolean kickLockAllowed(Plan p) {
+        return p != null && "blend".equals(p.style) && !p.windowIn;
     }
 
     private static Plan planFor(Settings s, String fromId, String toId, Analysis from, Analysis to, double durationSec,
@@ -369,8 +403,11 @@ public final class Planner {
         // keys that clash badly; it can't beatmatch those, so it hands over instead (an override
         // is the user's choice: the style gates warn instead)
         if (v3 && stretchOf(ratio) > V2_MAX_STRETCH) {
-            return handoff(cur, next, earliest, "tempos " + Math.round(stretchOf(ratio) * 100) + "% apart (v2 stretches at most "
-                    + Math.round(V2_MAX_STRETCH * 100) + "%)", sung);
+            String why = "tempos " + Math.round(stretchOf(ratio) * 100) + "% apart (v2 stretches at most " + Math.round(V2_MAX_STRETCH * 100) + "%)";
+            if (!forced && (pick == null || pick.bars == 0)) return handoff(cur, next, earliest, why, sung);
+            // the user's preset, length or window: played as asked without beat match (editor.md §6)
+            warnings.add(why + ": plays without beat match");
+            return overlap(cur, next, fromGrid, pick, earliest, why, warnings);
         }
         double contrast = subBassContrast(cur, next);
         if (v3 && contrast >= V2_SUB_BASS_VETO) {
@@ -383,8 +420,10 @@ public final class Planner {
             warnings.add("the keys clash (" + cur.keyName + " → " + next.keyName + ")");
         }
         if (!stretchAllowed(ratio)) {
-            return filterMix(s, cur, next, fromGrid, toGrid, requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, true), pos, earliest,
-                    "tempos " + Math.round(Math.abs(ratio - 1) * 100) + "% apart", sung);
+            String why = "tempos " + Math.round(Math.abs(ratio - 1) * 100) + "% apart";
+            if (!forced) return filterMix(s, cur, next, fromGrid, toGrid, requestedBars(s, cur, next, fromGrid, toGrid.downbeatSec, true), pos, earliest, why, sung);
+            warnings.add(why + ": too far to stretch, plays without beat match");
+            return overlap(cur, next, fromGrid, pick, earliest, why, warnings);
         }
         // Tempo only moves up: the next song faster, the playing one is brought up to it before the
         // blend; slower, it is sped up. Automix v2: over 4% apart, a glide on both songs instead
@@ -415,10 +454,12 @@ public final class Planner {
         if (mixOut < first) mixOut = downbeatAtOrAfter(fromGrid, first);
         // the editor's window (editor.md §6): A's mix-out on A's end grid, clamped to what can still play
         MixOverride.Resolved wOut = pick != null ? MixOverride.resolveWindow(pick.out, fromGrid) : null;
-        if (wOut != null) {
-            mixOut = clampWindow(wOut.sec, first, Math.max(first, Math.min(musicEnd(cur).durationSec, cur.durationSec - 0.3) - outSpan), "the mix-out", warnings);
-            if (wOut.moved) warnings.add("the mix-out moved with a new beat grid");
+        if (wOut != null && wOut.sec < first - 0.01) {
+            warnings.add(playedNote(wOut.sec)); // already played: the planner's own mix-out
+        } else if (wOut != null) {
+            mixOut = clampWindow(wOut.sec, first, Math.max(first, Math.min(musicEnd(cur).durationSec, cur.durationSec - 0.3) - outSpan), "the mix-out", warnings, fromGrid);
         }
+        if (wOut != null && wOut.moved) warnings.add("the mix-out moved with a new beat grid");
         if (mixOut + outSpan > cur.durationSec - 0.3) {
             if (forced) {
                 warnings.add("too close to the end for the window asked for");
@@ -437,7 +478,7 @@ public final class Planner {
         Reroute dj = null;
         MixOverride.Resolved wIn = pick != null ? MixOverride.resolveWindow(pick.in, toGrid) : null;
         if (wIn != null) {
-            mixIn = clampWindow(wIn.sec, 0, Math.max(0, next.durationSec - 10 - outSpan * inPerOut), "the mix-in", warnings);
+            mixIn = clampWindow(wIn.sec, 0, Math.max(0, next.durationSec - 10 - outSpan * inPerOut), "the mix-in", warnings, toGrid);
             if (wIn.moved) warnings.add("the mix-in moved with a new beat grid");
         }
         if (v2 && wIn == null && wOut == null) {
@@ -537,11 +578,12 @@ public final class Planner {
         p.rerouted = dj != null ? dj.rerouted : null;
         p.vocalsBy = dj != null ? dj.by : null;
         p.keyClash = keyClash;
+        // every blend carries its glide: Classic's too, when the editor's Glide asks for one
+        p.glide = glide != null ? new Glide(glideQ, effBars * 4, fromGrid.beatSec) : null;
         if (v3) {
             p.subBassContrast = contrast;
             p.swapAt = swap != null ? swap.at : Double.NaN;
             p.swapMoved = swap != null ? swap.moved : null;
-            p.glide = glide != null ? new Glide(glideQ, effBars * 4, fromGrid.beatSec) : null;
             p.harmonic = harmonic;
             p.trim = loudnessTrim(cur, mixOut, outSpan, next, mixIn, outSpan * inPerOut);
         }

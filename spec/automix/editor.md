@@ -200,6 +200,16 @@ from `bars`.
 - A's mix-out: no earlier than the planner's `earliest`, and late enough that the window ends before
   A's music does (`contentEndSec`, else the duration).
 - B's mix-in: 0 or later, the window ending at least 10 s before B's end.
+- A saved position past a limit moves to the nearest downbeat inside it (the clamped second itself
+  when the song has no grid there), with the reason shown.
+- A saved mix-out the playhead has already passed isn't moved to "now": the planner's own mix-out
+  plays instead, with "the mix-out at X s has already played" shown.
+- A length that doesn't fit before A's end plays as long as there is room, with the reason shown.
+- The first window edit of one side (a drag or a nudge) saves the other side too, where the plan has
+  it at that moment. With one side saved, the planner would still move the other (B's skip cap, the
+  vocal re-route), and B's mix-in could jump bars under a 10 ms nudge of A.
+- A saved mix-in isn't moved by Automix v2's kick lock (`kickLockAllowed`): the lock shifts B by
+  up to an eighth of a beat, which would undo a nudge. editor-cases.json `plans` has the cases.
 - Unlike Spotify, the first and last moments of a song are reachable when the limits allow.
 
 **The planner's other gates** (question 8):
@@ -208,7 +218,8 @@ from `bars`.
 - When a gate would have refused, the editor shows the reason as a warning ("both sing over the
   window", "the productions clash").
 - Physical limits are clamped or fall back, with the reason shown: the tempo range (§4), the song
-  bounds, a missing grid for snapping.
+  bounds, a missing grid for snapping. A pair the planner would hand over or filter out for its
+  tempos plays the user's preset, length and window without beat match instead.
 - Nothing is refused silently.
 
 ## 7. Auto's name on screen (question 10)

@@ -83,6 +83,53 @@ public class EditorCasesTest {
         assertTrue(String.join("\n", diffs), diffs.isEmpty());
     }
 
+    /** A steady song as the plans cases give it ({bpm, sec, downbeatSec}): every beat sure, flat energy (editor_cases.mjs song). */
+    private static Analysis steady(String id, Map<String, Object> c) {
+        double bpm = ((Number) c.get("bpm")).doubleValue(), sec = ((Number) c.get("sec")).doubleValue();
+        Analysis a = new Analysis();
+        a.fileKey = id;
+        a.bpm = bpm;
+        a.beatIntervalSec = 60 / bpm;
+        a.firstDownbeatSec = ((Number) c.get("downbeatSec")).doubleValue();
+        a.gridConfidence = 1;
+        a.durationSec = sec;
+        a.energyCurve = new double[(int) Math.ceil(sec / (a.beatIntervalSec * 16))];
+        java.util.Arrays.fill(a.energyCurve, 1);
+        a.energy = 1;
+        a.introEndSec = 0;
+        a.outroStartSec = sec - 20;
+        a.tailGridKnown = false; // no tailGrid in the case: the song's own grid at its end too
+        return a;
+    }
+
+    @Test
+    public void overridesPlayTheWindowsTheCasesSay() throws Exception {
+        List<String> diffs = new ArrayList<>();
+        List<Object> cases = (List<Object>) cases().get("plans");
+        assertEquals(7, cases.size());
+        for (Object o : cases) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            int engine = ((Number) c.get("engine")).intValue();
+            Planner.Settings s = new Planner.Settings();
+            s.version = engine;
+            Analysis from = steady("a", (Map<String, Object>) c.get("out")), to = steady("b", (Map<String, Object>) c.get("in"));
+            double pos = ((Number) c.get("pos")).doubleValue();
+            Planner.Plan p = Planner.plan(s, "a", "b", from, to, from.durationSec, pos, pos + 4.5, null, MixOverride.fromJson(c.get("override")));
+            Map<String, Object> got = new LinkedHashMap<>();
+            got.put("style", p.style);
+            got.put("bars", (double) p.bars);
+            got.put("durationSec", p.durationSec);
+            got.put("mixOutTrackTime", p.mixOutTrackTime);
+            got.put("mixInTrackTime", p.mixInTrackTime);
+            got.put("glide", p.glide != null);
+            got.put("kickLock", engine == 3 && Planner.kickLockAllowed(p));
+            got.put("warnings", p.warnings != null ? new ArrayList<Object>(p.warnings) : new ArrayList<>());
+            Object want = c.get("expect");
+            if (!same(want, got)) diffs.add(c.get("name") + ":\n  got  " + Json.write(got) + "\n  want " + Json.write(want));
+        }
+        assertTrue(diffs.size() + " of " + cases.size() + " differ:\n" + String.join("\n", diffs), diffs.isEmpty());
+    }
+
     /** Curves as editor-cases.json writes them: durationSec, then out and in, each curve name in the case's order. */
     private static Map<String, Object> asJson(Curves c) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -297,11 +344,12 @@ public class EditorCasesTest {
         Planner.Settings s = new Planner.Settings();
         s.version = 3;
         Analysis a = PlannerTest.song("a", 120, 200, 0.9), b = PlannerTest.song("b", 120, 180, 0.9);
-        // A's mix-out asked at bar 97 (194.5 s): an 8 s window has to start by 191.7 s to end by 199.7 s
+        // A's mix-out asked at bar 97 (194.5 s): an 8 s window has to start by 191.7 s to end by 199.7 s,
+        // so it moves back onto the last downbeat that fits (bar 95, 190.5 s)
         MixOverride o = ov("{\"window\":{\"out\":{\"bar\":97,\"sec\":194.5},\"in\":{\"bar\":4,\"sec\":8.5}}}");
         Planner.Plan p = plan(s, a, b, o);
         assertEquals("blend", p.style);
-        assertEquals(191.7, p.mixOutTrackTime, 1e-9);
+        assertEquals(190.5, p.mixOutTrackTime, 1e-9);
         assertNotNull(p.warnings);
         assertTrue(String.join("; ", p.warnings), p.warnings.get(0).startsWith("the mix-out moved to"));
         assertEquals(8.5, p.mixInTrackTime, 1e-9);

@@ -1,6 +1,5 @@
 package app.ayham.extension.music.features;
 
-import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -12,6 +11,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,6 +33,8 @@ final class AppleCanvas {
     private static String token;
     private static long tokenExpires;
     private static long retryAfter;
+    /** Tokens the catalog has refused (401). */
+    private static final java.util.Set<String> rejected = new java.util.HashSet<>();
 
     private AppleCanvas() {
     }
@@ -43,7 +45,7 @@ final class AppleCanvas {
      * Prism's rules: every credited artist must match, compilation albums are skipped for the next
      * hit, and without a token or a hit the public album page is read instead.
      */
-    static String[] find(String title, String artist, boolean tall) throws Exception {
+    static String[] find(String title, String artist, String album, boolean tall) throws Exception {
         String bearer = token();
         if (bearer == null) {
             String[] page = applePage(artist, title, tall);
@@ -53,7 +55,7 @@ final class AppleCanvas {
         Log.i(TAG, "canvas: token ok (" + bearer.length() + " chars)");
         String store = Locale.getDefault().getCountry().length() == 2
                 ? Locale.getDefault().getCountry().toLowerCase(Locale.ROOT) : "us";
-        String term = (title.toLowerCase(Locale.ROOT).contains(artist.toLowerCase(Locale.ROOT)) ? "" : artist + " ") + title;
+        String term = term(title, artist, album);
         JSONObject root = new JSONObject(get(AMP + store + "/search?types=songs&limit=10&extend=editorialVideo&include=albums&term="
                 + URLEncoder.encode(term, "UTF-8"), bearer));
         JSONObject songs = root.optJSONObject("results") == null ? null : root.optJSONObject("results").optJSONObject("songs");
@@ -64,21 +66,17 @@ final class AppleCanvas {
         }
         Log.i(TAG, "canvas: " + hits.length() + " Apple hits for '" + term + "' in store " + store);
 
-        // every hit that passes, best first
-        java.util.List<JSONObject> passing = new java.util.ArrayList<>();
-        java.util.List<Integer> scores = new java.util.ArrayList<>();
+        // every hit that passes, best first (ties in Apple's order)
+        Integer[] scores = new Integer[hits.length()];
         for (int i = 0; i < hits.length(); i++) {
-            int sc = score(hits.getJSONObject(i).getJSONObject("attributes"), title, artist);
-            if (sc < MIN_SCORE) continue;
-            int at = 0;
-            while (at < scores.size() && scores.get(at) >= sc) at++;
-            passing.add(at, hits.getJSONObject(i));
-            scores.add(at, sc);
+            JSONObject a = hits.getJSONObject(i).optJSONObject("attributes");
+            scores[i] = a == null ? null : score(a.optString("name"), a.optString("artistName"), a.optString("albumName"), title, artist, album);
         }
-        if (passing.isEmpty()) Log.i(TAG, "canvas: no Apple hit scored " + MIN_SCORE + "+ for '" + title + "'");
+        int[] passing = rank(scores);
+        if (passing.length == 0) Log.i(TAG, "canvas: no Apple hit scored " + MIN_SCORE + "+ for '" + title + "'");
         int albumsRead = 0;
-        for (int k = 0; k < passing.size() && albumsRead < 3; k++) {
-            JSONObject best = passing.get(k);
+        for (int k = 0; k < passing.length && albumsRead < 3; k++) {
+            JSONObject best = hits.getJSONObject(passing[k]);
             JSONObject attrs = best.getJSONObject("attributes");
             String[] urls = motion(attrs.optJSONObject("editorialVideo"), tall);
             if (urls != null) return urls;
@@ -93,20 +91,44 @@ final class AppleCanvas {
                 if (m.find()) albumId = m.group(1);
             }
             Log.i(TAG, "canvas: hit '" + attrs.optString("name") + "' by " + attrs.optString("artistName")
-                    + " (score " + scores.get(k) + "), album " + albumId + " / " + attrs.optString("albumName"));
+                    + " (score " + scores[passing[k]] + "), album " + albumId + " / " + attrs.optString("albumName"));
             if (albumId == null || albumId.startsWith("pl.")) continue;
             albumsRead++;
-            JSONObject album = new JSONObject(get(AMP + store + "/albums/" + albumId + "?extend=editorialVideo", bearer))
+            JSONObject record = new JSONObject(get(AMP + store + "/albums/" + albumId + "?extend=editorialVideo", bearer))
                     .getJSONArray("data").getJSONObject(0).getJSONObject("attributes");
-            if (compilation(album.optString("name"))) {
-                Log.i(TAG, "canvas: album '" + album.optString("name") + "' is a compilation, next hit");
+            if (compilation(record.optString("name"))) {
+                Log.i(TAG, "canvas: album '" + record.optString("name") + "' is a compilation, next hit");
                 continue;
             }
-            String[] clip = motion(album.optJSONObject("editorialVideo"), tall);
-            Log.i(TAG, "canvas: album '" + album.optString("name") + "' " + (clip == null ? "has no motion art" : "has motion art"));
+            String[] clip = motion(record.optJSONObject("editorialVideo"), tall);
+            Log.i(TAG, "canvas: album '" + record.optString("name") + "' " + (clip == null ? "has no motion art" : "has motion art"));
             if (clip != null) return clip;
         }
-        return passing.isEmpty() ? applePage(artist, title, tall) : null;
+        return passing.length == 0 ? applePage(artist, title, tall) : null;
+    }
+
+    /** BitChord's search term: the artist (unless the title holds it), the title, and the album (unless the title holds it). */
+    static String term(String title, String artist, String album) {
+        String lt = title.toLowerCase(Locale.ROOT);
+        StringBuilder b = new StringBuilder();
+        if (!lt.contains(artist.toLowerCase(Locale.ROOT))) b.append(artist).append(' ');
+        b.append(title);
+        if (album != null && !album.trim().isEmpty() && !lt.contains(album.toLowerCase(Locale.ROOT))) b.append(' ').append(album);
+        return b.toString();
+    }
+
+    /** The hits to try, best score first (ties in Apple's order); a hit under MIN_SCORE (or rejected: null) ends the list. */
+    static int[] rank(Integer[] scores) {
+        java.util.List<Integer> order = new java.util.ArrayList<>();
+        for (int i = 0; i < scores.length; i++) {
+            if (scores[i] == null || scores[i] < MIN_SCORE) continue;
+            int at = 0;
+            while (at < order.size() && scores[order.get(at)] >= scores[i]) at++;
+            order.add(at, i);
+        }
+        int[] out = new int[order.size()];
+        for (int i = 0; i < out.length; i++) out[i] = order.get(i);
+        return out;
     }
 
     /**
@@ -124,13 +146,7 @@ final class AppleCanvas {
                 JSONObject r = results.getJSONObject(i);
                 String name = norm(r.optString("collectionName").replaceAll("\\s*[(\\[].*?[)\\]]", ""));
                 if (compilation(r.optString("collectionName")) || !(name.equals(want) || name.startsWith(want + " "))) continue;
-                boolean all = true;
-                for (String w : artists(artist)) {
-                    boolean found = false;
-                    for (String g : artists(r.optString("artistName"))) found |= g.equals(w);
-                    all &= found;
-                }
-                if (!all) continue;
+                if (!credited(artist, r.optString("artistName"))) continue;
                 String page = r.optString("collectionViewUrl").replaceAll("\\?.*", "");
                 if (page.isEmpty()) return null;
                 String html = get(page, null).replace("\\u002F", "/").replace("\\/", "/");
@@ -158,36 +174,58 @@ final class AppleCanvas {
         return new String[]{first, other};
     }
 
-    private static int score(JSONObject a, String title, String artist) {
-        String name = a.optString("name");
-        String hitArtist = a.optString("artistName");
-        String album = a.optString("albumName");
-        if (compilation(name) || compilation(album)) return -100;
-        for (String want : artists(artist)) {
-            boolean found = false;
-            for (String got : artists(hitArtist)) found |= got.equals(want);
-            if (!found) return -100;
-        }
+    /**
+     * BitChord's score of a hit, or null to reject it outright: compilations out, every wanted artist
+     * among the hit's, then 10, the title (brackets kept: +15 equal, +7 one holds the other, else
+     * -10), the album when both sides have one (+20 equal, +10 one holds the other) and each edition
+     * word (+5 on both sides, -3 only on the hit's).
+     */
+    static Integer score(String hitName, String hitArtist, String hitAlbum, String title, String artist, String album) {
+        if (compilation(hitName) || compilation(hitAlbum)) return null;
+        if (!credited(artist, hitArtist)) return null;
         int s = 10;
-        String w = norm(title.replaceAll("\\s*[(\\[].*?[)\\]]", ""));
-        String h = norm(name.replaceAll("\\s*[(\\[].*?[)\\]]", ""));
-        if (w.isEmpty()) return -100;
+        String w = norm(title), h = norm(hitName);
+        if (w.isEmpty()) return null;
         s += h.equals(w) ? 15 : (h.contains(w) || w.contains(h)) ? 7 : -10;
+        if (album != null && !album.trim().isEmpty() && !hitAlbum.trim().isEmpty()) {
+            String wa = norm(album), ha = norm(hitAlbum);
+            s += ha.equals(wa) ? 20 : (ha.contains(wa) || wa.contains(ha)) ? 10 : 0;
+        }
         for (String word : EDITION) {
             boolean inW = title.toLowerCase(Locale.ROOT).contains(word);
-            boolean inH = name.toLowerCase(Locale.ROOT).contains(word);
+            boolean inH = hitName.toLowerCase(Locale.ROOT).contains(word);
             if (inW && inH) s += 5;
             else if (inH) s -= 3;
         }
         return s;
     }
 
-    private static String[] artists(String s) {
-        return norm(s.replaceAll("(?i)\\s*(,|&| and | x | feat\\.?| ft\\.?| with )\\s*", "|")).split("\\|");
+    /** Every artist in [wanted] is among [credit]'s. */
+    private static boolean credited(String wanted, String credit) {
+        java.util.List<String> want = artists(wanted), got = artists(credit);
+        return !want.isEmpty() && !got.isEmpty() && got.containsAll(want);
     }
 
-    private static String norm(String s) {
-        return s.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}| ]+", " ").replaceAll("\\s+", " ").trim();
+    private static final Pattern SEPARATORS = Pattern.compile(
+            "(?:\\s*,\\s*|\\s*&\\s*|\\s+×\\s+|\\s+x\\s+|\\bfeat\\.?\\b|\\bft\\.?\\b|\\bfeaturing\\b|\\bwith\\b)", Pattern.CASE_INSENSITIVE);
+
+    /** BitChord's splitArtists: commas, &, ×, x, feat., ft., featuring and with (not "and"). */
+    static java.util.List<String> artists(String s) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String a : SEPARATORS.split(s, -1)) {
+            String n = norm(a);
+            if (!n.isEmpty()) out.add(n);
+        }
+        return out;
+    }
+
+    /**
+     * BitChord's normalizeForMatch: accents removed, lower case, punctuation a space, spaces collapsed.
+     * Letters of other scripts are kept (BitChord's own title rule), so a non-Latin name still compares.
+     */
+    static String norm(String s) {
+        return Normalizer.normalize(s, Normalizer.Form.NFD).replaceAll("\\p{InCombiningDiacriticalMarks}+", "")
+                .toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{M}\\p{N}\\s]", " ").replaceAll("\\s+", " ").trim();
     }
 
     private static boolean compilation(String name) {
@@ -196,21 +234,40 @@ final class AppleCanvas {
         return false;
     }
 
+    /** The clip for the art's shape and the one to try when it won't play: {preferred, alternate or null}, or null. */
     private static String[] motion(JSONObject video, boolean tall) {
         if (video == null) return null;
-        String square = link(video, "motionDetailSquare", "motionSquareVideo1x1", "motionDetailRaw");
-        String tallUrl = link(video, "motionDetailTall", "motionTallVideo3x4");
-        return pair(square, tallUrl, tall);
+        String[] m = motionUrls((key, field) -> {
+            JSONObject asset = video.optJSONObject(key);
+            return asset == null ? null : asset.optString(field, null);
+        });
+        if (m == null) return null;
+        // full-screen art: the tall clip, with the square one (BitChord's url) to fall back on
+        if (tall && m[2] != null) return new String[]{m[2], m[2].equals(m[0]) ? m[1] : m[0]};
+        return new String[]{m[0], m[1]};
     }
 
-    private static String link(JSONObject video, String... keys) {
-        for (String key : keys) {
-            JSONObject asset = video.optJSONObject(key);
-            if (asset == null) continue;
-            for (String f : new String[]{"video", "videoUrl", "hlsUrl", "url"}) {
-                String u = asset.optString(f, "");
-                if (!u.isEmpty()) return u;
-            }
+    /**
+     * BitChord's motionUrls and tallUrl, over [field] (an asset key and a field name to its value):
+     * {primary, alternate or null, tall or null}, or null without motion art. Primary: the square
+     * clip, else the raw one, else the tall one; alternate: the next of those that differs.
+     */
+    static String[] motionUrls(java.util.function.BiFunction<String, String, String> field) {
+        String square = link(field, "motionDetailSquare"), raw = link(field, "motionDetailRaw"), tall = link(field, "motionDetailTall");
+        if (square == null) square = link(field, "motionSquareVideo1x1");
+        if (tall == null) tall = link(field, "motionTallVideo3x4");
+        String primary = square != null ? square : raw != null ? raw : tall;
+        if (primary == null) return null;
+        String alternate = null;
+        for (String u : new String[]{square, raw, tall})
+            if (alternate == null && u != null && !u.equals(primary)) alternate = u;
+        return new String[]{primary, alternate, tall};
+    }
+
+    private static String link(java.util.function.BiFunction<String, String, String> field, String key) {
+        for (String f : new String[]{"video", "videoUrl", "hlsUrl", "url"}) {
+            String u = field.apply(key, f);
+            if (u != null && !u.trim().isEmpty()) return u;
         }
         return null;
     }
@@ -227,7 +284,7 @@ final class AppleCanvas {
             } catch (NumberFormatException e) {
                 savedExpires = 0; // a damaged copy: scraped afresh instead of failing every lookup
             }
-            if (saved != null && now < savedExpires - 60_000) {
+            if (saved != null && now < savedExpires - 60_000 && !rejected.contains(saved[0])) {
                 token = saved[0];
                 tokenExpires = savedExpires;
                 Log.i(TAG, "canvas: token from the backup copy");
@@ -242,35 +299,12 @@ final class AppleCanvas {
         while (js.find()) {
             String script = get("https://music.apple.com" + js.group(), null);
             Matcher jwt = Pattern.compile("ey[A-Za-z0-9_-]+\\.ey[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+").matcher(script);
-            // The web player's own token names itself (kid WebPlayKid / iss AMPWebPlay); any other
-            // unexpired one is kept as a fallback, so a relabel on Apple's side is not fatal.
-            String fallback = null;
-            long fallbackExpires = 0;
-            while (jwt.find()) {
-                try {
-                    String[] parts = jwt.group().split("\\.");
-                    String header = new String(Base64.decode(parts[0], Base64.URL_SAFE), StandardCharsets.UTF_8);
-                    String payload = new String(Base64.decode(parts[1], Base64.URL_SAFE), StandardCharsets.UTF_8);
-                    Matcher exp = Pattern.compile("\"exp\"\\s*:\\s*(\\d+)").matcher(payload);
-                    if (!exp.find()) continue;
-                    long expires = Long.parseLong(exp.group(1)) * 1000;
-                    if (expires <= now) continue;
-                    if (header.contains("WebPlayKid") || payload.contains("AMPWebPlay")) {
-                        fallback = jwt.group();
-                        fallbackExpires = expires;
-                        break;
-                    }
-                    if (fallback == null) {
-                        fallback = jwt.group();
-                        fallbackExpires = expires;
-                    }
-                } catch (IllegalArgumentException ignored) {
-                    // Not a JWT, just something shaped like one.
-                }
-            }
-            if (fallback != null) {
-                token = fallback;
-                tokenExpires = fallbackExpires;
+            java.util.List<String> found = new java.util.ArrayList<>();
+            while (jwt.find()) if (!found.contains(jwt.group())) found.add(jwt.group());
+            int pick = pickToken(found, now, rejected);
+            if (pick >= 0) {
+                token = found.get(pick);
+                tokenExpires = expiry(token);
                 retryAfter = 0;
                 CanvasCache.token(token, tokenExpires);
                 return token;
@@ -278,6 +312,40 @@ final class AppleCanvas {
         }
         Log.w(TAG, "canvas: no web player token found");
         return null;
+    }
+
+    /**
+     * BitChord's pick among a bundle's JWTs: the first unexpired one not refused before whose header
+     * kid says WebPlayKid or payload iss AMPWebPlay (the web player's own); else the first unexpired
+     * one, so a relabel on Apple's side is not fatal. -1 when none.
+     */
+    static int pickToken(java.util.List<String> jwts, long now, java.util.Set<String> refused) {
+        int first = -1;
+        for (int i = 0; i < jwts.size(); i++) {
+            String t = jwts.get(i);
+            if (refused.contains(t) || expiry(t) <= now) continue;
+            try {
+                String[] parts = t.split("\\.");
+                String header = new String(java.util.Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
+                String payload = new String(java.util.Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+                if (header.contains("WebPlayKid") || payload.contains("AMPWebPlay")) return i;
+            } catch (IllegalArgumentException ignored) {
+                // not readable: only a fallback
+            }
+            if (first < 0) first = i;
+        }
+        return first;
+    }
+
+    /** A JWT's exp in ms, or 0 when it isn't one we can read (not a JWT, just something shaped like one). */
+    private static long expiry(String jwt) {
+        try {
+            String payload = new String(java.util.Base64.getUrlDecoder().decode(jwt.split("\\.")[1]), StandardCharsets.UTF_8);
+            Matcher exp = Pattern.compile("\"exp\"\\s*:\\s*(\\d+)").matcher(payload);
+            return exp.find() ? Long.parseLong(exp.group(1)) * 1000 : 0;
+        } catch (RuntimeException e) {
+            return 0;
+        }
     }
 
     private static String get(String url, String bearer) throws Exception {
@@ -293,6 +361,7 @@ final class AppleCanvas {
         int code = c.getResponseCode();
         if (code == 401 && bearer != null) {
             synchronized (AppleCanvas.class) {
+                rejected.add(bearer); // never picked again (BitChord's rejected set)
                 token = null;
                 retryAfter = 0;
                 CanvasCache.token(null, 0);

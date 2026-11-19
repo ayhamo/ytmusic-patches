@@ -32,6 +32,8 @@ import java.util.Locale;
 final class VideoCanvas {
     private static final String TAG = "Ayham";
     static final double CLIP_SEC = 8;
+    /** Fewer preview frames than this can't tell a still from a moving video (Prism's ClipFinder). */
+    private static final int MIN_FRAMES = 8;
     private static final String WEB_NEXT = "https://www.youtube.com/youtubei/v1/next?prettyPrint=false";
     private static final String VISION = "https://www.youtube.com/youtubei/v1/";
     private static final String VISION_VERSION = "1.02";
@@ -40,10 +42,13 @@ final class VideoCanvas {
     private VideoCanvas() {
     }
 
-    /** The loop file for the song, or null (none, or not this time). [noVideo] is set when the song has no usable video. */
-    static synchronized File clip(String songId, String songTitle, String artist, File dir, int artPx, boolean[] noVideo) throws Exception {
+    /**
+     * The loop file for the song, or null (none, or not this time). [noVideo] is set when the song has no usable video.
+     * [songMs] the song's length (0 unknown: the video's length is then not checked against it).
+     */
+    static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo) throws Exception {
         long t0 = System.currentTimeMillis();
-        String[] video = findVideo(songTitle, artist);
+        String[] video = findVideo(songTitle, artist, Math.round(songMs / 1000.0));
         if (video == null) {
             noVideo[0] = true;
             return null;
@@ -64,46 +69,63 @@ final class VideoCanvas {
             return null;
         }
         double dur = player.optJSONObject("videoDetails") == null ? 0 : player.getJSONObject("videoDetails").optDouble("lengthSeconds", 0);
-        double[] heat = heatmap(video[0]);
-        double peak = heat == null ? -1 : partStart(heat, dur);
         File canvas = new File(dir, "canvas");
         if (!canvas.isDirectory() && !canvas.mkdirs()) return null;
         File out = new File(canvas, "mv_" + songId + ".mp4");
 
         // Prism's first look: the storyboard (bars, a still upload, the best window near the peak, the crop)
-        float[] bars = new float[4];
-        float crop = 0.5f;
-        List<double[]> windows = null;
         long length = Math.round(dur * 1000);
-        double start = peak >= 0 ? peak : Math.max(0, dur * 0.4);
+        Board b = null;
         try {
-            Board b = board(player, length);
-            if (b != null) {
-                bars = ClipJudge.bars(b.frames);
-                if (ClipJudge.still(b.frames, bars)) {
-                    noVideo[0] = true;
-                    Log.i(TAG, "canvas video: " + video[0] + " is a still picture (" + b.frames.size() + " preview frames)");
-                    return null;
-                }
-                windows = ClipJudge.windows(b.frames, b.interval, length, bars);
-                double[] w = ClipJudge.choose(windows, length, peak < 0 ? -1 : Math.round(peak * 1000), null);
-                if (w != null) {
-                    start = w[0] / 1000;
-                    int i0 = (int) (w[0] / b.interval), i1 = (int) Math.min(b.frames.size() - 1, (w[1] + b.interval - 1) / b.interval);
-                    crop = ClipJudge.cropX(b.frames.subList(i0, i1 + 1), bars);
-                }
-                Log.i(TAG, String.format(Locale.ROOT, "canvas video: storyboard %d frames every %d ms, bars %.2f/%.2f/%.2f/%.2f, %d windows, crop %.2f",
-                        b.frames.size(), b.interval, bars[0], bars[1], bars[2], bars[3], windows.size(), crop));
-            }
+            b = board(player, length);
         } catch (Throwable t) {
             Log.w(TAG, "canvas video: storyboard not read: " + t);
         }
-        start = Math.max(0, Math.min(start, dur - CLIP_SEC));
+        if (b != null) length = Math.max(length, b.frames.size() * b.interval);
+        if (length < ClipJudge.WINDOW_MS) {
+            // no length and no frames: nothing to cut a loop from
+            noVideo[0] = true;
+            Log.i(TAG, "canvas video: " + video[0] + " has no length");
+            return null;
+        }
+        ClipJudge.Loop loop;
+        double peak = -1;
+        if (b == null || b.frames.size() < MIN_FRAMES) {
+            // no preview frames: nothing to judge by, so the middle of the video (the curve is not used)
+            long[] mid = ClipJudge.noFrames(length);
+            loop = new ClipJudge.Loop();
+            loop.startMs = mid[0];
+            loop.endMs = mid[1];
+            loop.lengthMs = length;
+            Log.i(TAG, "canvas video: no storyboard frames: the middle 8 s");
+        } else {
+            // the still check first: a still upload needs no "most replayed" curve
+            if (ClipJudge.still(b.frames, ClipJudge.bars(b.frames))) {
+                noVideo[0] = true;
+                Log.i(TAG, "canvas video: " + video[0] + " is a still picture (" + b.frames.size() + " preview frames)");
+                return null;
+            }
+            double[] heat = heatmap(video[0]);
+            peak = heat == null ? -1 : partStart(heat, length / 1000.0);
+            // no chorus from synced lyrics on the phone yet: null
+            loop = ClipJudge.judge(b.frames, b.interval, length, peak < 0 ? null : Math.round(peak * 1000), null);
+            if (loop == null) {
+                noVideo[0] = true;
+                Log.i(TAG, "canvas video: " + video[0] + " has no window that moves: a still picture");
+                return null;
+            }
+            Log.i(TAG, String.format(Locale.ROOT, "canvas video: storyboard %d frames every %d ms, bars %.2f/%.2f/%.2f/%.2f, crop %.2f, other parts %s",
+                    b.frames.size(), b.interval, loop.bars[0], loop.bars[1], loop.bars[2], loop.bars[3], loop.cropX, loop.others));
+        }
+        float[] bars = loop.bars;
+        float crop = loop.cropX;
+        double start = Math.max(0, Math.min(loop.startMs / 1000.0, length / 1000.0 - CLIP_SEC));
         Log.i(TAG, "canvas video: " + video[0] + " '" + video[1] + "' " + f.optInt("height") + "p, part at "
-                + String.format(Locale.ROOT, "%.1f", start) + " s of " + (int) dur + " s ("
-                + (heat == null ? "no most-replayed curve" : String.format(Locale.ROOT, "most replayed at %.1f s", peak)) + "), found in " + (System.currentTimeMillis() - t0) + " ms");
+                + String.format(Locale.ROOT, "%.1f", start) + " s of " + length / 1000 + " s ("
+                + (peak < 0 ? "no most-replayed peak" : String.format(Locale.ROOT, "most replayed at %.1f s", peak)) + "), found in " + (System.currentTimeMillis() - t0) + " ms");
 
-        // Prism's second look, on real frames (a small copy of the same seconds): end on a cut, no flashing
+        // Prism's second look, on real frames (a small copy of the same seconds): end on a cut, no flashing;
+        // a part that flashes gives way to the next other part once, and if that flashes too, no canvas
         JSONObject low = pickFormat(player.optJSONObject("streamingData"), 240);
         double end = start + CLIP_SEC;
         if (low != null) {
@@ -113,7 +135,7 @@ final class VideoCanvas {
                     end = e;
                     break;
                 }
-                double[] next = windows == null ? null : ClipJudge.choose(windows, length, -1, java.util.Collections.singletonList(new double[]{start * 1000}));
+                Long next = loop.others.isEmpty() ? null : loop.others.get(0);
                 if (e == 0 || attempt == 1 || next == null) {
                     if (e < 0) {
                         noVideo[0] = true;
@@ -123,7 +145,7 @@ final class VideoCanvas {
                     break;
                 }
                 Log.i(TAG, "canvas video: the part flashes, trying another");
-                start = next[0] / 1000;
+                start = next / 1000.0;
                 end = start + CLIP_SEC; // the window moved: its end with it
             }
         }
@@ -232,18 +254,39 @@ final class VideoCanvas {
     private static final String MUSIC_SEARCH = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
     private static final String VIDEOS = "EgWKAQIQAWoMEA4QChADEAQQCRAF";
     /** Never the song's video, whoever posted it (Prism's MusicVideoMatch). */
-    private static final String[] NEVER = {"lyric", "lyrics", "letra", "letras", "paroles", "karaoke", "instrumental", "reaction",
-            "tutorial", "lesson", "slowed", "sped up", "nightcore", "8d", "fan made", "remix", "official audio", "audio oficial",
-            "audio only", "bass boosted", "reverb", "1 hour", "10 hours", "loop", "mashup", "parody", "ai cover"};
+    private static final String[] NEVER = {"lyric", "lyrics", "letra", "letras", "paroles", "testo", "traducida", "traducción",
+            "sub español", "subtitulad", "перевод", "текст",
+            "karaoke", "instrumental", "reaction", "tutorial", "lesson", "guitar", "piano", "drum", "bass", "slowed", "sped up",
+            "nightcore", "8d", "fan made", "fanmade", "remix", "highlights", "edit audio", "official audio", "audio oficial",
+            "audio only", "rebassed", "bass boosted", "bassboosted", "boosted", "reverb", "daycore", "speed up", "1 hour",
+            "10 hours", "loop", "mashup", "parody", "ai cover"};
+    /** A frequency in the title ("(25-70Hz)", "432hz") marks a re-tuned or bass-boosted copy. */
+    private static final java.util.regex.Pattern HZ = java.util.regex.Pattern.compile("(?<![\\p{L}])\\d+\\s?hz(?![\\p{L}])");
     /** Another take on the song: fine when the song is that take itself. */
-    private static final String[] OTHER_TAKE = {"cover", "acoustic", "unplugged", "live", "en vivo", "ao vivo", "concert", "session"};
+    private static final String[] OTHER_TAKE = {"cover", "acoustic", "acústic", "unplugged", "live", "en vivo", "ao vivo", "concert", "session"};
+    /** Bracket words that don't name a source. */
+    private static final List<String> GENERIC = Arrays.asList("feat", "with", "from", "the", "and", "version", "session", "sessions",
+            "live", "remaster", "remastered", "edit", "radio", "mix", "original", "deluxe", "explicit", "clean", "cover", "acoustic",
+            "mono", "stereo", "single");
+    /** Record labels that post their artists' official videos (normalized channel names). */
+    private static final List<String> LABELS = Arrays.asList("fueledbyramen", "atlanticrecords", "warnerrecords", "warnermusic",
+            "elektrarecords", "roadrunnerrecords", "interscope", "interscoperecords", "republicrecords", "islandrecords", "defjam",
+            "defjamrecordings", "capitolrecords", "columbiarecords", "epicrecords", "rcarecords", "sonymusic", "sonymusicentertainment",
+            "universalmusicgroup", "emimusic", "parlophone", "parlophonerecords", "epitaphrecords", "hopelessrecords", "riserecords",
+            "sumerianrecords", "nuclearblastrecords", "spinninrecords", "monstercat", "ultramusic", "armadamusic", "xlrecordings",
+            "subpop", "dominorecordco", "4ad", "matadorrecords", "bigmachinerecords", "rhinorecords", "motownrecords", "topdawgent",
+            "xorecords", "glassnoterecords");
+    private static final java.util.regex.Pattern LABEL_WORDS =
+            java.util.regex.Pattern.compile("(?<![\\p{L}])(records|recordings|music group|entertainment|label)(?![\\p{L}])");
+    /** The artist's upload: the song's length give or take LOOSE_S; someone else's: the very recording, within TIGHT_S. */
+    private static final int LOOSE_S = 150, TIGHT_S = 4;
 
     /**
      * {videoId, title} of the song's music video, or null. Signed out, YouTube no longer pairs songs with their
-     * videos in `next`, so it is found as Prism does: a video search, and the first result whose title is the
-     * song's and that the artist posted (their channel, its VEVO or "Official" one), not a lyric video or another take.
+     * videos in `next`, so it is found as Prism does: a video search, then once more with "official video", and the
+     * first result Prism's MusicVideoMatch takes ([pick]). [durationSec] 0: the song's length is unknown.
      */
-    static String[] findVideo(String title, String artist) throws Exception {
+    static String[] findVideo(String title, String artist, long durationSec) throws Exception {
         String[] artists = artists(artist);
         if (title == null || title.trim().isEmpty() || artists.length == 0) return null;
         for (String q : new String[]{title + " " + artists[0], title + " " + artists[0] + " official video"}) {
@@ -251,7 +294,8 @@ final class VideoCanvas {
                     new JSONObject().put("clientName", "WEB_REMIX").put("clientVersion", "1.20251101.01.00").put("hl", "en").put("gl", "US")));
             List<String[]> found = new ArrayList<>();
             results(post(MUSIC_SEARCH, body, "Mozilla/5.0", "https://music.youtube.com"), found);
-            for (String[] v : found) if (matches(title, artists, v[1], v[2])) return new String[]{v[0], v[1]};
+            String[] v = pick(title, artists, durationSec, found);
+            if (v != null) return new String[]{v[0], v[1]};
             StringBuilder seen = new StringBuilder();
             for (int i = 0; i < Math.min(5, found.size()); i++) seen.append("; '").append(found.get(i)[1]).append("' by ").append(found.get(i)[2]);
             Log.i(TAG, "canvas video: none for '" + q + "' among" + seen);
@@ -259,7 +303,7 @@ final class VideoCanvas {
         return null;
     }
 
-    /** {videoId, title, channel} of each search result. */
+    /** {videoId, title, channel, length s or "0"} of each search result (the length from the fixed column, else the subtitle). */
     private static void results(Object node, List<String[]> out) {
         if (node instanceof JSONObject) {
             JSONObject o = (JSONObject) node;
@@ -273,7 +317,19 @@ final class VideoCanvas {
                     JSONObject second = column(fc, 1);
                     JSONArray rr = second == null ? null : second.optJSONArray("runs");
                     String ch = rr == null || rr.length() == 0 ? "" : rr.optJSONObject(0).optString("text");
-                    out.add(new String[]{id, t, ch});
+                    JSONArray fixed = r.optJSONArray("fixedColumns");
+                    JSONObject fr = fixed == null || fixed.optJSONObject(0) == null ? null
+                            : fixed.optJSONObject(0).optJSONObject("musicResponsiveListItemFixedColumnRenderer");
+                    long len = lengthOf(fr == null ? null : runs(fr.optJSONObject("text")));
+                    for (int i = 1; len == 0 && i < fc.length(); i++) {
+                        JSONObject col = column(fc, i);
+                        JSONArray cr = col == null ? null : col.optJSONArray("runs");
+                        for (int k = 0; cr != null && k < cr.length(); k++) {
+                            long l = lengthOf(cr.optJSONObject(k) == null ? null : cr.optJSONObject(k).optString("text"));
+                            if (l > 0) len = l;
+                        }
+                    }
+                    out.add(new String[]{id, t, ch, String.valueOf(len)});
                 }
                 return;
             }
@@ -299,18 +355,102 @@ final class VideoCanvas {
         return out.toArray(new String[0]);
     }
 
-    /** The video is the song's music video (Prism's rules, the artist's own upload only). */
-    static boolean matches(String songTitle, String[] artists, String videoTitle, String channel) {
-        String song = songTitle.toLowerCase(Locale.ROOT), vt = videoTitle.toLowerCase(Locale.ROOT);
-        if (has(NEVER, vt, song) || has(OTHER_TAKE, vt, song)) return false;
-        List<String> names = new ArrayList<>();
-        for (String a : artists) names.add(norm(a));
+    /** "3:45" or "1:02:03" in seconds; 0 when it is not a length. */
+    static long lengthOf(String text) {
+        String t = text == null ? "" : text.trim();
+        if (!t.matches("\\d{1,2}(:\\d{2}){1,2}")) return 0;
+        long s = 0;
+        for (String p : t.split(":")) s = s * 60 + Long.parseLong(p);
+        return s;
+    }
+
+    /**
+     * Prism's MusicVideoMatch.pick over search results {id, title, channel, length s} in order: the first
+     * one whose title is the song's and is never a lyric video, a lesson, a re-tuned copy and the like
+     * (nor from a channel that only posts those, unless it is the artist's), posted by the artist (their
+     * channel, its VEVO or "Official" one) or their record label, within LOOSE_S of the song and not
+     * another take; else, for a song naming a source in brackets ("SiriusXM Session"), that recording by
+     * whoever posted it, within TIGHT_S, naming the artist. A studio song takes nobody else's upload.
+     * Lengths of 0 are unknown.
+     */
+    static String[] pick(String songTitle, String[] artistNames, long durationSec, List<String[]> videos) {
+        List<String> artists = new ArrayList<>();
+        for (String a : artistNames) if (!norm(a).isEmpty()) artists.add(norm(a));
+        if (norm(songTitle).isEmpty() || artists.isEmpty()) return null;
+        String song = songTitle.toLowerCase(Locale.ROOT);
+        // the source the song names in its brackets ("SiriusXM Session" -> "siriusxm"), without the generic words
+        List<String> source = new ArrayList<>();
+        java.util.regex.Matcher br = java.util.regex.Pattern.compile("\\((.*?)\\)|\\[(.*?)]").matcher(song);
+        while (br.find())
+            for (String w : br.group().split("[^\\p{L}\\p{N}]+"))
+                if (w.length() > 2 && !GENERIC.contains(w) && !source.contains(w)) source.add(w);
+        List<String[]> candidates = new ArrayList<>();
+        for (String[] v : videos) {
+            if (sameTitle(songTitle, artistNames, v[1], v[2]) && !never(v[1].toLowerCase(Locale.ROOT), song)
+                    && (ownChannel(v[2], artists) || !never(v[2].toLowerCase(Locale.ROOT), song))) candidates.add(v);
+        }
+        // the artist's own upload first: their channel (VEVO and "Official" ones too), or their record label's
+        for (String[] v : candidates)
+            if ((ownChannel(v[2], artists) || byLabel(v[1], v[2], artists)) && within(durationSec, v, LOOSE_S)
+                    && !has(OTHER_TAKE, v[1].toLowerCase(Locale.ROOT), song)) return v;
+        if (source.isEmpty()) return null;
+        // a song from a named session or show: that very recording, posted by whoever made it
+        for (String[] v : candidates) {
+            String words = v[1].toLowerCase(Locale.ROOT), where = words + " " + v[2].toLowerCase(Locale.ROOT);
+            boolean namesArtist = false, fromSource = false;
+            for (String a : artists) namesArtist |= norm(words).contains(a);
+            for (String w : source) fromSource |= where.contains(w);
+            if (within(durationSec, v, TIGHT_S) && durationSec > 0 && length(v) > 0 && namesArtist && fromSource) return v;
+        }
+        return null;
+    }
+
+    private static long length(String[] v) {
+        try {
+            return v.length > 3 ? Long.parseLong(v[3]) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static boolean within(long durationSec, String[] v, int s) {
+        return durationSec == 0 || length(v) == 0 || Math.abs(length(v) - durationSec) <= s;
+    }
+
+    /** The channel is the artist's own: its name, or its VEVO / "Official" form. */
+    private static boolean ownChannel(String channel, List<String> artists) {
         String ch = officialChannel(norm(channel));
-        if (ch.isEmpty() || !names.contains(ch)) return false;
-        names.add(norm(channel));
-        names.sort((x, y) -> y.length() - x.length());
+        return !ch.isEmpty() && artists.contains(ch);
+    }
+
+    /** Posted by the artist's record label, naming the artist: a label we know, or a "... Records" channel saying official. */
+    private static boolean byLabel(String videoTitle, String channel, List<String> artists) {
+        boolean named = false;
+        for (String a : artists) named |= norm(videoTitle).contains(a);
+        if (!named) return false;
+        return LABELS.contains(norm(channel)) || LABEL_WORDS.matcher(channel.toLowerCase(Locale.ROOT)).find()
+                && java.util.regex.Pattern.compile("(?<![\\p{L}])official(?![\\p{L}])").matcher(videoTitle.toLowerCase(Locale.ROOT)).find();
+    }
+
+    /** A lyric video, a lesson, a re-tuned copy and the like (unless the song's own title says so). */
+    private static boolean never(String text, String song) {
+        return has(NEVER, text, song) || HZ.matcher(text).find() && !HZ.matcher(song).find();
+    }
+
+    /** The video's title is the song's: the song's artists' and the channel's names (and their "official" forms) taken out. */
+    private static boolean sameTitle(String songTitle, String[] artistNames, String videoTitle, String channel) {
         String want = core(songTitle, new ArrayList<>());
-        return !want.isEmpty() && want.equals(core(videoTitle, names));
+        if (want.isEmpty()) return false;
+        List<String> names = new ArrayList<>();
+        List<String> all = new ArrayList<>(Arrays.asList(artistNames));
+        all.add(channel);
+        for (String a : all) {
+            String n = norm(a);
+            if (n.length() < 2) continue;
+            for (String x : new String[]{n, officialChannel(n)}) if (!names.contains(x)) names.add(x);
+        }
+        names.sort((x, y) -> y.length() - x.length());
+        return want.equals(core(videoTitle, names));
     }
 
     private static boolean has(String[] words, String text, String song) {
@@ -321,11 +461,13 @@ final class VideoCanvas {
         return false;
     }
 
-    /** The title without brackets, "| ..." tails, feat. credits, video words and the artists' names. */
+    /** The title without brackets, "| ..." and "// ..." tails, feat. credits, video words and the artists' names. */
     private static String core(String title, List<String> names) {
         String t = title.toLowerCase(Locale.ROOT).replaceAll("\\(.*?\\)|\\[.*?]|\u3010.*?\u3011", " ");
         int bar = t.indexOf(" | ");
         if (bar >= 0) t = t.substring(0, bar);
+        int slashes = t.indexOf(" // ");
+        if (slashes >= 0) t = t.substring(0, slashes);
         t = t.replaceAll("\\s(ft\\.?|feat\\.?|featuring)\\s.*$", " ")
                 .replaceAll("(?<![\\p{L}])(official|music|video|videoclip|clip|hd|4k|hq|remastered|remaster|visualizer|mv|m/v)(?![\\p{L}])", " ");
         t = norm(t);
@@ -340,7 +482,7 @@ final class VideoCanvas {
     /** "NirvanaVEVO", "Official Billie Eilish" -> the artist's own name, normalized. */
     static String officialChannel(String n) {
         String name = n;
-        for (String s : new String[]{"vevo", "official", "oficial", "officiel", "offiziell", "music", "tv", "channel"})
+        for (String s : new String[]{"vevo", "official", "oficial", "officiel", "offiziell", "ufficiale", "music", "tv", "channel"})
             if (n.endsWith(s)) n = n.substring(0, n.length() - s.length());
         if (n.startsWith("official")) n = n.substring(8);
         return n.isEmpty() ? name : n;
@@ -426,42 +568,85 @@ final class VideoCanvas {
         return null;
     }
 
+    /** Prism's BestPart: no part in the first 5 s (or 2 segments) or the last 30 s, none in a song under 60 s. */
+    private static final long PART_HEAD_MS = 5_000, PART_TAIL_MS = 30_000, MIN_SONG_MS = 60_000;
+    private static final double MIN_RISE = 0.08, MIN_LIFT = 0.03, TREND_HALF_MS = 45_000, TREND_FLOOR = 0.05;
+
     /**
-     * Where the loop starts: the "Most replayed" peak (the largest rise of a ~9 s smoothed curve over a
-     * ±45 s running median, pulled back to where the rise starts; not in the first 12 s), as Prism's
-     * BestPart; without a curve, 40% into the video.
+     * Where the most replayed stretch begins (s), or -1 when nothing stands out or the song is too short:
+     * Prism's BestPart.peakMs on the markers ({start s, length s, intensity} each, flattened), whose
+     * segment is the median marker length. [dur] the song's length in s (0: the curve's own).
      */
     static double partStart(double[] heat, double dur) {
-        double fallback = Math.max(0, dur * 0.4);
-        if (heat == null || heat.length < 30 || dur < CLIP_SEC + 2) return Math.min(fallback, Math.max(0, dur - CLIP_SEC));
+        if (heat == null || heat.length / 3 < 10) return -1;
         int n = heat.length / 3;
-        double step = Math.max(0.5, heat[1]);
-        double[] v = new double[n], s = new double[n];
-        for (int i = 0; i < n; i++) v[i] = heat[i * 3 + 2];
-        int half = Math.max(1, (int) Math.round(4.5 / step));
+        Integer[] order = new Integer[n];
+        for (int i = 0; i < n; i++) order[i] = i;
+        Arrays.sort(order, (x, y) -> Double.compare(heat[x * 3], heat[y * 3]));
+        double[] lengths = new double[n], v = new double[n];
+        for (int i = 0; i < n; i++) {
+            lengths[i] = heat[order[i] * 3 + 1];
+            v[i] = Math.max(0, Math.min(1, heat[order[i] * 3 + 2]));
+        }
+        Arrays.sort(lengths);
+        long seg = Math.round(lengths[n / 2] * 1000);
+        if (seg <= 0) return -1;
+        long at = peakMs(v, seg, Math.round(dur * 1000));
+        return at < 0 ? -1 : at / 1000.0;
+    }
+
+    /**
+     * Prism's BestPart.peakMs: each moment of a ~9 s smoothed curve against the median of the curve about
+     * 45 s either side (the opening segment left out); the biggest rise as a share over that trend (at
+     * least 0.05) wins, ties to the earlier, between max(5 s, 2 segments) and 30 s before the end. None
+     * under a rise of 0.08 or a lift of 0.03. Pulled back over the segments rising at least half as much,
+     * then forward to the first raw segment that does. -1 when none.
+     */
+    static long peakMs(double[] intensity, long seg, long durationMs) {
+        int n = intensity.length;
+        long duration = durationMs > 0 ? durationMs : seg * n;
+        if (duration < MIN_SONG_MS || n < 10 || seg <= 0) return -1;
+        int half = Math.max(1, (int) Math.round(4_500.0 / seg));
+        double[] smooth = new double[n], trend = new double[n];
         for (int i = 0; i < n; i++) {
             double sum = 0;
             int c = 0;
-            for (int j = Math.max(0, i - half); j <= Math.min(n - 1, i + half); j++, c++) sum += v[j];
-            s[i] = sum / c;
+            for (int j = Math.max(0, i - half); j <= Math.min(n - 1, i + half); j++, c++) sum += intensity[j];
+            smooth[i] = sum / c;
         }
-        int wide = Math.max(2, (int) Math.round(45 / step));
-        int best = -1;
-        double bestRise = 0;
+        int wide = Math.max(3, (int) Math.round(TREND_HALF_MS / seg));
         for (int i = 0; i < n; i++) {
-            if (heat[i * 3] < 12 || heat[i * 3] > dur - CLIP_SEC) continue;
-            double[] w = Arrays.copyOfRange(s, Math.max(0, i - wide), Math.min(n, i + wide + 1));
+            double[] w = Arrays.copyOfRange(smooth, Math.max(1, i - wide), Math.min(n - 1, i + wide) + 1);
             Arrays.sort(w);
-            double rise = s[i] - w[w.length / 2];
-            if (rise > bestRise) {
-                bestRise = rise;
-                best = i;
-            }
+            trend[i] = w[w.length / 2];
         }
-        if (best < 0) return Math.min(fallback, Math.max(0, dur - CLIP_SEC));
-        int i = best;
-        while (i > 0 && s[i - 1] < s[i] && heat[(i - 1) * 3] >= 12) i--;
-        return Math.min(heat[i * 3], Math.max(0, dur - CLIP_SEC));
+        long head = Math.max(PART_HEAD_MS, 2 * seg);
+        int peak = -1;
+        for (int i = 0; i < n; i++)
+            if (candidate(i, seg, head, duration) && (peak < 0 || rise(smooth[i], trend[i]) > rise(smooth[peak], trend[peak]))) peak = i;
+        if (peak < 0) return -1;
+        double top = rise(smooth[peak], trend[peak]);
+        if (top < MIN_RISE || smooth[peak] - trend[peak] < MIN_LIFT) return -1;
+        // back to where the heat starts to rise: half the peak's rise above the trend
+        double floor = top * 0.5;
+        int start = peak;
+        while (candidate(start - 1, seg, head, duration) && rise(smooth[start - 1], trend[start - 1]) >= floor) start--;
+        // the rise is gradual in the smoothed curve; the raw segments say where it actually jumps
+        int jump = start;
+        for (int i = start; i <= peak; i++)
+            if (rise(intensity[i], trend[i]) >= floor) {
+                jump = i;
+                break;
+            }
+        return jump * seg;
+    }
+
+    private static boolean candidate(int i, long seg, long head, long duration) {
+        return i >= 0 && i * seg >= head && i * seg <= duration - PART_TAIL_MS;
+    }
+
+    private static double rise(double v, double trend) {
+        return v / Math.max(trend, TREND_FLOOR) - 1;
     }
 
     /**

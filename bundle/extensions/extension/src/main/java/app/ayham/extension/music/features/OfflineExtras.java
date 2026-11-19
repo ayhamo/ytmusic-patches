@@ -171,7 +171,7 @@ final class OfflineExtras {
     /** The song's Spotify canvas, kept in files/ayham-offline/spotify (no cap) and saved against the video id. */
     private static String canvas(Context c, String videoId, String title, String artist) throws Exception {
         CanvasCache.init(c.getFilesDir());
-        File f = SpotifyCanvas.find(title, artist, new File(OfflineIndex.dir(c), "spotify"), false);
+        File f = SpotifyCanvas.find(title, artist, null, 0, new File(OfflineIndex.dir(c), "spotify"), false);
         if (f == null) return "none (no canvas)";
         CanvasCache.put(CanvasCache.spotifyIdKey(videoId), f.getAbsolutePath());
         OfflineIndex.note(c, videoId, OfflineIndex.CANVAS, f.getAbsolutePath());
@@ -187,7 +187,7 @@ final class OfflineExtras {
     private static String clip(Context c, String videoId, String title, String artist) throws Exception {
         CanvasCache.init(c.getFilesDir());
         // the shape the player shows: tall with full-screen art, else square; the other when that fails
-        String[] urls = AppleCanvas.find(title, artist, FullArt.on());
+        String[] urls = AppleCanvas.find(title, artist, null, FullArt.on());
         if (urls == null) {
             CanvasCache.put(CanvasCache.idKey(videoId), null);
             return "none (no motion art)";

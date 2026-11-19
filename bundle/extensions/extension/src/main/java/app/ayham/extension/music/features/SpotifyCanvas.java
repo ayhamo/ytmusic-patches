@@ -52,15 +52,18 @@ final class SpotifyCanvas {
     private SpotifyCanvas() {
     }
 
-    /** The song's Canvas clip as a file in cacheDir/canvas, or null (no canvas, or no match). */
-    static File find(String title, String artist, File cacheDir) throws Exception {
-        return find(title, artist, cacheDir, true);
+    /**
+     * The song's Canvas clip as a file in cacheDir/canvas, or null (no canvas, or no match). [album]
+     * (null) and [durationMs] (0) when unknown: Metrolist checks each only when both sides know it.
+     */
+    static File find(String title, String artist, String album, long durationMs, File cacheDir) throws Exception {
+        return find(title, artist, album, durationMs, cacheDir, true);
     }
 
     /** @param trim false for the downloaded songs' canvases (kept in the app's files, no size cap). */
-    static synchronized File find(String title, String artist, File cacheDir, boolean trim) throws Exception {
+    static synchronized File find(String title, String artist, String album, long durationMs, File cacheDir, boolean trim) throws Exception {
         if (title == null || artist == null || title.trim().isEmpty() || artist.trim().isEmpty()) return null;
-        String url = canvasUrl(title, artist);
+        String url = canvasUrl(title, artist, album, durationMs);
         if (url == null) return null;
         File dir = new File(cacheDir, "canvas");
         if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("canvas: no folder");
@@ -96,7 +99,7 @@ final class SpotifyCanvas {
     }
 
     /** Metrolist's spotifyCanvas: the first matching track among the top 10 results that has a canvas. */
-    static String canvasUrl(String title, String artist) throws Exception {
+    static String canvasUrl(String title, String artist, String album, long durationMs) throws Exception {
         String primary = artist.split("\\s*(,|&| x | X |\\bfeat\\.?|\\bft\\.?)\\s*")[0].trim();
         JSONObject vars = new JSONObject()
                 .put("query", title + " " + artist).put("limit", 10).put("offset", 0).put("numberOfTopResults", 10)
@@ -133,8 +136,11 @@ final class SpotifyCanvas {
                 names.append(nm);
             }
             String name = track.optString("name", "");
+            JSONObject albumOf = track.optJSONObject("albumOfTrack"), length = track.optJSONObject("duration");
+            String foundAlbum = albumOf == null ? null : albumOf.optString("name", null);
+            long foundMs = length == null ? 0 : length.optLong("totalMilliseconds", 0);
             seen.append("; '").append(name).append("' by ").append(names);
-            if (!matches(title, artist, null, 0, name, names.toString(), null, 0, primary, first)) continue;
+            if (!matches(title, artist, album, durationMs, name, names.toString(), foundAlbum, foundMs, primary, first)) continue;
             String canvas = publicCanvas(id);
             if (trusted(canvas)) {
                 Log.i(TAG, "canvas spotify: '" + name + "' by " + names + " (" + id + ") has a canvas");

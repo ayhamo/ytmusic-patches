@@ -168,8 +168,13 @@ final class AnimatedCover {
      * canvas (9:16) or a music video fills the whole player, as in Metrolist.
      */
     static boolean tallClip() {
-        if (videoW == 0) return false;
-        float r = videoH / (float) videoW;
+        return tallClip(videoW, videoH);
+    }
+
+    /** A w x h clip is Apple's tall cover: height over width above 1.2 and under 1.45 (3:4). */
+    static boolean tallClip(int w, int h) {
+        if (w == 0) return false;
+        float r = h / (float) w;
         return r > 1.2f && r < 1.45f;
     }
 
@@ -387,12 +392,12 @@ final class AnimatedCover {
                         aheadAsked.remove(s[0]);
                         return;
                     }
-                    String mvKey = "mv:" + s[0];
+                    String mvKey = CanvasCache.videoKey(s[0]);
                     boolean[] none = {false};
                     java.io.File f;
                     synchronized (VideoCanvas.class) {
                         if (CanvasCache.lookup(mvKey) != null) return;
-                        f = VideoCanvas.clip(s[0], s[1], s[2], cacheDir, 1080, none);
+                        f = VideoCanvas.clip(s[0], s[1], s[2], 0, cacheDir, 1080, none);
                     }
                     if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
                     Log.i(TAG, "canvas ahead: '" + s[1] + "' " + (f != null ? "loop cached" : none[0] ? "has no video" : "not this time"));
@@ -435,7 +440,7 @@ final class AnimatedCover {
                 Log.i(TAG, "canvas: '" + title + "' skipped before lookup");
                 return;
             }
-            String songKey = title + "|" + artist + (tall ? "|tall" : "");
+            String songKey = CanvasCache.appleKey(title, artist, tall);
             String saved = null, vid = null;
             if (fixed.isEmpty()) {
                 // a downloaded song's clip by its video id first (works offline)
@@ -464,9 +469,23 @@ final class AnimatedCover {
                 });
                 return;
             }
+            // the song's length for the music video's and Spotify's length checks: the player's own, checked
+            // by the song's id (the playing id is this song's before and after the read), else unknown (0: not
+            // checked). YT's player gives no album: null.
+            long songLength = 0;
+            if (vid != null) {
+                try {
+                    if (vid.equals(app.ayham.extension.music.automix.Automix.currentId())) {
+                        long ms = app.ayham.extension.music.automix.Automix.durationMs();
+                        if (vid.equals(app.ayham.extension.music.automix.Automix.currentId())) songLength = Math.max(0, ms);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            final long songMs = songLength;
             // Metrolist's source order: the song's music video first, then Apple's animated cover
             if (fixed.isEmpty() && video && vid != null) {
-                String mvKey = "mv:" + vid, saidMv = CanvasCache.lookup(mvKey);
+                String mvKey = CanvasCache.videoKey(vid), saidMv = CanvasCache.lookup(mvKey);
                 // a saved clip the cache trim has since deleted is cut again
                 final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
                 if (had != null && !had.isEmpty()) {
@@ -494,7 +513,7 @@ final class AnimatedCover {
                                 });
                                 return;
                             }
-                            f = VideoCanvas.clip(vid, title, artist, cacheDir, artPx, none);
+                            f = VideoCanvas.clip(vid, title, artist, songMs, cacheDir, artPx, none);
                         }
                         // still this song: a clip cut while the queue moved on is not saved under its id
                         if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
@@ -519,7 +538,7 @@ final class AnimatedCover {
             }
             // then Spotify's Canvas (Metrolist's order: video, Spotify, Apple), saved by title and artist
             if (fixed.isEmpty() && spotify) {
-                String spKey = "sp:" + title + "|" + artist, had = CanvasCache.lookup(spKey);
+                String spKey = CanvasCache.spotifyKey(title, artist), had = CanvasCache.lookup(spKey);
                 if (had != null && !had.isEmpty() && new java.io.File(had).length() > 0) {
                     Log.i(TAG, "canvas: spotify canvas from cache");
                     main.post(() -> {
@@ -529,7 +548,7 @@ final class AnimatedCover {
                 }
                 if (had == null || !had.isEmpty()) {
                     try {
-                        java.io.File f = SpotifyCanvas.find(title, artist, cacheDir);
+                        java.io.File f = SpotifyCanvas.find(title, artist, null, songMs, cacheDir);
                         CanvasCache.put(spKey, f == null ? null : f.getAbsolutePath());
                         if (f != null) {
                             String path = f.getAbsolutePath();
@@ -565,7 +584,7 @@ final class AnimatedCover {
             try {
                 if (!fixed.isEmpty()) url = fixed;
                 else if (apple) {
-                    String[] found = AppleCanvas.find(title, artist, tall);
+                    String[] found = AppleCanvas.find(title, artist, null, tall);
                     if (found != null) {
                         url = found[0];
                         alt = found[1];

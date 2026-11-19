@@ -56,7 +56,11 @@ final class CanvasCache {
     static synchronized String lookup(String songKey) {
         if (props == null) return null;
         String v = props.getProperty("song." + songKey);
-        if (v == null) return null;
+        return v == null ? null : read(v, path -> new File(path).exists(), System.currentTimeMillis());
+    }
+
+    /** A saved entry "time|path" as lookup answers it, at [now], with [exists] telling whether a clip file is there. */
+    static String read(String v, java.util.function.Predicate<String> exists, long now) {
         int bar = v.indexOf('|');
         long at;
         try {
@@ -67,8 +71,23 @@ final class CanvasCache {
             return null;
         }
         String path = v.substring(bar + 1);
-        if (!path.isEmpty() && new File(path).exists()) return path; // the clip is here: no network needed
-        return System.currentTimeMillis() - at < DAY && path.isEmpty() ? "" : null;
+        if (!path.isEmpty() && exists.test(path)) return path; // the clip is here: no network needed
+        return now - at < DAY && path.isEmpty() ? "" : null;
+    }
+
+    /** The key a song's music-video loop is saved under. */
+    static String videoKey(String videoId) {
+        return "mv:" + videoId;
+    }
+
+    /** The key a song's Spotify canvas is saved under. */
+    static String spotifyKey(String title, String artist) {
+        return "sp:" + title + "|" + artist;
+    }
+
+    /** The key a song's Apple motion art is saved under: the tall (3:4) clip is another answer. */
+    static String appleKey(String title, String artist, boolean tall) {
+        return title + "|" + artist + (tall ? "|tall" : "");
     }
 
     /** The key a downloaded song's clip is saved under (title and artist can differ offline). */

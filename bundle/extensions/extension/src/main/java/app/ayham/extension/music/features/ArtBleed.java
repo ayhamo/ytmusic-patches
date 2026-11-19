@@ -37,9 +37,13 @@ final class ArtBleed {
 
     /** The zoomed cover's width: its height (width x aspect) made 60% of the player's, 1 to 1.6 times the screen's width. */
     static int containerWidth(int viewportW, int viewportH, float aspect) {
+        return Math.round(viewportW * coverZoom(viewportW, viewportH, aspect));
+    }
+
+    /** The cover's zoom: its height (width x aspect) made 60% of the player's, within 1 to MAX_COVER_ZOOM. */
+    static float coverZoom(int viewportW, int viewportH, float aspect) {
         float coverHeight = viewportW * aspect;
-        float zoom = Math.max(1f, Math.min(MAX_COVER_ZOOM, viewportH * COVER_HEIGHT_FRACTION / coverHeight));
-        return Math.round(viewportW * zoom);
+        return Math.max(1f, Math.min(MAX_COVER_ZOOM, viewportH * COVER_HEIGHT_FRACTION / coverHeight));
     }
 
     /** Where the blur starts, on a multiple of SOFT_DIVISOR so the quarter-size part lines up. */
@@ -185,7 +189,7 @@ final class ArtBleed {
     static int[] bleedCanvas(int[] art, int width, int artHeight, int height) {
         int[] canvas = new int[width * height];
         System.arraycopy(art, 0, canvas, 0, width * Math.min(artHeight, height));
-        int stripRows = Math.max(2, Math.min(artHeight, Math.round(artHeight * BLEED_SOURCE)));
+        int stripRows = stripRows(artHeight);
         int below = height - artHeight;
         float[] weights = new float[4];
         for (int y = artHeight; y < height; y++) {
@@ -241,6 +245,18 @@ final class ArtBleed {
         return out;
     }
 
+    /** The cover's bottom rows that feed the area below it: BLEED_SOURCE of it, at least 2. */
+    static int stripRows(int artHeight) {
+        return Math.max(2, Math.min(artHeight, Math.round(artHeight * BLEED_SOURCE)));
+    }
+
+    /** {lower, upper}: the two pre-blurred levels of BLUR_RADII nearest [radius] (the first one at or above it, and the one before). */
+    static int[] blurLevels(float radius) {
+        int u = 0;
+        while (BLUR_RADII[u] < radius) u++;
+        return new int[]{Math.max(u - 1, 0), u};
+    }
+
     /** The blur radius at a row, in container widths from the cover's top. */
     static float blurRadiusAt(float row) {
         if (row <= BLUR_START) return 0f;
@@ -258,11 +274,10 @@ final class ArtBleed {
         int maxLevel = 0;
         for (int r = 0; r < rows; r++) {
             radii[r] = blurRadiusAt((firstRow + r) / unit);
-            int u = 0;
-            while (BLUR_RADII[u] < radii[r]) u++;
-            upper[r] = u;
-            lower[r] = Math.max(u - 1, 0);
-            maxLevel = Math.max(maxLevel, u);
+            int[] lu = blurLevels(radii[r]);
+            lower[r] = lu[0];
+            upper[r] = lu[1];
+            maxLevel = Math.max(maxLevel, lu[1]);
         }
         // a level only feeds the rows between its neighbours: blur just those rows
         int[] usedFirst = new int[maxLevel + 1], usedLast = new int[maxLevel + 1];

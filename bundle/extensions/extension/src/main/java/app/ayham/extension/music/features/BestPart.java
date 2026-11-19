@@ -34,6 +34,11 @@ final class BestPart {
             int n = heat.length / 3;
             double dur = heat[(n - 1) * 3] + heat[(n - 1) * 3 + 1];
             double at = VideoCanvas.partStart(heat, dur);
+            if (at < 0) {
+                // a flat curve, or a song under a minute: nothing stands out
+                main.post(() -> toast(a, "No part of this song stands out in YouTube's most replayed"));
+                return;
+            }
             main.post(() -> {
                 if (!id.equals(app.ayham.extension.music.automix.Automix.currentId())) return;
                 Object p;

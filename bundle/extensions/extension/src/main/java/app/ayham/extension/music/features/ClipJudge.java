@@ -9,8 +9,8 @@ import java.util.List;
  *
  * <p>Storyboard: black bars, a still upload, every ~8 s window scored by its movement (some, not
  * frantic), brightness (not a black screen) and distance from the intro and the credits; the window
- * near YouTube's "Most replayed" peak is taken first, else the middle third, else the best; the
- * square crop goes where the detail and movement are. Real frames: where the video cuts, the loop
+ * near YouTube's "Most replayed" peak is taken first, else near the chorus, else the middle third,
+ * else the best; the crop goes where the detail and movement are. Real frames: where the video cuts, the loop
  * ending on its last cut 5 to 9 s in, and the flash guard (more than three flashes in a second over
  * a quarter of the picture is never shown).
  */
@@ -19,8 +19,9 @@ final class ClipJudge {
     static final long WINDOW_MS = 8_000, HEAD_MS = 12_000, TAIL_MS = 15_000, MIN_LOOP_MS = 5_000, MAX_LOOP_MS = 9_000;
     private static final int BLACK = 24, LIT = 48;
     private static final double BAR_SHARE = 0.9, STEP_MOVE = 3, STILL_SHARE = 0.6, WINDOW_STILL_SHARE = 0.75;
-    private static final double IDEAL_MOVE = 18, FRANTIC_MOVE = 60, DARK = 16, BRIGHT = 64, CROP_LEAD = 1.15;
-    private static final long PEAK_BEFORE_MS = 4_000, PEAK_AFTER_MS = 8_000, APART_MS = 15_000;
+    private static final double IDEAL_MOVE = 18, FRANTIC_MOVE = 60, DARK = 16, BRIGHT = 64, CROP_SHARE = 0.32, CROP_LEAD = 1.15;
+    private static final long PEAK_BEFORE_MS = 4_000, PEAK_AFTER_MS = 8_000, CHORUS_NEAR_MS = 10_000, APART_MS = 15_000;
+    private static final int RUNNERS_UP = 4;
     private static final double GOOD_ENOUGH = 0.3;
     private static final float CUT = 22, FLASH_AREA = 0.25f;
     private static final int FLASH_STEP = 26, FLASH_CHANGES = 7;
@@ -163,36 +164,102 @@ final class ClipJudge {
         return out;
     }
 
-    /** The loop's window: best near the "Most replayed" peak, else the middle third, else the best. Null when none scores. */
-    static double[] choose(List<double[]> windows, long lengthMs, long peakMs, List<double[]> skip) {
-        double top = 0;
-        for (double[] w : windows) top = Math.max(top, w[2]);
-        double[] best = null, mid = null, near = null;
-        for (double[] w : windows) {
-            if (w[2] <= 0 || farFrom(w, skip)) continue;
-            if (best == null || w[2] > best[2]) best = w;
-            if (w[2] < top * GOOD_ENOUGH) continue;
-            if (peakMs >= HEAD_MS && w[0] >= peakMs - PEAK_BEFORE_MS && w[0] <= peakMs + PEAK_AFTER_MS && (near == null || w[2] > near[2])) near = w;
-            if (w[0] >= lengthMs / 3.0 && w[0] <= lengthMs * 2 / 3.0 && (mid == null || w[2] > mid[2])) mid = w;
-        }
-        return near != null ? near : mid != null ? mid : best;
-    }
-
-    /** A window within APART_MS of one already tried (a runner-up must be another part). */
-    private static boolean farFrom(double[] w, List<double[]> skip) {
-        if (skip != null) for (double[] s : skip) if (Math.abs(s[0] - w[0]) < APART_MS) return true;
-        return false;
+    /** Best first: the higher score, on a tie the earlier start (the answer never depends on the windows' order). */
+    private static boolean better(double[] w, double[] than) {
+        return than == null || w[2] > than[2] || w[2] == than[2] && w[0] < than[0];
     }
 
     /**
-     * Where the square crop sits across the picture inside the bars (0 left, 0.5 centred, 1 right):
-     * the band as wide as the picture is tall that holds the most detail and movement, when it
-     * clearly leads the centre.
+     * The loop's window (Prism's FrameJudge.choose): the best near YouTube's "Most replayed" [peakMs] (one
+     * in the first HEAD_MS is the intro everyone replays: ignored), else near the song's [chorusMs] (from
+     * synced lyrics), else in the middle third, each only from windows scoring above 0 and at least
+     * GOOD_ENOUGH of the best; else the best anywhere, even at 0. Null without windows. [peakMs] and
+     * [chorusMs] null when unknown.
+     */
+    static double[] choose(List<double[]> windows, long lengthMs, Long peakMs, Long chorusMs) {
+        if (windows.isEmpty()) return null;
+        double[] top = null;
+        for (double[] w : windows) if (better(w, top)) top = w;
+        double[] w = null;
+        if (peakMs != null && peakMs >= HEAD_MS) w = pick(windows, top, peakMs - PEAK_BEFORE_MS, peakMs + PEAK_AFTER_MS);
+        if (w == null && chorusMs != null) w = pick(windows, top, chorusMs - CHORUS_NEAR_MS, chorusMs + CHORUS_NEAR_MS);
+        if (w == null) w = pick(windows, top, lengthMs / 3, lengthMs * 2 / 3);
+        return w != null ? w : top;
+    }
+
+    /** The best window starting in [from, to] that scores above 0 and at least GOOD_ENOUGH of [top]'s score, or null. */
+    private static double[] pick(List<double[]> windows, double[] top, long from, long to) {
+        double[] b = null;
+        for (double[] w : windows)
+            if (w[0] >= from && w[0] <= to && w[2] > 0 && w[2] >= top[2] * GOOD_ENOUGH && better(w, b)) b = w;
+        return b;
+    }
+
+    /** Up to RUNNERS_UP other good parts' starts, best first, each APART_MS from the chosen one and each other. */
+    static List<Long> runnersUp(List<double[]> windows, long chosenMs) {
+        List<double[]> scoring = new ArrayList<>();
+        for (double[] w : windows) if (w[2] > 0) scoring.add(w);
+        scoring.sort((x, y) -> better(x, y) ? -1 : better(y, x) ? 1 : 0);
+        List<Long> taken = new ArrayList<>(), out = new ArrayList<>();
+        taken.add(chosenMs);
+        for (double[] w : scoring) {
+            if (out.size() >= RUNNERS_UP) break;
+            boolean near = false;
+            for (long t : taken) near |= Math.abs(t - (long) w[0]) < APART_MS;
+            if (near) continue;
+            taken.add((long) w[0]);
+            out.add((long) w[0]);
+        }
+        return out;
+    }
+
+    /** What the storyboard says when the video is not a still upload: the window, its crop and bars, and other parts. */
+    static final class Loop {
+        long startMs, endMs, lengthMs;
+        float cropX = 0.5f;
+        float[] bars = new float[4];
+        List<Long> others = new ArrayList<>();
+    }
+
+    /**
+     * Prism's FrameJudge.judge: bars, the still check, the windows, the chosen one and its crop. Null for a
+     * still upload, also when every window is left out (still steps, or the ends of a roomy video).
+     */
+    static Loop judge(List<int[]> frames, long intervalMs, long lengthMs, Long peakMs, Long chorusMs) {
+        long length = Math.max(lengthMs, frames.size() * intervalMs);
+        float[] b = bars(frames);
+        if (still(frames, b)) return null;
+        List<double[]> windows = windows(frames, intervalMs, length, b);
+        double[] w = choose(windows, length, peakMs, chorusMs);
+        if (w == null) return null;
+        int first = (int) ((long) w[0] / intervalMs), last = (int) Math.min(frames.size() - 1, ((long) w[1] + intervalMs - 1) / intervalMs);
+        Loop l = new Loop();
+        l.startMs = (long) w[0];
+        l.endMs = (long) w[1];
+        l.lengthMs = length;
+        l.bars = b;
+        l.cropX = cropX(frames.subList(first, last + 1), b);
+        l.others = runnersUp(windows, l.startMs);
+        return l;
+    }
+
+    /** The middle WINDOW_MS of a video with no preview frames (Prism's FrameJudge.noFrames): {startMs, endMs}. */
+    static long[] noFrames(long lengthMs) {
+        long window = Math.min(WINDOW_MS, lengthMs);
+        long start = Math.max(0, (lengthMs - window) / 2);
+        return new long[]{start, start + window};
+    }
+
+    /**
+     * Where the crop sits across the picture inside the bars (0 left, 0.5 centred, 1 right): the band
+     * of CROP_SHARE of its width (what a full-height upright crop of a 16:9 picture keeps, as Prism's
+     * FrameJudge) that holds the most detail and movement, when it leads the centre by CROP_LEAD; ties
+     * go to the band nearer the centre.
      */
     static float cropX(List<int[]> frames, float[] bars) {
         int[] a = area(bars);
-        int aw = a[2] - a[0], ah = a[3] - a[1];
-        if (frames.isEmpty() || aw < 4 || ah < 1) return 0.5f;
+        int aw = a[2] - a[0];
+        if (frames.isEmpty() || aw < 4) return 0.5f;
         double[] weight = new double[aw];
         for (int i = 0; i < frames.size(); i++) {
             int[] f = frames.get(i);
@@ -207,8 +274,7 @@ final class ClipJudge {
                     if (i > 0) weight[k] += Math.abs(f[y * W + x] - frames.get(i - 1)[y * W + x]);
                 }
         }
-        // the grid is 16:9: a cell is as tall as it is wide in the picture, so a square is ah cells wide
-        int band = Math.max(1, Math.min(aw, ah));
+        int band = Math.max(1, Math.min(aw, (int) Math.round(aw * CROP_SHARE)));
         int room = aw - band;
         if (room <= 0) return 0.5f;
         double centre = sum(weight, room / 2, band);

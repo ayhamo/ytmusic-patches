@@ -29,27 +29,39 @@ public class VideoCanvasTest {
     }
 
     @Test
-    public void aPeakInTheFirst12SecondsIsIgnored() {
-        double s = VideoCanvas.partStart(curve(200, 5), 200);
-        assertEquals(true, s >= 12);
+    public void aBumpOnlyInTheLast30SecondsIsNoPart() {
+        assertEquals(-1, VideoCanvas.partStart(curve(200, 190), 200), 1e-9);
     }
 
     @Test
-    public void withoutACurveThePartIs40PercentIn() {
-        assertEquals(80, VideoCanvas.partStart(null, 200), 1e-9);
-        assertEquals(0, VideoCanvas.partStart(null, 5), 1e-9);
+    public void withoutACurveThereIsNoPart() {
+        // Prism's BestPart: no curve, no part (the clip then takes the storyboard's choice)
+        assertEquals(-1, VideoCanvas.partStart(null, 200), 1e-9);
+    }
+
+    private static String pick(String title, String artist, String videoTitle, String channel) {
+        java.util.List<String[]> v = new java.util.ArrayList<>();
+        v.add(new String[]{"v1", videoTitle, channel, "0"});
+        String[] got = VideoCanvas.pick(title, VideoCanvas.artists(artist), 0, v);
+        return got == null ? null : got[0];
     }
 
     @Test
     public void theArtistsOwnMusicVideoMatches() {
-        String[] zara = VideoCanvas.artists("Zara Larsson");
-        assertEquals(true, VideoCanvas.matches("Midnight Sun", zara, "Midnight Sun", "Zara Larsson"));
-        assertEquals(true, VideoCanvas.matches("Midnight Sun", zara, "Zara Larsson - Midnight Sun (Official Music Video)", "ZaraLarssonVEVO"));
-        assertEquals(false, VideoCanvas.matches("Midnight Sun", zara, "Zara Larsson - Midnight Sun (Lyrics)", "Ghosts We Carry"));
-        assertEquals(false, VideoCanvas.matches("Midnight Sun", zara, "Midnight Sun (Lyric Video)", "Zara Larsson"));
-        assertEquals(false, VideoCanvas.matches("Midnight Sun", zara, "Midnight Sun (Zara Larsson cover) in the Live Lounge", "BBCRadio1VEVO"));
-        assertEquals(false, VideoCanvas.matches("Midnight Sun", zara, "Stateside + Zara Larsson", "PinkPantheress"));
+        assertEquals("v1", pick("Midnight Sun", "Zara Larsson", "Midnight Sun", "Zara Larsson"));
+        assertEquals("v1", pick("Midnight Sun", "Zara Larsson", "Zara Larsson - Midnight Sun (Official Music Video)", "ZaraLarssonVEVO"));
+        assertEquals(null, pick("Midnight Sun", "Zara Larsson", "Zara Larsson - Midnight Sun (Lyrics)", "Ghosts We Carry"));
+        assertEquals(null, pick("Midnight Sun", "Zara Larsson", "Midnight Sun (Lyric Video)", "Zara Larsson"));
+        assertEquals(null, pick("Midnight Sun", "Zara Larsson", "Midnight Sun (Zara Larsson cover) in the Live Lounge", "BBCRadio1VEVO"));
+        assertEquals(null, pick("Midnight Sun", "Zara Larsson", "Stateside + Zara Larsson", "PinkPantheress"));
         assertEquals(2, VideoCanvas.artists("Taylor Swift & Ed Sheeran").length);
+    }
+
+    @Test
+    public void lengthsAreReadFromTheResult() {
+        assertEquals(225, VideoCanvas.lengthOf("3:45"));
+        assertEquals(3723, VideoCanvas.lengthOf("1:02:03"));
+        assertEquals(0, VideoCanvas.lengthOf("12M views"));
     }
 
     @Test

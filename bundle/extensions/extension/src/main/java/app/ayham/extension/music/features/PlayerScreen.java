@@ -985,10 +985,10 @@ final class PlayerScreen {
         }
 
         /** BitChord's chrome: full white is 0.73 under the blend, anything else 0.15 below its strength. */
-        private final float FULL = 0.73f;
+        private final float FULL = CHROME_FULL;
 
         private int white(float a) {
-            float v = a >= FULL ? FULL : a - 0.15f;
+            float v = chromeWhite(a);
             return (Math.round(255 * v) << 24) | 0xFFFFFF;
         }
 
@@ -1098,7 +1098,7 @@ final class PlayerScreen {
                 // the band's colour): the plain tint, full white at the centre, 0.6 of the width
                 // each side, sweeping left to right every 3 s. Here it runs over the glyph too,
                 // which keeps its own lower tint at the band's ends.
-                float band = all * 0.6f, centre = x0 - band + (t % 3000) / 3000f * (all + 2 * band);
+                float band = all * 0.6f, centre = x0 + bandCentre((t % 3000) / 3000f, all);
                 // the glyph peaks at solid white: from its 0.55 to the word's 0.73 was too small a
                 // step to see on a 13 dp glyph
                 sweep(canvas, x0, x0 + gw + gap / 2, top, bottom, centre, band, white(0.7f), 0xFFFFFFFF);
@@ -1192,6 +1192,19 @@ final class PlayerScreen {
     /** BitChord's mix bar (PlayerControls PlayerScrubber): the sweep to the bar's end, the beat pulse fading in. */
     static final long COVER_MS = 700, PULSE_FADE_MS = 900;
     static final float FILL_ALPHA = 0.92f, LABEL_ALPHA = 0.85f;
+
+    static final float CHROME_FULL = 0.73f;
+
+    /** BitChord's additive chrome: full white is 0.73 under the blend, anything else 0.15 below its strength. */
+    static float chromeWhite(float a) {
+        return a >= CHROME_FULL ? CHROME_FULL : a - 0.15f;
+    }
+
+    /** ShimmerText's band centre at [progress] (0..1) of the sweep over [width]: from -band to width + band, the band 0.6 x width. */
+    static float bandCentre(float progress, float width) {
+        float band = width * 0.6f;
+        return -band + progress * (width + 2 * band);
+    }
 
     /**
      * The mix bar [ms] after it appeared, with the beat at [pulse] (0.1 between beats, 1 on one):

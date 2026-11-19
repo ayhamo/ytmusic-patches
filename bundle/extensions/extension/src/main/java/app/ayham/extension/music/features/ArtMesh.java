@@ -87,13 +87,16 @@ final class ArtMesh {
         for (int k = 0; k < 3; k++) for (int p = 0; p < BLUR_PASSES; p++) r[k] = box(r[k]);
         int[] out = new int[TEX * TEX];
         float[] hsl = new float[3];
-        for (int i = 0; i < out.length; i++) {
-            toHsl(r[0][i], r[1][i], r[2][i], hsl);
-            hsl[1] = Math.min(1f, hsl[1] * VIBRANCE);
-            hsl[2] = Math.max(FLOOR, hsl[2]);
-            out[i] = fromHsl(hsl);
-        }
+        for (int i = 0; i < out.length; i++) out[i] = lift(r[0][i], r[1][i], r[2][i], hsl);
         return out;
+    }
+
+    /** BitChord's lift of a colour (0..1 each): saturation x VIBRANCE (at most 1), lightness at least FLOOR. */
+    static int lift(float red, float green, float blue, float[] hsl) {
+        toHsl(red, green, blue, hsl);
+        hsl[1] = Math.min(1f, hsl[1] * VIBRANCE);
+        hsl[2] = Math.max(FLOOR, hsl[2]);
+        return fromHsl(hsl);
     }
 
     /** All of it: a cover's pixels to the mesh for a seam at seamFrac of the screen's height. */

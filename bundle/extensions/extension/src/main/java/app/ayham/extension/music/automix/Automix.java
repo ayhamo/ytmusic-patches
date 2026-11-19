@@ -907,6 +907,16 @@ public final class Automix {
 
     private static Method posMethod, durMethod;
 
+    /** The length of the song YT's player has now, or -1 (no player yet). */
+    public static long durationMs() {
+        try {
+            Object p = PlayerTap.current();
+            return p == null ? -1 : duration(p);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     /** YT's player position now, or -1 (no player yet). */
     public static long positionMs() {
         try {

@@ -506,7 +506,7 @@ public final class Automix {
             if (ov != null && ov.lock && (was == null || !was.lock)) {
                 int locked = 0;
                 for (MixOverride o : m.values()) if (o.lock) locked++;
-                if (locked >= MixOverride.MAX_LOCKED) return "Already " + MixOverride.MAX_LOCKED + " locked pairs: unlock one first";
+                if (locked >= MixOverride.MAX_LOCKED) return MixOverride.MAX_LOCKED + " pairs are locked already: unlock one first"; // (editor.md §2, exact)
             }
             m.remove(pairKey);
             if (ov != null) {

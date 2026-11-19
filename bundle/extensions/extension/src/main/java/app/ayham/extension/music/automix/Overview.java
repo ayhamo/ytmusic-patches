@@ -83,8 +83,10 @@ public final class Overview {
             return String.format(Locale.ROOT, "%s · %.1f s", plan.bridge ? "Beatless bridge" : plan.handoff ? "Hand-over" : "Fade", D)
                     + (plan.reason != null ? " · " + plan.reason : "");
         }
-        String bpm = plan.inBpm > 0 && Math.round(plan.inBpm) != Math.round(plan.bpm)
-                ? Math.round(plan.outBpm > 0 ? plan.outBpm : plan.bpm) + "→" + Math.round(plan.inBpm) + " BPM"
+        // (editor.md §7: A's and B's BPM when they round apart, else the plan's)
+        double outBpm = plan.outBpm > 0 ? plan.outBpm : plan.bpm;
+        String bpm = plan.inBpm > 0 && Math.round(plan.inBpm) != Math.round(outBpm)
+                ? Math.round(outBpm) + "→" + Math.round(plan.inBpm) + " BPM"
                 : Math.round(plan.bpm) + " BPM";
         String kind = "filter".equals(plan.style) ? "Filter mix" : "dropin".equals(plan.shape) ? "Drop-in" : "muffle".equals(plan.shape) ? "Muffle"
                 : plan.glide != null ? "Glide blend" : "Blend";

@@ -113,6 +113,36 @@ public class OverviewTest {
         assertTrue(o.describe().startsWith("Loop mix · " + o.loop.totalBars + " bars"));
     }
 
+    /** A blend's header as editor.md §7's table has it. */
+    private static String header(String shape, double bpm, double outBpm, double inBpm) {
+        Overview o = new Overview();
+        o.plan = new Planner.Plan();
+        o.plan.style = "blend";
+        o.plan.shape = shape;
+        o.plan.bars = 8;
+        o.plan.bpm = bpm;
+        o.plan.outBpm = outBpm;
+        o.plan.inBpm = inBpm;
+        o.D = 15.04;
+        return o.describe();
+    }
+
+    @Test
+    public void theHeaderNamesThePlan() {
+        // A's and B's BPM when they round apart (A 94, B 100: the plan's 97 is neither)
+        assertEquals("Blend · 8 bars · 94→100 BPM · 15.0 s", header(null, 97, 94, 100));
+        // they round together: the plan's BPM, even when it rounds apart from B's
+        assertEquals("Blend · 8 bars · 97 BPM · 15.0 s", header(null, 97, 100.2, 99.6));
+        assertEquals("Drop-in · 8 bars · 120 BPM · 15.0 s", header("dropin", 120, Double.NaN, Double.NaN));
+        Overview f = new Overview();
+        f.plan = new Planner.Plan();
+        f.plan.style = "crossfade";
+        f.plan.handoff = true;
+        f.plan.reason = "keys clash";
+        f.D = 1.5;
+        assertEquals("Hand-over · 1.5 s · keys clash", f.describe());
+    }
+
     @Test
     public void clockReadsMinutesAndSeconds() {
         assertEquals("0:07", Overview.clock(7.4));

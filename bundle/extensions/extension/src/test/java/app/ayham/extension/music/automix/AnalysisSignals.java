@@ -200,4 +200,35 @@ final class AnalysisSignals {
         if (song.pad != null) pad(x, sr, song.pad);
         return x;
     }
+
+    /**
+     * analysis_signals.mjs half (analysis-cases.md §4): the beat model's 22050 Hz input from the 44100 Hz
+     * render. h[n] = 2fc·sinc(2fc·n)·Blackman(n), n = -64..64, fc = 0.23, scaled to sum to 1;
+     * y[k] = Σ h[n]·x[2k + n] (0 outside), summed in doubles over n in order, stored as float;
+     * floor(x.length / 2) samples. For the synthetic songs only: the phone's decode resamples real ones.
+     */
+    static float[] half(float[] x) {
+        final int N = 64;
+        final double fc = 0.23;
+        double[] h = new double[2 * N + 1];
+        double sum = 0;
+        for (int n = -N; n <= N; n++) {
+            double a = 2 * fc * n, sinc = n == 0 ? 1 : StrictMath.sin(Math.PI * a) / (Math.PI * a);
+            double w = 0.42 + 0.5 * StrictMath.cos(Math.PI * n / N) + 0.08 * StrictMath.cos(2 * Math.PI * n / N);
+            h[n + N] = 2 * fc * sinc * w;
+            sum += h[n + N];
+        }
+        for (int i = 0; i < h.length; i++) h[i] /= sum;
+        float[] y = new float[x.length / 2];
+        for (int k = 0; k < y.length; k++) {
+            double v = 0;
+            int c = 2 * k;
+            for (int n = -N; n <= N; n++) {
+                int i = c + n;
+                if (i >= 0 && i < x.length) v += h[n + N] * x[i];
+            }
+            y[k] = (float) v;
+        }
+        return y;
+    }
 }

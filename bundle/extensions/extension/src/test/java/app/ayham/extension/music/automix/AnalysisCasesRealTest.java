@@ -22,15 +22,16 @@ import ai.onnxruntime.OrtSession;
 /**
  * The synthetic analysis cases on the phone's real analyser, run on the PC (local only, skipped
  * without the natives): Analyzer.analyze's steps from the decode on, with its own code where it can be
- * called (Models.beats and Models.vocals, BeatGrid, KeyStrength, Analyzer's monoSpan / resampleMono /
+ * called (Models.beats and Models.vocals, BeatGrid, KeyStrength, Analyzer's resampleMono /
  * Pcm), on BitChord's native analyser built for linux x86_64 from its source and ONNX Runtime's desktop
  * natives under the onnxruntime-android Java API. The models are the ones the "Automix libraries" patch
  * ships (bundle/patches/src/main/resources/automix).
  *
  * What differs from the phone: the native code is compiled for x86_64 by g++ (the phone's is arm64 by
  * the NDK's clang), and ONNX Runtime runs its x86 kernels. Download and MediaCodec are not run: the
- * song comes as the 44100 Hz render, decoded the way Analyzer.decode folds it (stereo L = R, mono
- * averaged over pairs of frames into 16-bit at 22050 Hz, the opening kept as 16-bit stereo).
+ * song comes as the 44100 Hz render (stereo L = R, the opening kept as 16-bit stereo for the vocal
+ * model), and the beat model gets its half() as floats, as analysis-cases.md §4 has both sides do; the
+ * key and the native analyser get that half() as Analyzer.decode's 16-bit mono.
  *
  * Run it: scripts/analysis-natives.ps1 builds the natives into work/scratch/analysis-natives, then
  * the unit tests with that folder mounted and AUTOMIX_NATIVES pointing at it, e.g. add
@@ -93,54 +94,47 @@ public class AnalysisCasesRealTest {
         return (short) Math.max(-32768, Math.min(32767, v));
     }
 
-    /** Analyzer.decode's output for a stereo file whose channels are both [x] (44100 Hz). */
-    private static Analyzer.Decoded decode(float[] x, File headFile) throws Exception {
+    /** Analyzer.decode's output for a stereo file whose channels are both [x] (44100 Hz), its mono [b]. */
+    private static Analyzer.Decoded decode(float[] x, float[] b, File headFile) throws Exception {
         Analyzer.Decoded d = new Analyzer.Decoded();
-        int step = 2;
-        short[] mono = new short[x.length / step + 1];
-        int monoLen = 0, accN = 0;
-        float acc = 0;
         try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(headFile), 1 << 16))) {
             Analyzer.Pcm.writeHeader(out, RATE, 0);
             for (float a : x) {
-                float b = a;
                 short s = clip(a);
                 out.writeShort(Short.reverseBytes(s));
                 out.writeShort(Short.reverseBytes(s));
-                acc += (a + b) * 0.5f;
-                if (++accN == step) {
-                    mono[monoLen++] = clip(acc / step);
-                    acc = 0;
-                    accN = 0;
-                }
             }
         }
+        short[] mono = new short[b.length];
+        for (int i = 0; i < b.length; i++) mono[i] = clip(b[i]);
         d.rate = RATE;
-        d.monoRate = RATE / step;
+        d.monoRate = RATE / 2;
         d.frames = x.length;
         d.mono = mono;
-        d.monoLength = monoLen;
+        d.monoLength = mono.length;
         return d;
     }
 
-    private static float[] monoSpan(Analyzer.Decoded d, double from, double to) throws Exception {
-        return (float[]) call("monoSpan", new Class<?>[]{Analyzer.Decoded.class, double.class, double.class}, d, from, to);
+    /** [from, to) s of the half() render, as floats. */
+    private static float[] span(float[] b, double from, double to) {
+        int a = (int) Math.max(0, Math.round(from * RATE / 2)), e = (int) Math.min(b.length, Math.round(to * RATE / 2));
+        return java.util.Arrays.copyOfRange(b, a, Math.max(a, e));
     }
 
     /** Analyzer.analyze from the decode on: beats, the head grid, the key, the vocal windows. */
     private static Analysis analyse(AnalysisCases.Case c, StringBuilder info) throws Exception {
-        float[] x = AnalysisSignals.render(c.song, RATE);
+        float[] x = AnalysisSignals.render(c.song, RATE), b = AnalysisSignals.half(x);
         File head = File.createTempFile("analysis-case", ".head");
         try {
-            Analyzer.Decoded d = decode(x, head);
+            Analyzer.Decoded d = decode(x, b, head);
             double dur = d.duration();
             Analysis a = new Analysis();
             a.fileKey = c.name;
             a.durationSec = dur;
-            a.headBeats = Models.beats(null, monoSpan(d, 0, Analyzer.BEAT_WINDOW_SEC), d.monoRate, 0);
+            a.headBeats = Models.beats(null, span(b, 0, Analyzer.BEAT_WINDOW_SEC), d.monoRate, 0);
             if (dur > Analyzer.BEAT_WINDOW_SEC) {
                 double from = dur - Analyzer.BEAT_WINDOW_SEC;
-                a.tailBeats = Models.beats(null, monoSpan(d, from, dur), d.monoRate, from);
+                a.tailBeats = Models.beats(null, span(b, from, dur), d.monoRate, from);
             } else {
                 a.tailBeats = a.headBeats;
             }
@@ -181,25 +175,6 @@ public class AnalysisCasesRealTest {
         }
     }
 
-    /** The beat model alone on the 22050 Hz render (the rate the spec renders for it, no decode between). */
-    private static String direct22050(AnalysisCases.Case c, AnalysisCases.Rules rules) throws Exception {
-        float[] y = AnalysisSignals.render(c.song, 22050);
-        Analysis a = new Analysis();
-        a.headBeats = Models.beats(null, java.util.Arrays.copyOf(y, (int) Math.min(y.length, Math.round(Analyzer.BEAT_WINDOW_SEC * 22050))), 22050, 0);
-        if (a.headBeats == null) return "no beats";
-        a.tailBeats = a.headBeats;
-        Analysis.LocalGrid g = BeatGrid.localGrid(a.headBeats);
-        a.bpm = g.bpm;
-        a.firstDownbeatSec = g.firstDownbeatSec;
-        AnalysisCases.Case beatsOnly = new AnalysisCases.Case();
-        beatsOnly.name = c.name;
-        beatsOnly.song = c.song;
-        for (String w : c.check) if (!w.equals("vocals")) beatsOnly.check.add(w);
-        StringBuilder sb = new StringBuilder();
-        for (AnalysisCases.Verdict v : AnalysisCases.check(beatsOnly, a, rules).verdicts) sb.append(sb.length() > 0 ? "; " : "").append(v.label().trim()).append(' ').append(v.what).append(": ").append(v.text);
-        return sb.toString();
-    }
-
     @Test
     public void syntheticCasesOnThePhonesAnalyser() throws Exception {
         setUp();
@@ -212,8 +187,6 @@ public class AnalysisCasesRealTest {
             AnalysisCases.Result r = AnalysisCases.check(c, a, rules);
             System.out.println(r + String.format(Locale.US, "\n       grid %.2f BPM from %.3f s (conf %.2f), %d beats, %d vocal windows, %d ms",
                     a.bpm, a.firstDownbeatSec, a.gridConfidence, AnalysisCases.beatsOf(a).length, a.vocals.size(), (System.nanoTime() - t0) / 1000000) + info);
-            if (c.check.contains("tempo") || c.check.contains("beats") || c.check.contains("downbeat"))
-                System.out.println("       the 22050 Hz render fed to the beat model directly: " + direct22050(c, rules));
             if (r.failed()) failed.add(c.name);
         }
         System.out.println(failed.isEmpty() ? "all synthetic cases pass on the phone's analyser" : failed.size() + " case(s) failed: " + failed);

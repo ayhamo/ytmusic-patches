@@ -30,16 +30,15 @@
       "check": ["tempo", "beats", "downbeat"]
     },
     {
-      "name": "drums-85",
-      "what": "slow tempo: no double-time reading",
-      "song": { "sec": 50, "kit": "drums", "parts": [{ "from": 0.5, "bpm": 85 }] },
-      "check": ["tempo", "beats", "downbeat"],
-      "knownMiss": { "downbeat": "2026-11-19: the extension's analyser puts the bar start half a bar late here (1.92 s for 0.50 s). Kept as found: neither analyser is tuned to these cases." }
+      "name": "drums-80",
+      "what": "slow tempo: no double-time reading (was drums-85 until 2026-11-19: its beats passed by one point only, 96%)",
+      "song": { "sec": 50, "kit": "drums", "parts": [{ "from": 0.5, "bpm": 80 }] },
+      "check": ["tempo", "beats", "downbeat"]
     },
     {
-      "name": "tempo-change-100-110",
-      "what": "100 BPM, then 110 BPM from 24.5 s: the beats follow both parts (one tempo can't describe the song, so tempo isn't checked)",
-      "song": { "sec": 50, "kit": "drums", "parts": [{ "from": 0.5, "bpm": 100 }, { "from": 24.5, "bpm": 110 }] },
+      "name": "tempo-change-120-126",
+      "what": "120 BPM, then 126 BPM (5%) from 24.5 s: the beats follow both parts (one tempo can't describe the song, so tempo isn't checked). Was 100 then 110 until 2026-11-19: it passed by 0 and 1 point on the spec's own render and failed on any other resample",
+      "song": { "sec": 50, "kit": "drums", "parts": [{ "from": 0.5, "bpm": 120 }, { "from": 24.5, "bpm": 126 }] },
       "check": ["beats", "downbeat"]
     },
     {

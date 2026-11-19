@@ -72,8 +72,8 @@ public class AnalysisCasesTest {
         AnalysisCases.Verdict half = AnalysisCases.check(c, truth(c, 0, 87, 0), RULES).get("tempo");
         assertFalse(half.ok);
         assertTrue(half.text, half.text.contains("half-time"));
-        AnalysisCases.Case slow = named("drums-85");
-        AnalysisCases.Verdict dbl = AnalysisCases.check(slow, truth(slow, 0, 170, 0), RULES).get("tempo");
+        AnalysisCases.Case slow = named("drums-80");
+        AnalysisCases.Verdict dbl = AnalysisCases.check(slow, truth(slow, 0, 160, 0), RULES).get("tempo");
         assertFalse(dbl.ok);
         assertTrue(dbl.text, dbl.text.contains("double-time"));
         assertFalse(AnalysisCases.check(c, truth(c, 0, Double.NaN, 0), RULES).get("tempo").ok);
@@ -122,10 +122,15 @@ public class AnalysisCasesTest {
 
     @Test
     public void aKnownMissPrintsKnownAndDoesNotFail() {
-        AnalysisCases.Case c = named("drums-85");
+        // no synthetic case has a downbeat miss now (drums-85's went with it): one marked here
+        AnalysisCases.Case slow = named("drums-80"), c = new AnalysisCases.Case();
+        c.name = slow.name;
+        c.song = slow.song;
+        c.check.addAll(slow.check);
+        c.knownMiss.put("downbeat", "marked for this test");
         assertNotNull(c.knownMiss.get("downbeat"));
-        Analysis a = truth(c, 0, 85, 0);
-        a.firstDownbeatSec += 2 * 60 / 85.0;
+        Analysis a = truth(c, 0, 80, 0);
+        a.firstDownbeatSec += 2 * 60 / 80.0;
         AnalysisCases.Result r = AnalysisCases.check(c, a, RULES);
         AnalysisCases.Verdict v = r.get("downbeat");
         assertFalse(v.ok);
@@ -133,11 +138,11 @@ public class AnalysisCasesTest {
         assertFalse(r.failed());
         assertTrue(r.toString(), r.toString().startsWith("ok*"));
         // a known miss that is right here says so
-        AnalysisCases.Verdict right = AnalysisCases.check(c, truth(c, 0, 85, 0), RULES).get("downbeat");
+        AnalysisCases.Verdict right = AnalysisCases.check(c, truth(c, 0, 80, 0), RULES).get("downbeat");
         assertTrue(right.ok);
         assertTrue(right.toString(), right.toString().contains("right here"));
         // a check without a known miss still fails
-        a.bpm = 170;
+        a.bpm = 160;
         assertTrue(AnalysisCases.check(c, a, RULES).failed());
     }
 

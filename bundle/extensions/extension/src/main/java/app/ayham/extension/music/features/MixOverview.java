@@ -43,6 +43,7 @@ import java.util.Map;
 import app.ayham.extension.music.automix.Automix;
 import app.ayham.extension.music.automix.MixOverride;
 import app.ayham.extension.music.automix.Overview;
+import app.ayham.extension.music.automix.Planner;
 import app.ayham.extension.music.automix.Waves;
 
 /**
@@ -509,6 +510,8 @@ final class MixOverview {
             o.effect = l[2];
         }
         o.preset = p.equals("auto") ? null : p;
+        // (Loop: the loop decks do their own tempo ramp, editor.md §2)
+        if (p.equals("loop")) o.beatMatch = null;
         save(o);
     }
 
@@ -547,7 +550,14 @@ final class MixOverview {
         double base, span;
         MixOverride.Position pos;
         Overview s;
+        /** Why the finger went past a limit and the song stays there (null: it didn't). */
+        String limit;
     }
+
+    /** What each limit means: A's earliest and end, B's start and end (automix-overview.js LIMIT_WHY). */
+    private static final String[][] LIMIT_WHY = {
+            {"A has already played up to there", "the window has to end before A's music does"},
+            {"that is B's start", "the window has to end 10 s before B's end"}};
 
     private static Drag drag;
 
@@ -570,17 +580,31 @@ final class MixOverview {
         return s.override == null || !"off".equals(s.override.beatMatch);
     }
 
-    /** The song moves with the finger: what was left of the frame comes under it. */
+    /** The limits a drag stops at, {lo, hi} in song seconds (the planner's windowLimits; no end while a length is unknown). */
+    static double[] limitsOf(Overview s, boolean out) {
+        double[] l = Planner.windowLimits(s.plan, s.outDur, s.outEnd, s.inDur, s.earliest);
+        if (out) return new double[]{l[0], Double.isNaN(s.outDur) ? Double.POSITIVE_INFINITY : l[1]};
+        return new double[]{l[2], Double.isNaN(s.inDur) ? Double.POSITIVE_INFINITY : l[3]};
+    }
+
+    /** The song moves with the finger: what was left of the frame comes under it, up to the limits. */
     private static void dragTo(Drag d, float x) {
         Overview s = d.s;
-        double sec = d.base - ((x - d.x0) / d.w) * d.span;
-        double dur = d.out ? s.outDur : s.inDur;
-        double lo = d.out && !Double.isNaN(s.earliest) ? s.earliest : 0;
-        double hi = Double.isNaN(dur) ? sec : Math.max(lo, dur - s.D - (d.out ? 0.3 : 10));
-        double c = Math.max(lo, Math.min(sec, hi));
-        refusedNote = Math.abs(c - sec) > 0.05 ? (d.out ? (c > sec ? "The mix-out can't come before what has played" : "The window has to end before this song does")
-                : (c > sec ? "The mix-in can't start before the song" : "The window has to end 10 s before the next song does")) : "";
-        d.pos = positionOf(s, d.out, c, snaps(s), d.beats);
+        double want = d.base - ((x - d.x0) / d.w) * d.span;
+        double[] lim = limitsOf(s, d.out);
+        double lo = lim[0], hi = lim[1];
+        boolean snap = snaps(s);
+        MixOverride.Position pos = positionOf(s, d.out, Math.max(lo, Math.min(want, hi)), snap, d.beats);
+        // a snap past a limit: the nearest step inside it
+        double[] g = grid(s, d.out);
+        if (snap && g != null && (pos.sec < lo - 1e-6 || pos.sec > hi + 1e-6)) {
+            double step = g[1] * (d.beats ? 1 : 4);
+            MixOverride.Position inside = positionOf(s, d.out, pos.sec + (pos.sec < lo ? step : -step), snap, d.beats);
+            if (inside.sec >= lo - 1e-6 && inside.sec <= hi + 1e-6) pos = inside;
+        }
+        d.pos = pos;
+        String[] why = LIMIT_WHY[d.out ? 0 : 1];
+        d.limit = want < lo - 0.01 ? why[0] : want > hi + 0.01 ? why[1] : null;
     }
 
     private static void dragEnd(Drag d) {
@@ -761,7 +785,7 @@ final class MixOverview {
         } else if (d != null && d.pos != null && s.plan != null) {
             MixOverride.Position other = positionOf(s, !d.out, d.out ? s.plan.mixInTrackTime : s.plan.mixOutTrackTime, false, false);
             n = d.out ? readout(d.pos, other) : readout(other, d.pos);
-            if (!refusedNote.isEmpty()) n += "\n" + refusedNote;
+            if (d.limit != null) n += " · held: " + d.limit;
         } else if (!refusedNote.isEmpty()) {
             n = refusedNote;
         } else if (!s.editable) {

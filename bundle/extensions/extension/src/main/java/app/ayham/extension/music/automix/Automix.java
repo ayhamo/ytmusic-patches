@@ -614,6 +614,7 @@ public final class Automix {
             o.inGrid = editorGrid(ta, false);
             o.outDur = fa != null ? fa.durationSec : Double.NaN;
             o.inDur = ta != null ? ta.durationSec : Double.NaN;
+            o.outEnd = fa != null ? Planner.musicEnd(fa).durationSec : Double.NaN;
         }
         if (!live) {
             Object[] pf = Analyzer.progress(o.fromId), pt = Analyzer.progress(o.toId);

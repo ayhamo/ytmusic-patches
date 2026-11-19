@@ -263,9 +263,13 @@ public final class Planner {
         List<String> warnings = new ArrayList<>();
         Plan p = planFor(s, fromId, toId, from, to, durationSec, pos, earliest, sung, ov, warnings);
         p.curves = Curves.blend(p);
+        // a length the planner didn't use (a hand-over, a drop-in's two bars): why, not "fit here" (editor.md §6)
+        if (ov != null && ov.bars > 0 && !ov.loop() && warnings.isEmpty()
+                && (p.handoff || p.bridge || p.fallback || ("dropin".equals(p.shape) && p.bars != ov.bars)))
+            warnings.add(ov.bars + " bars not used: " + (p.reason != null ? p.reason : "a plain fade here"));
         if (ov != null && !ov.loop()) {
             if (!warnings.isEmpty()) p.warnings = warnings;
-            if (ov.in != null) p.windowIn = true; // placed by the user: the kick lock leaves it
+            if (ov.in != null && "blend".equals(p.style)) p.windowIn = true; // placed by the user: the kick lock leaves it
             boolean both = from != null && to != null;
             Curves pc = !(p.fallback && !both) ? MixOverride.presetCurves(ov, p.durationSec, p.style.equals("crossfade") ? Double.NaN : p.beatSec) : null;
             if (pc != null) {
@@ -389,6 +393,7 @@ public final class Planner {
             }
         }
         if ("filter".equals(family)) {
+            if (pick.out != null || pick.in != null) warnings.add("a Filter mix places itself: the saved window isn't used (pick a preset to use it)");
             Grid g = !toWeak ? toGrid : null;
             return filterMix(s, cur, next, fromGrid, g, requestedBars(s, cur, next, fromGrid, toGrid != null ? toGrid.downbeatSec : 0, true), pos, earliest,
                     "picked in the overview", sung);
@@ -662,6 +667,22 @@ public final class Planner {
 
     static int keyClashBars(Grid g) {
         return 2 * g.barSec >= (g.bpm >= 140 ? 6 : 4) ? 2 : 4;
+    }
+
+    /**
+     * The window's limits as the planner clamps them (editor.md §6, automix.js windowLimits), in song
+     * seconds, {outLo, outHi, inLo, inHi}: A's mix-out from the earliest it can still start (with the
+     * tempo ramp before a blend) to where the window ends with A's music; B's mix-in from 0 to where
+     * the window ends 10 s before B's end. outEnd: where A's music ends (musicEnd); NaN: its length.
+     */
+    public static double[] windowLimits(Plan m, double outDur, double outEnd, double inDur, double earliest) {
+        boolean blend = m != null && "blend".equals(m.style) && m.beatSec > 0 && m.bars > 0;
+        double outSpan = blend ? m.bars * 4 * m.beatSec : m != null ? m.durationSec : 0;
+        double inSpan = blend ? outSpan * (m.glide != null && m.glide.q > 0 ? 1 / m.glide.q : m.rate / m.outRate) : outSpan;
+        double dur = outDur > 0 ? outDur : 0, end = outEnd > 0 ? outEnd : dur;
+        double lo = Math.max(0, earliest > 0 ? earliest : 0) + (blend && m.rampSongSec > 0 ? m.rampSongSec : 0);
+        double hi = blend ? Math.min(end, dur - 0.3) - outSpan : end - 0.3 - outSpan;
+        return new double[]{lo, Math.max(lo, hi), 0, Math.max(0, (inDur > 0 ? inDur : 0) - 10 - inSpan)};
     }
 
     static Analysis musicEnd(Analysis a) {

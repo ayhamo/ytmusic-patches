@@ -106,7 +106,7 @@ public class EditorCasesTest {
     public void overridesPlayTheWindowsTheCasesSay() throws Exception {
         List<String> diffs = new ArrayList<>();
         List<Object> cases = (List<Object>) cases().get("plans");
-        assertEquals(7, cases.size());
+        assertEquals(9, cases.size());
         for (Object o : cases) {
             Map<String, Object> c = (Map<String, Object>) o;
             int engine = ((Number) c.get("engine")).intValue();

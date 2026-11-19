@@ -193,8 +193,9 @@ public final class MixOverride {
             for (int b : BARS) if (o.bars == b) n.bars = b;
             n.out = clean(o.out);
             n.in = clean(o.in);
+            // (Loop: the loop decks do their own tempo ramp, editor.md §2)
+            if ("sync".equals(o.beatMatch) || "glide".equals(o.beatMatch) || "off".equals(o.beatMatch)) n.beatMatch = o.beatMatch;
         }
-        if ("sync".equals(o.beatMatch) || "glide".equals(o.beatMatch) || "off".equals(o.beatMatch)) n.beatMatch = o.beatMatch;
         if (n.preset == null && n.family == null && n.bars == 0 && n.out == null && n.in == null && n.beatMatch == null) return null;
         n.lock = o.lock;
         n.engine = o.engine;

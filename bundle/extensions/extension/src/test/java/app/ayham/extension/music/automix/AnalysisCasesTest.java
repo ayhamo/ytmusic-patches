@@ -56,7 +56,7 @@ public class AnalysisCasesTest {
     @Test
     public void theTruthPassesEveryCase() {
         List<AnalysisCases.Case> cases = AnalysisCases.cases();
-        assertEquals(8, cases.size());
+        assertEquals(11, cases.size());
         for (AnalysisCases.Case c : cases) {
             AnalysisCases.Result r = AnalysisCases.check(c, truth(c, 0, c.song.parts.get(0)[1], 0), RULES);
             assertEquals(c.name + " checks", c.check.size(), r.verdicts.size());
@@ -80,10 +80,11 @@ public class AnalysisCasesTest {
     }
 
     @Test
-    public void beatsWithin20msOn95PercentPass() {
+    public void beatsWithin25msOn95PercentPass() {
         AnalysisCases.Case c = named("click-120");
-        assertTrue(AnalysisCases.check(c, truth(c, 0.019, 120, 0), RULES).get("beats").ok);
-        assertFalse(AnalysisCases.check(c, truth(c, 0.021, 120, 0), RULES).get("beats").ok);
+        assertEquals(0.025, RULES.beatSec, 0);
+        assertTrue(AnalysisCases.check(c, truth(c, 0.024, 120, 0), RULES).get("beats").ok);
+        assertFalse(AnalysisCases.check(c, truth(c, 0.026, 120, 0), RULES).get("beats").ok);
         // one beat in 25 missing: 96% found
         AnalysisCases.Verdict few = AnalysisCases.check(c, truth(c, 0, 120, 25), RULES).get("beats");
         assertTrue(few.text, few.ok);

@@ -31,8 +31,14 @@ public class AnalysisSignalsTest {
         JS.put("drums-174@22050", "99af6dc6b0c41d16737d4f5b074df227b400956139d372305827fa177d4a450e");
         JS.put("drums-80@44100", "c663520cd058d39963583d3a09266327e3067a352654f017c1509f30d3facba1");
         JS.put("drums-80@22050", "235be5e79f2a9e6c50c0bdb7fed2259f96a1ce6e74983dd4752c70a65de9c692");
+        JS.put("drums-85@44100", "81b9c91ca1351009aa40f002602ee435c219396180506df0e25cabe59c78e24f");
+        JS.put("drums-85@22050", "2dd7b7b4416a939a8bce59758f8a94e32f77671ba62dbe299d71ea431955f497");
+        JS.put("drums-90@44100", "7ac19eccfd2f026264c36a9a27b49ce9320a9c60a4c7ac0cd054ecfb6df2ed24");
+        JS.put("drums-90@22050", "6b93b6d721ea6b835d7ae8ab239d6bf85ad3a2afddc7fb620db3ab686dd1846f");
         JS.put("tempo-change-120-126@44100", "200a249576acc9db92c0942a5e81403b7f7c871126eeb2e643a572c5352d20ad");
         JS.put("tempo-change-120-126@22050", "e0d7c77cfffd0a16e7e518dd620e300e9fbc560fffc6ca5c9c41e2ffbb6d1d44");
+        JS.put("tempo-change-100-110@44100", "184ff981542b00ce02ef88ac7aacffe7c01d7ead748ccd3dd717535af012e2ec");
+        JS.put("tempo-change-100-110@22050", "64a3bbef46ba2b043b71da430e63e41d3115454fc0d523d5df4372d41f35d083");
         JS.put("voice-section@44100", "6d0d07d83ee69aeccd9a396571a941e1996107cf569959f7039e949c622b1f09");
         JS.put("voice-section@22050", "e9f216001639767a87023b911a1f01e8017a223cd19436c6137a4ba40025579d");
         JS.put("no-voice@44100", "d3751cde758e4e6c5cd407cbc33a19553d8a7367e179ec8237e6a557345d93bf");

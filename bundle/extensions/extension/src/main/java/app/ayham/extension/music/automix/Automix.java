@@ -232,6 +232,8 @@ public final class Automix {
         /** The song's length when planned (a skip changes it before the queue is read again). */
         double dur;
         boolean loopPending;
+        /** Why this pair has no loop mix, for the label (its own pair's state, not another's), or null. */
+        String noLoopWhy;
         /** The loop mix chosen for this song, or null (a blend or crossfade). */
         Planner.LoopPlan loop;
 
@@ -325,6 +327,7 @@ public final class Automix {
         boolean loopPending = !noLoop && (lyricsWait || pair.equals(loopKey) && (loopState.equals("loading") || loopState.equals("missing")));
         Planner.LoopPlan lp = !noLoop && pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
         amx.loopPending = loopPending;
+        amx.noLoopWhy = noLoopWhy(noLoop, pair.equals(loopKey) ? loopState : null);
         // Automix v2: the loop mix plays only when it scores over the blend (automix.js loopOrBlend)
         Planner.Choice choice = lp != null && ov != null && ov.loop() ? Planner.Choice.picked(lp.none == null) : Planner.loopOrBlend(s.version, p, lp);
         boolean loop = lp != null && choice.loop && lp.out.loopStart > pos + EARLIEST_LEAD;
@@ -722,12 +725,20 @@ public final class Automix {
             if (s.loop != null) return "Automix · loop mix in " + (int) Math.ceil(in) + " s · " + describeLoop(s.loop);
             Planner.Plan p = s.plan;
             if (p != null && !p.fallback && p.durationSec >= 1) {
-                Planner.LoopPlan lp = loopPlan;
-                String noLoop = lp != null && lp.none != null ? lp.none : "missing".equals(loopState) ? "audio not decoded yet" : null;
-                return "Automix · " + describePlan(p, in, noLoop);
+                return "Automix · " + describePlan(p, in, s.noLoopWhy);
             }
         }
         return "Automix · this song: " + label(id) + " · next: " + (next == null || next.equals(id) ? "none" : label(next));
+    }
+
+    /**
+     * Why a pair has no loop mix, for the label: a saved edit other than Loop turns it off; else only
+     * this pair's own loop check ([state], null when the check running is another pair's) may say
+     * its audio isn't decoded yet.
+     */
+    static String noLoopWhy(boolean savedEdit, String state) {
+        if (savedEdit) return "your saved edit (pick Loop for a loop mix)";
+        return "missing".equals(state) ? "audio not decoded yet" : null;
     }
 
     /** BitChord's describeLoop: "out 8-bar, clear by lyrics · in 4-bar, clear by mask · 94 → 100 BPM over 3 bars". */

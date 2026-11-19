@@ -283,7 +283,7 @@ final class Engine {
             Log.e(TAG, "mix engine could not start", t);
             if (track != null) {
                 try {
-                    app.ayham.extension.music.features.EqPresets.releaseDeck(track.getAudioSessionId());
+                    app.ayham.extension.music.features.EqPresets.releaseDeck(track);
                     track.release();
                 } catch (Throwable ignored) {
                 }
@@ -306,7 +306,7 @@ final class Engine {
                 .build();
         // the user's equalizer preset on the decks too, so the takeover doesn't change the sound
         try {
-            app.ayham.extension.music.features.EqPresets.attachDeck(track.getAudioSessionId());
+            app.ayham.extension.music.features.EqPresets.attachDeck(track, track.getAudioSessionId());
         } catch (Throwable t) {
             Log.w(TAG, "equalizer not on the decks", t);
         }
@@ -384,14 +384,21 @@ final class Engine {
         } catch (Throwable t) {
             Log.e(TAG, "render failed", t);
         } finally {
+            // each step on its own: a dead audio server failing one still releases the rest
             try {
                 // 3 s of silence before the deck stops: stopping it right after the mix cut the whole
                 // phone's sound for ~10 ms (S21 FE, recorded 2026-11-17: Samsung's output reconfigures
                 // as a track stops); stopped later, while it plays silence, nothing is heard
                 float[] z = new float[BLOCK * 2];
                 for (int k = 0; k < 3 * SR / BLOCK; k++) track.write(z, 0, z.length, AudioTrack.WRITE_BLOCKING);
+            } catch (Throwable ignored) {
+            }
+            try {
                 track.stop();
-                app.ayham.extension.music.features.EqPresets.releaseDeck(track.getAudioSessionId());
+            } catch (Throwable ignored) {
+            }
+            app.ayham.extension.music.features.EqPresets.releaseDeck(track);
+            try {
                 track.release();
             } catch (Throwable ignored) {
             }

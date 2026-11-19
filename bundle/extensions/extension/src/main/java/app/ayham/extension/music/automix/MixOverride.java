@@ -25,6 +25,12 @@ public final class MixOverride {
 
     /** null: Auto. */
     public String preset;
+    /**
+     * Read from a pick saved before the editor as blend, filter or crossfade (the master's preset "auto"
+     * after migratePick): the planner's reason is "picked in the overview". Not saved: an edit saves it
+     * normalized, as the master does.
+     */
+    public boolean migrated;
     /** volume, eq, effect: only with preset custom. */
     public String volume, eq, effect;
     /** 0: Auto. */
@@ -80,6 +86,7 @@ public final class MixOverride {
         o.family = family;
         o.engine = engine;
         o.savedAt = savedAt;
+        o.migrated = migrated;
         return o;
     }
 
@@ -126,7 +133,9 @@ public final class MixOverride {
             else if ("blend".equals(st) || "filter".equals(st)) o.family = (String) st;
             else if ("crossfade".equals(st)) o.beatMatch = "off";
             o.bars = intOf(m.get("bars"), 0);
-            return normalize(o);
+            MixOverride n = normalize(o);
+            if (n != null) n.migrated = "blend".equals(st) || "filter".equals(st) || "crossfade".equals(st);
+            return n;
         }
         o.preset = str(m.get("preset"));
         Object lanes = m.get("lanes");

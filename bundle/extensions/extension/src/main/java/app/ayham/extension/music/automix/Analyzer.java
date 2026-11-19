@@ -115,13 +115,24 @@ final class Analyzer {
         if (id == null) return null;
         Analysis a = results.get(id);
         if (a != null) return a;
+        // no file, or an old one: not read again for a while (the overview asks 20 times a second)
+        Long miss = missed.get(id);
+        long now = SystemClock.elapsedRealtime();
+        if (miss != null && now - miss < MISS_RETRY_MS) return null;
         a = load(c, id);
         if (a != null) {
+            missed.remove(id);
             results.put(id, a);
             if (!status.containsKey(id)) status.put(id, "ready");
+        } else {
+            missed.put(id, now);
         }
         return a;
     }
+
+    /** Songs whose saved analysis was missing or old when last read, and when. */
+    private static final Map<String, Long> missed = new HashMap<>();
+    private static final long MISS_RETRY_MS = 5000;
 
     static synchronized String statusOf(String id) {
         return status.get(id);

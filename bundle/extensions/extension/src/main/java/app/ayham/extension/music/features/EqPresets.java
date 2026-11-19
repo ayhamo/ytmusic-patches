@@ -59,8 +59,8 @@ public final class EqPresets {
                 // our decks' own announcements: their effects come with attachDeck
                 if (intent.getBooleanExtra(OURS, false)) return;
                 synchronized (EqPresets.class) {
-                    if (open && live.contains(session)) {
-                        // opened again with no close between: what is on it may be from a player gone
+                    if (open && live.contains(session) && !inControl(session)) {
+                        // opened again with no close between, and our effects on it lost: made again
                         release(session);
                     }
                     if (open) live.add(session); else live.remove(session);
@@ -103,14 +103,6 @@ public final class EqPresets {
     private static final java.util.Set<Integer> decks = new java.util.HashSet<>();
     /** YT's sessions announced open and not yet closed, in the order they opened. */
     private static final java.util.Set<Integer> live = new java.util.LinkedHashSet<>();
-
-    public static void attachDeck(int session) {
-        attachDeck((Object) session, session);
-    }
-
-    public static void releaseDeck(int session) {
-        releaseDeck((Object) session);
-    }
 
     /** [owner] (a deck, a player) plays on [session]: the preset on it, announced to the system. */
     public static void attachDeck(Object owner, int session) {
@@ -220,6 +212,18 @@ public final class EqPresets {
         if (e == null) return;
         for (AudioEffect a : e) if (a != null) a.release();
         Log.i(TAG, "session " + session + ": effects released");
+    }
+
+    /** Our effects on [session] still work (none there counts as working: nothing to redo). */
+    private static synchronized boolean inControl(int session) {
+        AudioEffect[] e = effects.get(session);
+        if (e == null) return true;
+        try {
+            for (AudioEffect a : e) if (a != null && !a.hasControl()) return false;
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** Newest open session, or -1. */

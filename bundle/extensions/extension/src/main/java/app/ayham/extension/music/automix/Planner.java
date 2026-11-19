@@ -329,7 +329,7 @@ public final class Planner {
         String family = pick != null ? pick.family : null;
 
         if (bm.equals("off") && both) {
-            return overlap(cur, next, fromGrid, pick, earliest, family != null || pick.preset == null ? "picked in the overview" : "beat match off", warnings);
+            return overlap(cur, next, fromGrid, pick, earliest, family != null || pick.migrated ? "picked in the overview" : "beat match off", warnings);
         }
         boolean v3 = s.version == 3;
         if (fromGrid == null || cur.gridConfidence < MIN_GRID_CONFIDENCE) {

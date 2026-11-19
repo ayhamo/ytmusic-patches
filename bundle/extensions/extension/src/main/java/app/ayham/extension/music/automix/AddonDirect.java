@@ -510,11 +510,15 @@ public final class AddonDirect {
                     }
                     sessionOf = m;
                 }
-                s = (int) sessionOf.invoke(pl);
             } catch (Throwable t) {
-                session = -1;   // not asked again
+                session = -1;   // no such method on this player: not asked again
                 Log.w(TAG, "no audio session for the equalizer", t);
                 return;
+            }
+            try {
+                s = (int) sessionOf.invoke(pl);
+            } catch (Throwable t) {
+                return;   // asked again in a second
             }
             if (s <= 0 || s == session) return;
             if (session > 0) Log.i(TAG, p.id + ": the player's audio session changed, " + session + " -> " + s);

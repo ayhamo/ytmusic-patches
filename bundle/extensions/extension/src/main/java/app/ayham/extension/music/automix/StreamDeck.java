@@ -495,7 +495,7 @@ final class StreamDeck {
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build();
             try {
-                app.ayham.extension.music.features.EqPresets.attachDeck(track.getAudioSessionId());
+                app.ayham.extension.music.features.EqPresets.attachDeck(track, track.getAudioSessionId());
             } catch (Throwable ignored) {
             }
             track.play();
@@ -639,10 +639,7 @@ final class StreamDeck {
     /** Stops and frees a deck's track, and the preset's equalizer on its session. */
     private static void releaseTrack(AudioTrack t) {
         if (t == null) return;
-        try {
-            app.ayham.extension.music.features.EqPresets.releaseDeck(t.getAudioSessionId());
-        } catch (Throwable ignored) {
-        }
+        app.ayham.extension.music.features.EqPresets.releaseDeck(t);
         try {
             t.pause();
             t.flush();

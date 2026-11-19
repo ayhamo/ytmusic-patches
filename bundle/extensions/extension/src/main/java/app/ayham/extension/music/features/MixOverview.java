@@ -459,14 +459,18 @@ final class MixOverview {
     }
 
     private static void save(MixOverride o) {
-        Overview s = Automix.overview();
-        if (s.pairKey == null) return;
+        save(Automix.overview().pairKey, o);
+    }
+
+    /** [o] saved for [pairKey] (a drag saves for the pair it started on). */
+    private static void save(String pairKey, MixOverride o) {
+        if (pairKey == null) return;
         if (o.loop()) {
             o.bars = 0;
             o.out = null;
             o.in = null;
         }
-        String r = Automix.setOverride(s.pairKey, o);
+        String r = Automix.setOverride(pairKey, o);
         refusedNote = r != null ? r : "";
         if (view != null) view.sig = "";
     }
@@ -560,10 +564,12 @@ final class MixOverview {
 
     private static void dragEnd(Drag d) {
         if (d.pos == null || Math.abs(d.pos.sec - d.base) < 0.005) return;
-        MixOverride o = d.s.override != null ? d.s.override : new MixOverride();
+        // the song changed under the finger: the drag was on another pair's songs, nothing saved
+        if (d.s.pairKey == null || !d.s.pairKey.equals(Automix.overview().pairKey)) return;
+        MixOverride o = d.s.override != null ? d.s.override.copy() : new MixOverride();
         if (d.out) o.out = d.pos;
         else o.in = d.pos;
-        save(o);
+        save(d.s.pairKey, o);
     }
 
     /** A 10 ms step of one song's position (from where the plan has it, when nothing is saved yet). */
@@ -1017,7 +1023,10 @@ final class MixOverview {
         }
 
         private Bitmap drawStatic(Overview o, int w, int h, Waves.Wave wa, Waves.Wave wb) {
-            Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            // one bitmap reused while the size holds (a pinch redraws it on every step)
+            Bitmap b = layer;
+            if (b != null && b.getWidth() == w && b.getHeight() == h) b.eraseColor(0);
+            else b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             Canvas g = new Canvas(b);
             float d = getResources().getDisplayMetrics().density;
             Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);

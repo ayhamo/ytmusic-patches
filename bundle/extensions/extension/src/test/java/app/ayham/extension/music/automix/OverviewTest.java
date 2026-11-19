@@ -31,6 +31,18 @@ public class OverviewTest {
     }
 
     @Test
+    public void beatMatchOffFromTheEditorSaysSo() {
+        // automix.js: "picked in the overview" only for a migrated pick (preset "auto" after migratePick)
+        MixOverride off = new MixOverride();
+        off.beatMatch = "off";
+        assertEquals("beat match off", plan(off, 120).reason);
+        assertTrue(pick("crossfade", 0).migrated);
+        assertFalse(MixOverride.normalize(pick("crossfade", 0)).migrated);
+        assertFalse(pick("loop", 0).migrated);
+        assertFalse(pick(null, 8).migrated);
+    }
+
+    @Test
     public void aFilterPickedIsAFilterMixOfAtMostEightBars() {
         Planner.Plan p = plan(pick("filter", 16), 120);
         assertEquals("filter", p.style);

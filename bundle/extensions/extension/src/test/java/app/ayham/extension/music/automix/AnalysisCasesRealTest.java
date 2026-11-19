@@ -61,7 +61,7 @@ public class AnalysisCasesRealTest {
 
     private static boolean ready;
 
-    private static synchronized void setUp() throws Exception {
+    static synchronized void setUp() throws Exception {
         if (ready) return;
         File dir = natives(), models = models();
         Assume.assumeTrue("AUTOMIX_NATIVES not set: the real analyser runs only where its natives are built", dir != null);

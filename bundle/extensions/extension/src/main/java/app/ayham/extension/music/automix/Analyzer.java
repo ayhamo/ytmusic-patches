@@ -321,11 +321,7 @@ final class Analyzer {
         int rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
         boolean floatPcm = false;
         Decoded d = new Decoded();
-        int step = 1;
-        short[] mono = new short[1 << 20];
-        int monoLen = 0;
-        float acc = 0;
-        int accN = 0;
+        Fold fold = null;
         long frame = 0;
         long headFrames = 0;
         DataOutputStream headOut = null;
@@ -365,7 +361,7 @@ final class Analyzer {
                     lastOut = SystemClock.elapsedRealtime();
                     if (!configured) {
                         configured = true;
-                        step = rate >= 44100 ? 2 : 1;
+                        fold = new Fold(rate);
                         headFrames = Math.round(HEAD_SEC * rate);
                         ringFrames = (int) Math.round(TAIL_SEC * rate);
                         ring = new short[ringFrames * 2];
@@ -390,13 +386,7 @@ final class Analyzer {
                         int r = (int) (frame % ringFrames) * 2;
                         ring[r] = sa;
                         ring[r + 1] = sb;
-                        acc += (a + b) * 0.5f;
-                        if (++accN == step) {
-                            if (monoLen == mono.length) mono = Arrays.copyOf(mono, monoLen * 2);
-                            mono[monoLen++] = clip(acc / step);
-                            acc = 0;
-                            accN = 0;
-                        }
+                        fold.push(a, b);
                     }
                     codec.releaseOutputBuffer(outIndex, false);
                     if (frame > MAX_SONG_SEC * rate) throw new TooLong("over " + MAX_SONG_SEC + " s, not analysed");
@@ -419,10 +409,10 @@ final class Analyzer {
         }
         if (!configured || frame == 0) throw new IOException("nothing decoded");
         d.rate = rate;
-        d.monoRate = rate / step;
+        d.monoRate = fold.monoRate;
         d.frames = frame;
-        d.mono = mono;
-        d.monoLength = monoLen;
+        d.mono = fold.mono;
+        d.monoLength = fold.length;
         // the end: the ring's last TAIL_SEC (or the whole song when shorter), in order
         int n = (int) Math.min(frame, ringFrames);
         long first = frame - n;
@@ -437,7 +427,34 @@ final class Analyzer {
         return d;
     }
 
-    private static short clip(float x) {
+    /**
+     * The decode's mono for the analysis: L and R averaged, then at 44.1 kHz and up every two frames
+     * averaged into one (22.05 / 24 kHz), as 16-bit.
+     */
+    static final class Fold {
+        final int step, monoRate;
+        short[] mono = new short[1 << 20];
+        int length;
+        private float acc;
+        private int accN;
+
+        Fold(int rate) {
+            step = rate >= 44100 ? 2 : 1;
+            monoRate = rate / step;
+        }
+
+        void push(float a, float b) {
+            acc += (a + b) * 0.5f;
+            if (++accN == step) {
+                if (length == mono.length) mono = Arrays.copyOf(mono, length * 2);
+                mono[length++] = clip(acc / step);
+                acc = 0;
+                accN = 0;
+            }
+        }
+    }
+
+    static short clip(float x) {
         int v = Math.round(x * 32767f);
         return (short) Math.max(-32768, Math.min(32767, v));
     }
@@ -603,6 +620,16 @@ final class Analyzer {
             return known;
         }
 
+        Analysis a = analyzeDecoded(c, id, d, head(c, id), tail(c, id), tDl, tDec);
+        save(c, a);
+        return a;
+    }
+
+    /**
+     * The analysis of a decoded song (everything after the download and decode): the beats, the key,
+     * energy and structure, the evidence, the vocal windows from its stereo opening and end.
+     */
+    static Analysis analyzeDecoded(Context c, String id, Decoded d, Pcm headPcm, Pcm tailPcm, long tDl, long tDec) throws Exception {
         double dur = d.duration();
         Analysis a = new Analysis();
         a.fileKey = id;
@@ -685,7 +712,6 @@ final class Analyzer {
         java.util.List<Double> starts = new java.util.ArrayList<>();
         for (double s : new double[]{0, W}) if (s + W <= dur) starts.add(s);
         for (int k = 1; k <= 3; k++) if (dur - k * W >= 2 * W) starts.add(dur - k * W);
-        Pcm headPcm = head(c, id), tailPcm = tail(c, id);
         for (double s : starts) {
             Pcm p = s + W <= headPcm.end() ? headPcm : tailPcm;
             if (s < p.start() - 1e-6 || s + W > p.end() + 1e-6) continue;
@@ -696,7 +722,6 @@ final class Analyzer {
             if (w != null) a.vocals.add(w);
         }
         tv = SystemClock.elapsedRealtime() - tv;
-        save(c, a);
         Log.i(TAG, String.format(Locale.US, "%s: %.1f s, %d Hz | grid %.2f BPM (conf %.2f) from %.2f s, end grid %s | key %s (%.2f) | "
                         + "intro ends %.1f, music ends %.2f | %d vocal windows | download %d ms, decode %d ms, beats %d ms, native %d ms, vocals %d ms",
                 id, dur, d.rate, a.bpm, a.gridConfidence, a.firstDownbeatSec,

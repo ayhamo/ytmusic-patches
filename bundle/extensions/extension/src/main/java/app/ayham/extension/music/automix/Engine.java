@@ -344,6 +344,7 @@ final class Engine {
      * shows its volume, then glides there (~0.3 s).
      */
     private volatile float levelOutTarget = 1, levelInTarget = 1;
+    private final YtFadeIn inFade = new YtFadeIn();
     private float levelOut = Float.NaN, levelIn = Float.NaN;
     private static final float LEVEL_GLIDE = (float) (1 - Math.exp(-1 / (0.3 * SR)));
 
@@ -494,8 +495,10 @@ final class Engine {
         }
         if (outPlayer != null) levelOutTarget = ytVolume(outPlayer);
         if (inPlayer != null) {
-            float v = ytVolume(inPlayer);
-            if (Math.abs(v - levelInTarget) > 0.001f)
+            // not YT's start-up ramp on it: the deck is playing that song already
+            float v = inFade.follow(SystemClock.uptimeMillis(), ytVolume(inPlayer));
+            if (Float.isNaN(v)) v = levelInTarget;
+            else if (Math.abs(v - levelInTarget) > 0.001f)
                 Log.i(TAG, String.format(Locale.US, "next song at YT's volume %.3f (%.1f dB): the incoming deck follows", v, 20 * Math.log10(Math.max(v, 1e-6))));
             levelInTarget = v;
         }

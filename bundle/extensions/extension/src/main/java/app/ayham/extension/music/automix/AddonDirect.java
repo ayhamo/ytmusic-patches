@@ -77,6 +77,14 @@ public final class AddonDirect {
     private static final long TRIM_MS = 7;
     private static final int TRIM_N = 20;
     private static final float TRIM_RATE = 0.004f;
+    /**
+     * A held player (a mix's next song) after a speed change it followed: automix nudges YT's silent
+     * player onto the deck, ours follows, and the two players take the new speed at different moments
+     * (ExoPlayer applies it where its buffer drains). The error read meanwhile is that lag, gone once
+     * both run at the speed (S21 FE, 2026-11-19: each nudge read -23..-25 ms, a relock of ~4 s each,
+     * and the hand-over forced 250 ms before the third lock). Not a drift until this long after.
+     */
+    static final long FOLLOW_SETTLE_MS = 800;
     private static final Map<Object, Shadow> shadows = new IdentityHashMap<>();
     /** The next song's player, opened and paused at its start, before YT gets to it. */
     private static volatile Shadow armed;
@@ -181,7 +189,17 @@ public final class AddonDirect {
     /** The player for this YT player is in step: a mix can hand over to it. */
     static boolean inStep(Object host) {
         Shadow s = get(host);
-        return s != null && !s.done && s.mode == Mode.ON && s.ready();
+        return s != null && !s.done && s.mode == Mode.ON && s.ready() && settled(SystemClock.elapsedRealtime() - s.speedChangedAt);
+    }
+
+    /** Past a followed speed change's lag: a reading now is the players' real distance. */
+    static boolean settled(long sinceSpeedChangeMs) {
+        return sinceSpeedChangeMs >= FOLLOW_SETTLE_MS;
+    }
+
+    /** A held (silent) player [m] ms off YT locks again: past the loose lock, and not a speed change's lag. */
+    static boolean relockHeld(long m, long sinceSpeedChangeMs) {
+        return Math.abs(m) > LOCK_LOOSE_MS && settled(sinceSpeedChangeMs);
     }
 
     /** Automix holds YT's next player silent for a mix: the addon's player locks on it now. */
@@ -375,6 +393,8 @@ public final class AddonDirect {
         int grossSeeks;
         long lastM;
         float speedSet = 1f;
+        /** When a speed of YT's was last followed (elapsedRealtime; the lag after it isn't a drift). */
+        long speedChangedAt = Long.MIN_VALUE / 2;
         /** The running nudge's rate as a factor of YT's speed (1: none). */
         float nudgeFactor = 1f;
         /** The running nudge is a heard trim: the pitch follows its rate (a resample, no stretch). */
@@ -588,6 +608,7 @@ public final class AddonDirect {
         void followSpeed(float s, long now) {
             if (pl == null || Math.abs(s - speedSet) < 0.0005f) return;
             speedSet = s;
+            speedChangedAt = now;
             // a nudge running carries on at the new speed: automix's steps (a second apart) would
             // cut every one short and the lock never get there (m5: 11 corrections, 5 s late)
             if (nudgeUntil == 0) {
@@ -797,6 +818,8 @@ public final class AddonDirect {
             // a silent one (a mix's held player) is held to the lock's own tolerance for the hand-over
             if (Math.abs(m) > (heard() ? DRIFT_MS : LOCK_LOOSE_MS)) {
                 if (!heard()) {
+                    // a followed speed change's lag, not a drift: read again once both players run at it
+                    if (!relockHeld(m, now - speedChangedAt)) return;
                     // silent (a mix's held player): locked again before a hand-over can take it
                     relock();
                     log.append(" err ").append(m).append(';');

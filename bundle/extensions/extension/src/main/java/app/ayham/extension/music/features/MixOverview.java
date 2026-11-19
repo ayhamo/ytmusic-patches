@@ -214,10 +214,17 @@ final class MixOverview {
 
         // the pair's edit (editor.md): preset, its lanes, beat match, length, window
         card.addView(chipRow(a, "Preset", PRESETS.length, i -> PRESET_NAMES[i], presetChips, MixOverview::pickPreset));
+        // the first chip reads "Auto · <what the planner chose>": as wide as its widest name, so the
+        // chips after it stay where they are when the name changes
+        TextView first = presetChips[0];
+        String widest = SteadyLayout.widest(Overview.AUTO_NAMES, x -> first.getPaint().measureText(x));
+        first.setGravity(Gravity.CENTER);
+        first.setMinWidth((int) Math.ceil(first.getPaint().measureText(widest)) + first.getPaddingLeft() + first.getPaddingRight());
         customToggle = text(a, "Customize ▸", 13, 0xB3FFFFFF, true);
         customToggle.setPadding(0, dp(a, 8), 0, dp(a, 2));
         customToggle.setOnClickListener(v -> {
             boolean open = customBox.getVisibility() != View.VISIBLE;
+            if (!open) card.setMinimumHeight(0); // the user folded it away: the sheet may shrink
             customBox.setVisibility(open ? View.VISIBLE : View.GONE);
             customToggle.setText(open ? "Customize ▾" : "Customize ▸");
         });
@@ -328,6 +335,17 @@ final class MixOverview {
         note = text(a, "", 12, 0xB3FFFFFF, false);
         note.setPadding(0, dp(a, 8), 0, 0);
         card.addView(note);
+
+        // the sheet sits on the bottom: it only grows while open, so nothing in it moves down under a
+        // finger when a shorter note or warning comes (SteadyLayout)
+        card.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int keep = SteadyLayout.hold(v.getMinimumHeight(), b - t);
+            if (keep != v.getMinimumHeight()) v.post(() -> v.setMinimumHeight(keep));
+        });
+        sub.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int keep = SteadyLayout.hold(v.getMinimumHeight(), b - t);
+            if (keep != v.getMinimumHeight()) v.post(() -> v.setMinimumHeight(keep));
+        });
 
         // a tall editor on a short screen scrolls; the drawing keeps its drags (MixView asks the parent)
         ScrollView scroll = new ScrollView(a);
@@ -631,7 +649,8 @@ final class MixOverview {
 
     private static void work(Overview s) {
         boolean on = s.waiting != null;
-        if (on != (work.getVisibility() == View.VISIBLE)) work.setVisibility(on ? View.VISIBLE : View.GONE);
+        // once shown it keeps its room (invisible, not gone): the chips below don't jump up when it ends
+        if (on != (work.getVisibility() == View.VISIBLE)) work.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
         if (!on) return;
         boolean known = s.waitDone >= 0;
         set(workText, s.waiting + (known ? String.format(Locale.ROOT, " · %d%%", Math.round(s.waitDone * 100)) : "…"));

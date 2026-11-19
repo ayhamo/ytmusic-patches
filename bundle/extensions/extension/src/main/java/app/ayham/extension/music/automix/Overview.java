@@ -56,6 +56,10 @@ public final class Overview {
     }
 
     /** "Auto · Blend": what the planner chose, as the preset row names it with no override (editor.md §7). */
+    /** Every name autoName gives (the editor's first chip is as wide as the widest). */
+    public static final String[] AUTO_NAMES = {"Auto", "Auto · Loop", "Auto · Hand-over", "Auto · Bridge", "Auto · Fade",
+            "Auto · Filter", "Auto · Drop-in", "Auto · Muffle", "Auto · Glide", "Auto · Blend"};
+
     public String autoName() {
         if (loop != null) return "Auto · Loop";
         if (plan == null) return "Auto";

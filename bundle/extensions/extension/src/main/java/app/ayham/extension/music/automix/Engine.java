@@ -133,6 +133,23 @@ final class Engine {
      */
     static final double SOFT_SEC = 0.25;
     private volatile double softFrom = Double.NaN;
+    /**
+     * The crossfade is to a player lined up with the deck (the same song within a few ms): equal
+     * gain, which sums those to a flat level, where equal power would bump it +3 dB mid-way.
+     */
+    private volatile boolean softLinear;
+
+    /** The deck's share [t] of the way through the crossfade (0..1): a cosine, or linear when lined up. */
+    static float softOut(double t, boolean linear) {
+        t = Math.max(0, Math.min(1, t));
+        return (float) (linear ? 1 - t : Math.cos(Math.PI / 2 * t));
+    }
+
+    /** The player's share: a sine, or linear when lined up (the two always sum to 1 then). */
+    static float softIn(double t, boolean linear) {
+        t = Math.max(0, Math.min(1, t));
+        return (float) (linear ? t : Math.sin(Math.PI / 2 * t));
+    }
     private boolean softRamp;
     private final List<Double> offsets = new ArrayList<>();
     private boolean started, tookOver, asked, toasted, handedOver, finished;
@@ -379,7 +396,7 @@ final class Engine {
                     float g = 1;
                     if (!Double.isNaN(fs)) g = (float) Math.max(0, Math.min(1, 1 - ((f + i) / (double) SR - fs) / fadeLen));
                     // the soft hand-over: the deck goes out on a cosine while YT comes in on a sine
-                    if (!Double.isNaN(sf)) g *= (float) Math.cos(Math.PI / 2 * Math.max(0, Math.min(1, ((f + i) / (double) SR - sf) / SOFT_SEC)));
+                    if (!Double.isNaN(sf)) g *= softOut(((f + i) / (double) SR - sf) / SOFT_SEC, softLinear);
                     levelOut += (lo - levelOut) * LEVEL_GLIDE;
                     levelIn += (li - levelIn) * LEVEL_GLIDE;
                     buf[2 * i] = (bo[2 * i] * levelOut + bi[2 * i] * levelIn) * g;
@@ -625,20 +642,26 @@ final class Engine {
                 // ...and so does the addon's player for the next song
                 && (!addonIn || AddonDirect.inStep(inPlayer) || mix >= m.elementAt + 3);
         if (!handedOver && Double.isNaN(handoverAt) && inPlayer != null && (ready || mix >= Math.min(m.elementAt + 8, deadline))) {
-            // what is heard after the hand-over isn't lined up with the deck: crossfaded, not spliced
-            // (the stream deck taking the song is lined up with it: spliced)
-            boolean lined = (aligned && (!addonIn || AddonDirect.inStep(inPlayer))
-                    // debug (spike prop softHandover=1): every hand-over crossfaded, to test this path
-                    && !"1".equals(app.ayham.extension.music.features.Features.prop("softHandover")))
-                    || (deck != null && deck.inStep());
+            // Only the stream deck taking the song splices (its samples follow ours exactly). A player
+            // is crossfaded: its volume reaches the speaker 40 ms after the mixer only on average, and
+            // a late one left a hole between the deck's 25 ms fade and the player's sound (phone,
+            // 2026-11-19, screen-recorded: a 15 ms fade, ~8 ms of silence, the ramp back). Lined up,
+            // the crossfade is equal gain; not lined up, equal power.
+            boolean deckTakes = deck != null && deck.inStep();
+            boolean lined = aligned && (!addonIn || AddonDirect.inStep(inPlayer));
             // the render writes ~0.26 s ahead of what is heard (the track's buffer and the output's
             // latency): the crossfade starts past that, or its first part is skipped as a step
-            handoverAt = mix + (lined ? 0.3 : 0.5);
-            if (!lined) {
+            handoverAt = mix + (deckTakes ? 0.3 : 0.5);
+            if (!deckTakes) {
                 softFrom = handoverAt - SOFT_SEC / 2;
-                Log.w(TAG, String.format(Locale.US, "hand-over forced at mix %.2f s with %s not in step (last error %s ms): a %.0f ms crossfade instead of a splice",
-                        mix, addonIn && !AddonDirect.inStep(inPlayer) ? "the addon's player" : "YT's player",
-                        lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), SOFT_SEC * 1000));
+                softLinear = lined;
+                String to = addonIn ? "the addon's player" : "YT's player";
+                if (lined)
+                    Log.i(TAG, String.format(Locale.US, "hand-over to %s at mix %.2f s: a %.0f ms equal-gain crossfade (in step, last error %s ms)",
+                            to, mix, SOFT_SEC * 1000, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr)));
+                else
+                    Log.w(TAG, String.format(Locale.US, "hand-over forced at mix %.2f s with %s not in step (last error %s ms): a %.0f ms equal-power crossfade",
+                            mix, to, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), SOFT_SEC * 1000));
             } else {
                 LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
             }
@@ -678,7 +701,7 @@ final class Engine {
                 softRamp = false;
                 restoreVolume(inPlayer);
             } else {
-                setVolume(inPlayer, ytVolume(inPlayer) * (float) Math.sin(Math.PI / 2 * Math.max(0, t)));
+                setVolume(inPlayer, ytVolume(inPlayer) * softIn(t, softLinear));
             }
         }
         if (handedOver && mix >= handoverAt + 0.6) finish(true, null);

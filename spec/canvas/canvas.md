@@ -218,9 +218,9 @@ The original is the rule. Each line: what, where.
 Fixed on the PC on 2026-11-19, so the cases pass: Apple's inline motion art without an album id and the static still (`src/plus/bg-plus.js`, a replaced `searchAndFetchMotion`); Spotify's album and length checks (`src/plus/bg-canvas.js` `matches`); the music-video match, BestPart, `noFrames`, `choose`, `judge`, `cropX` and the still refusal (`src/plus/video-canvas-page.js`, ports of Prism). What is left:
 
 - Apple: the album is added to the term unless the term (with the artist) holds it; BitChord checks the title only. `src/apple-canvas.js:207` vs BC `:55`.
-- Spotify: the album and length checks only run when the request carries them; `content.js` and `content-plus.js` send only song, artist and video id today.
+- Spotify: the length is the player's own, read by the song's id while it plays (`video-canvas-page.js` `playingLength`, passed on by `video-canvas.js`), so it is only there when the music-video lookup ran first; without it the length isn't checked. The album is the player bar's.
 - Spotify: a miss is kept 24 h in memory only, keyed `artist—title`; a hit in `chrome.storage` with no expiry. `src/plus/bg-canvas.js`.
-- Music video: the length check needs the song's length. `video-canvas.js` sends none, so only the playing song is checked (the player's own length); prefetched songs are not, and the named-session path can't fire for them.
+- Music video: the song's length is the player's own, by id, so lookups run for the playing song only; the PC never looks one up ahead (the page's `prefetch` op has no caller).
 - Music video: no YouTube pairing, no official-type check, no second try with other videos (as the phone). vs `ClipFinder.kt:104-136`.
 - No chorus from synced lyrics: `choose` gets none. No face-based crop.
 - Display: bars are zoomed out by the storyboard's bars (keep share 0.5 to 0.98, no 1.6 cap); no tall-clip rule. `src/plus/video-canvas.js:56-64`.

@@ -7,3 +7,4 @@ node_modules/
 *.mpp
 local.properties
 __pycache__/
+graphify-out/

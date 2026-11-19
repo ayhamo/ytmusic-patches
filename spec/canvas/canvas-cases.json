@@ -9,7 +9,7 @@
   "appleMotion": "canvas.md §3. BitChord AppleMusicCanvas.kt:306-330.",
   "spotifyMatch": "canvas.md §4. Metrolist DirectCanvasProvider.kt:397-436. Durations in ms; 0 or null = unknown.",
   "spotifyMedia": "canvas.md §4. Metrolist DirectCanvasProvider.kt:378-395 (trustedMedia, Spotify: scdn.co).",
-  "spotifyTotp": "canvas.md §4. spotlib TOTP as SpotifyCanvas.java:257-272: the secret xor (i % 33 + 9), HMAC-SHA1, 30 s steps, 6 digits.",
+  "spotifyTotp": "canvas.md §4. spotlib TOTP as SpotifyCanvas.java:257-272: the secret xor (i % 33 + 9) joined as decimal digits (spotlib Totp.kt joinToString), HMAC-SHA1, 30 s steps, 6 digits.",
   "videoMatch": "canvas.md §5. Prism MusicVideoMatch.kt:19-58 (pick). The song, the search results in order; expect the picked id or null.",
   "bestPart": "canvas.md §6. Prism BestPart.kt:68-101 (peakMs). intensity = one value per segment of segmentMs; expect startMs or null (nothing stands out). noFrames: FrameJudge.kt:72-76.",
   "clipJudge": "canvas.md §7. Prism FrameJudge.kt (bars 97-112, isStill 130-140, windows 149-177, choose 203-210, cropX 232-257, judge 59-69) and ClipRefine.kt (cuts 79-91, flashing 94-117, end 123-126, the flash loop 195-198).",
@@ -1299,22 +1299,22 @@
   {
    "name": "a 30 s step",
    "nowMs": 1763400000000,
-   "expect": "386375"
+   "expect": "673072"
   },
   {
    "name": "the last ms of the same step",
    "nowMs": 1763400029999,
-   "expect": "386375"
+   "expect": "673072"
   },
   {
    "name": "the next step",
    "nowMs": 1763400030000,
-   "expect": "759823"
+   "expect": "756072"
   },
   {
    "name": "time 0",
    "nowMs": 0,
-   "expect": "109039"
+   "expect": "204513"
   }
  ],
  "videoMatch": [

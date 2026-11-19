@@ -290,12 +290,9 @@ public class CanvasCasesTest {
                 return;
             }
             case "spotifyTotp": {
-                // the cases' codes come from the PC's bg-canvas.js, whose key is the xor'd values as characters;
-                // spotlib (and the PC's own spotify.js makeTotp) joins them as decimal numbers, as the phone does.
-                // Reported, not followed: only the shape is checked here.
+                // the key is the xor'd values joined as decimal digits (spotlib Totp.kt)
                 String got = SpotifyCanvas.totp(lng(c.get("nowMs")));
-                if (got.matches("\\d{6}")) skip(g, "codes from a key spotlib doesn't use (the xor'd values as characters, not decimal)");
-                else check(g, c, false, got);
+                check(g, c, got.equals(str(c.get("expect"))), got);
                 return;
             }
             case "videoMatch": {

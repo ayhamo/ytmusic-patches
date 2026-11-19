@@ -368,9 +368,10 @@ public final class AddonDirect {
         /** A silent speed nudge runs until then (0: none); a start's seek may buffer until then. */
         long nudgeUntil, startGraceUntil;
         boolean lastWasSeek, pausedJump;
-        /** Our player's audio session (the equalizer), 0 when none. */
+        /** Our player's audio session (the equalizers), 0 when none yet, -1 when it can't be read. */
         int session;
         private Method sessionOf;
+        private long sessionReadAt;
         int grossSeeks;
         long lastM;
         float speedSet = 1f;
@@ -493,26 +494,33 @@ public final class AddonDirect {
         }
 
         /**
-         * The player's audio session, once it has one (0 until its audio track is made: read again
-         * each tick): YT's equalizer preset on it.
+         * The player's audio session (0 until its audio track is made, and ExoPlayer may make a new one
+         * later: read again each second): YT's equalizer preset on it, and announced to the system's.
          */
         void audioSession() {
-            // YT's equalizer preset on our audio too (its sessions get it from their broadcasts;
-            // ours is never announced). "a": the player's audio session (probed: matches audioflinger's)
+            sessionReadAt = SystemClock.elapsedRealtime();
+            // "a": the player's audio session (probed: matches audioflinger's)
+            int s;
             try {
                 if (sessionOf == null) {
                     Method m = pl.getClass().getMethod("a");
-                    if (m.getReturnType() != int.class) return;
+                    if (m.getReturnType() != int.class) {
+                        session = -1;
+                        return;
+                    }
                     sessionOf = m;
                 }
-                session = (int) sessionOf.invoke(pl);
+                s = (int) sessionOf.invoke(pl);
             } catch (Throwable t) {
                 session = -1;   // not asked again
                 Log.w(TAG, "no audio session for the equalizer", t);
                 return;
             }
-            if (session <= 0) return;
-            app.ayham.extension.music.features.EqPresets.attachDeck(session);
+            if (s <= 0 || s == session) return;
+            if (session > 0) Log.i(TAG, p.id + ": the player's audio session changed, " + session + " -> " + s);
+            session = s;
+            // the old session (if any) is closed and released with it
+            app.ayham.extension.music.features.EqPresets.attachDeck(this, s);
         }
 
         void play(boolean on) {
@@ -598,7 +606,7 @@ public final class AddonDirect {
         }
 
         void tick(long now) throws Exception {
-            if (session == 0 && pl != null) audioSession();
+            if (session >= 0 && pl != null && now - sessionReadAt >= 1000) audioSession();
             if (mode == Mode.ARMED || host == null) return;
             // the crossfade
             if (fadeMs > 0) {
@@ -902,10 +910,8 @@ public final class AddonDirect {
             }
             Object x = pl;
             pl = null;
-            if (session > 0) {
-                app.ayham.extension.music.features.EqPresets.releaseDeck(session);
-                session = 0;
-            }
+            app.ayham.extension.music.features.EqPresets.releaseDeck(this);
+            session = 0;
             if (x != null) {
                 try {
                     x.getClass().getMethod("A", boolean.class).invoke(x, false);

@@ -18,6 +18,10 @@ import java.util.Map;
  * with the standard OPEN_AUDIO_EFFECT_CONTROL_SESSION broadcast (one per crossfade player); an
  * Equalizer (and a room reverb) is attached to every announced session, released on CLOSE.
  * Property eq = flat | bass | vocals | night | room.
+ *
+ * <p>Our own audio (automix's decks, the stream decks, the addon player) is announced the same way
+ * ({@link EffectSessions}), so the system's equalizer (Samsung's SoundAlive and the like) acts on it as
+ * on YT's players: OPEN when a deck plays, CLOSE when it stops.
  */
 public final class EqPresets {
     private static final String TAG = "AyhamEqualizer";
@@ -26,6 +30,11 @@ public final class EqPresets {
     /** Sessions in the order YT opened them; the last is the newest player. */
     private static final java.util.List<Integer> order = new java.util.ArrayList<>();
     private static boolean registered;
+    /** Our own sessions as announced to the system's equalizers. */
+    private static final EffectSessions announced = new EffectSessions();
+    /** On our own broadcasts: this receiver leaves them alone. */
+    private static final String OURS = "app.ayham.extension.music.EQ_OURS";
+    private static Context app;
 
     private EqPresets() {
     }
@@ -33,6 +42,7 @@ public final class EqPresets {
     static synchronized void register(Context context) {
         if (registered) return;
         registered = true;
+        app = context.getApplicationContext() != null ? context.getApplicationContext() : context;
         IntentFilter filter = new IntentFilter();
         filter.addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
         filter.addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION);
@@ -46,7 +56,13 @@ public final class EqPresets {
                 if (session <= 0) return;
                 // the broadcast is system-wide: another app's player is not ours to change
                 if (from != null && !from.equals(c.getPackageName())) return;
+                // our decks' own announcements: their effects come with attachDeck
+                if (intent.getBooleanExtra(OURS, false)) return;
                 synchronized (EqPresets.class) {
+                    if (open && live.contains(session)) {
+                        // opened again with no close between: what is on it may be from a player gone
+                        release(session);
+                    }
                     if (open) live.add(session); else live.remove(session);
                 }
                 if (open) attach(session); else release(session);
@@ -88,15 +104,64 @@ public final class EqPresets {
     /** YT's sessions announced open and not yet closed, in the order they opened. */
     private static final java.util.Set<Integer> live = new java.util.LinkedHashSet<>();
 
-    public static synchronized void attachDeck(int session) {
-        decks.add(session);
-        attach(session);
-        order.remove((Integer) session);
+    public static void attachDeck(int session) {
+        attachDeck((Object) session, session);
     }
 
-    public static synchronized void releaseDeck(int session) {
-        decks.remove(session);
-        release(session);
+    public static void releaseDeck(int session) {
+        releaseDeck((Object) session);
+    }
+
+    /** [owner] (a deck, a player) plays on [session]: the preset on it, announced to the system. */
+    public static void attachDeck(Object owner, int session) {
+        if (session <= 0) return;
+        java.util.List<EffectSessions.Event> events;
+        synchronized (EqPresets.class) {
+            events = announced.open(owner, session);
+            for (EffectSessions.Event e : events) {
+                if (e.open) continue;
+                // the owner's old session (or this id's old owner): its effects go
+                decks.remove(e.session);
+                release(e.session);
+            }
+            decks.add(session);
+            attach(session);
+            order.remove((Integer) session);
+        }
+        announce(events);
+    }
+
+    /** [owner] stopped: its session's preset released, and closed for the system. */
+    public static void releaseDeck(Object owner) {
+        java.util.List<EffectSessions.Event> events;
+        synchronized (EqPresets.class) {
+            events = announced.close(owner);
+            for (EffectSessions.Event e : events) {
+                decks.remove(e.session);
+                release(e.session);
+            }
+        }
+        announce(events);
+    }
+
+    /** OPEN / CLOSE_AUDIO_EFFECT_CONTROL_SESSION for our sessions, as a music player sends them. */
+    private static void announce(java.util.List<EffectSessions.Event> events) {
+        Context c = app;
+        if (c == null || events.isEmpty()) return;
+        for (EffectSessions.Event e : events) {
+            try {
+                Intent i = new Intent(e.open ? AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION
+                        : AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION);
+                i.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, e.session);
+                i.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, c.getPackageName());
+                i.putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC);
+                i.putExtra(OURS, true);
+                c.sendBroadcast(i);
+                Log.i(TAG, "announced " + e + " to the system's equalizer");
+            } catch (Throwable t) {
+                Log.w(TAG, "could not announce " + e, t);
+            }
+        }
     }
 
     private static synchronized void attach(int session) {

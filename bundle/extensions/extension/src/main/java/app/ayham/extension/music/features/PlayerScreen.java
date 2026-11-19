@@ -1176,8 +1176,8 @@ final class PlayerScreen {
             base = -1;
             mixStart = -1;
             showYts();
-            // just above YT's times (their digits sit 19 dp under the bar's line; at 19 the badge met the play button)
-            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 16 * d);
+            // just above YT's times (their digits sit 19 dp under the bar's line; at 19 the badge met the play button, 16 sat a bit low)
+            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 13 * d);
             if (running) postInvalidateDelayed(100); // the decks get onto YT's clock in a moment
             if (from < 0 || dur <= 0 || from >= dur) return;
             float x = left + (right - left) * from / dur;

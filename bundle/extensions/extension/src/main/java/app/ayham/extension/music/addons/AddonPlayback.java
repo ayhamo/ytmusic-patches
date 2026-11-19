@@ -12,11 +12,22 @@ import java.lang.reflect.Field;
  */
 public final class AddonPlayback {
     private static final String TAG = "Ayham";
-    private static volatile Object player;
-    private static volatile String addon;
-    private static volatile boolean audible, upgrading, ownAtmos, held;
-    /** The last {badge, line} while the addon was heard: kept through a re-lock (hold). */
-    private static volatile Object[] last;
+
+    /**
+     * Each player we play addon audio on, newest claim last. Several run at once (the song heard,
+     * a mix's held next song, a song just left that winds down): the badge reads the newest one that
+     * is audible and playing, so one left behind (phone, 2026-11-19: a skipped-back song's player
+     * re-locked, then stopped) neither takes the badge nor clears it for the song heard.
+     */
+    private static final class Entry {
+        String addon;
+        boolean audible, ownAtmos, held;
+        /** The last {badge, line} while it was heard: kept through a re-lock (hold). */
+        Object[] last;
+    }
+
+    private static final java.util.LinkedHashMap<Object, Entry> players = new java.util.LinkedHashMap<>();
+    private static volatile boolean upgrading;
     private static Field rateField, encodingField;
     private static boolean fieldsFailed;
 
@@ -37,19 +48,24 @@ public final class AddonPlayback {
      * atmosDecode: the player plays our own decode of a Dolby Atmos file (AtmosWav), so its input
      * is PCM; the badge and the line still say what was decoded.
      */
-    public static void playing(Object p, String addonName, boolean isAudible, boolean atmosDecode) {
-        if (player != p) {
-            held = false;
-            last = null;
-        }
-        player = p;
-        addon = addonName;
-        audible = isAudible;
-        ownAtmos = atmosDecode;
+    public static synchronized void playing(Object p, String addonName, boolean isAudible, boolean atmosDecode) {
+        Entry e = players.remove(p);
+        if (e == null) e = new Entry();
+        e.addon = addonName;
+        e.audible = isAudible;
+        e.ownAtmos = atmosDecode;
+        players.put(p, e);
     }
 
-    public static void audible(Object p, boolean isAudible) {
-        if (player == p) audible = isAudible;
+    /** Heard or not; becoming heard makes it the newest claim. */
+    public static synchronized void audible(Object p, boolean isAudible) {
+        Entry e = players.get(p);
+        if (e == null) return;
+        if (isAudible && !e.audible) {
+            players.remove(p);
+            players.put(p, e);
+        }
+        e.audible = isAudible;
     }
 
     /**
@@ -57,52 +73,56 @@ public final class AddonPlayback {
      * keeps what it showed rather than flicking to "Upgrading Quality" and back; the song is still
      * the addon's.
      */
-    public static void hold(Object p, boolean on) {
-        if (player == p) held = on;
+    public static synchronized void hold(Object p, boolean on) {
+        Entry e = players.get(p);
+        if (e != null) e.held = on;
     }
 
-    public static void stopped(Object p) {
-        if (player != p) return;
-        player = null;
-        held = false;
-        last = null;
-        ownAtmos = false;
-        addon = null;
-        audible = false;
+    public static synchronized void stopped(Object p) {
+        players.remove(p);
     }
 
     /** {badge, stats line or null}: the line only while addon audio is really heard. */
     public static Object[] now() {
-        Object p = player;
-        String mime = null, line = null;
-        int rate = 0, enc = -1, bitrate = -1;
-        if (p != null && audible) {
-            try {
-                if ((int) p.getClass().getMethod("n").invoke(p) == 3) {
-                    Object f = app.ayham.extension.music.features.PlayerTap.audioFormat(p);
-                    if (f != null) {
-                        String[] h = head(f.toString());
-                        mime = h[3];
-                        bitrate = parse(h[5]);
-                        rate = intField(f, "L");
-                        enc = intField(f, "M");
-                        if (ownAtmos && "audio/raw".equals(mime)) {
-                            // the phone's Dolby decoder's render, played from our WAV of it
-                            mime = Atmos.EAC3_JOC;
-                            bitrate = -1;
-                            enc = -1;
-                        }
-                        line = Quality.line(mime, rate, enc, bitrate, addon);
-                    }
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "addon format read failed", t);
-            }
+        java.util.List<Object> order;
+        java.util.List<Entry> entries;
+        synchronized (AddonPlayback.class) {
+            order = new java.util.ArrayList<>(players.keySet());
+            entries = new java.util.ArrayList<>(players.values());
         }
-        Object[] r = last;
-        if (mime != null) last = new Object[]{Quality.badge(false, mime, rate, enc, bitrate), line};
-        else if (held && r != null && p != null) return r;
-        return new Object[]{Quality.badge(upgrading, mime, rate, enc, bitrate), line};
+        Object[] held = null;
+        for (int i = order.size() - 1; i >= 0; i--) {
+            Object p = order.get(i);
+            Entry e = entries.get(i);
+            if (e.audible) {
+                try {
+                    if ((int) p.getClass().getMethod("n").invoke(p) == 3) {
+                        Object f = app.ayham.extension.music.features.PlayerTap.audioFormat(p);
+                        if (f != null) {
+                            String[] h = head(f.toString());
+                            String mime = h[3];
+                            int bitrate = parse(h[5]);
+                            int rate = intField(f, "L");
+                            int enc = intField(f, "M");
+                            if (e.ownAtmos && "audio/raw".equals(mime)) {
+                                // the phone's Dolby decoder's render, played from our WAV of it
+                                mime = Atmos.EAC3_JOC;
+                                bitrate = -1;
+                                enc = -1;
+                            }
+                            Object[] r = {Quality.badge(false, mime, rate, enc, bitrate), Quality.line(mime, rate, enc, bitrate, e.addon)};
+                            e.last = r;
+                            return r;
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "addon format read failed", t);
+                }
+            }
+            if (held == null && e.held && e.last != null) held = e.last;
+        }
+        if (held != null) return held;
+        return new Object[]{Quality.badge(upgrading, null, 0, -1, -1), null};
     }
 
     /** Format(id, label, container, sampleMime, codecs, bitrate, ...) */

@@ -513,6 +513,14 @@ public class CanvasCasesTest {
                 check(g, c, got.equals(w), got);
                 return;
             }
+            case "videoArtists": {
+                Map<String, Object> in = map(c.get("input"));
+                List<String> got = Arrays.asList(VideoCanvas.artists(str(in.get("artist"))));
+                List<String> w = new ArrayList<>();
+                for (Object x : list(want)) w.add(str(x));
+                check(g, c, got.equals(w), got);
+                return;
+            }
             case "snap": {
                 Map<String, Object> in = map(c.get("input"));
                 List<Object> ls = list(in.get("lineStarts"));
@@ -573,7 +581,11 @@ public class CanvasCasesTest {
                         return out;
                     }
                 };
-                ClipGate.Result r = ClipGate.find(str(song.get("title")), Boolean.TRUE.equals(song.get("notASong")), str(in.get("first")), look);
+                Map<String, Object> choice = map(song.get("choice"));
+                String picked = choice == null ? null : str(choice.get("picked"));
+                if (picked != null && choice.get("rejected") != null && list(choice.get("rejected")).contains(picked)) picked = null;
+                ClipGate.Result r = ClipGate.find(str(song.get("title")), Boolean.TRUE.equals(song.get("notASong")), str(in.get("first")), look,
+                        picked, choice != null && Boolean.TRUE.equals(choice.get("only")), Boolean.TRUE.equals(in.get("lyricFirst")));
                 Map<String, Object> ex = map(want);
                 boolean ok = Objects.equals(r.videoId, ex.get("videoId")) && Objects.equals(r.why, ex.get("why")) && r.otherSearches == lng(ex.get("otherSearches"));
                 check(g, c, ok, "{videoId " + r.videoId + ", why " + r.why + ", otherSearches " + r.otherSearches + "}");

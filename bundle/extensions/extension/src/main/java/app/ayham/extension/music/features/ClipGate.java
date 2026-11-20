@@ -58,9 +58,33 @@ final class ClipGate {
 
     /** Rules 7-11. [firstId]: what the search found (null: nothing). */
     static Result find(String songTitle, boolean notASong, String firstId, Look look) {
+        return find(songTitle, notASong, firstId, look, null, false, false);
+    }
+
+    /**
+     * With the listener's video ([picked], canvas.md §15 rule 6: asked first, as it is; one that can't
+     * make a loop gives way to the search, unless the pick is being tried, [only]) and rule 12's lyric
+     * video ([lyricFirst]: what the search found is the artist's lyric video, taken as it is).
+     * A turned-away pick is passed as null.
+     */
+    static Result find(String songTitle, boolean notASong, String firstId, Look look, String picked, boolean only, boolean lyricFirst) {
         Result r = new Result();
         if (notASong) {
             r.why = NOT_A_SONG;
+            return r;
+        }
+        if (picked != null) {
+            String w = own(look.video(picked));
+            if (w == null || only) {
+                if (w == null) r.videoId = picked;
+                else r.why = w;
+                return r;
+            }
+        }
+        if (lyricFirst && firstId != null) {
+            String w = own(look.video(firstId));
+            if (w == null) r.videoId = firstId;
+            else r.why = w;
             return r;
         }
         if (firstId == null) {

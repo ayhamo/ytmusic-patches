@@ -287,6 +287,7 @@ final class CanvasSongMenu {
                 trial = new CanvasChoices.Song();
             }
             trial.video = id;
+            trial.only = true;
             trial.off.remove(CanvasSettings.VIDEO);
             trial.use = null;
             if (trial.partVideo != null && !trial.partVideo.equals(id)) {

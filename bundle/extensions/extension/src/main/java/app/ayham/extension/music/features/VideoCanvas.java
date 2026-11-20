@@ -397,23 +397,8 @@ final class VideoCanvas {
         };
         boolean own = false;
         String[] first = null;
-        if (!notASong && ch != null && ch.video != null && !rejected.contains(ch.video)) {
-            // §15 rule 6: the listener's video, asked first and as it is (the song's own)
-            first = new String[]{ch.video, ""};
-            own = true;
-            Log.i(TAG, "canvas video: the listener's video " + ch.video);
-        } else if (!notASong) {
-            // rule 1: the first search, then "official video"
-            first = pick(title, artists, durationSec, search.apply(0), false);
-            if (first == null) first = pick(title, artists, durationSec, search.apply(1), false);
-            // rule 12: nothing passes: the artist's lyric video, as the song's own
-            if (first == null) {
-                first = pick(title, artists, durationSec, search.apply(0), true);
-                if (first == null) first = pick(title, artists, durationSec, search.apply(1), true);
-                own = first != null;
-                if (own) Log.i(TAG, "canvas video: only a lyric video: '" + first[1] + "', taken as it is");
-            }
-        }
+        // §15 rule 6: the listener's video, asked first and as it is (the song's own), before any search
+        final String picked = ch != null && ch.video != null && !rejected.contains(ch.video) ? ch.video : null;
         final java.util.Map<String, ClipGate.Video> seen = new java.util.HashMap<>();
         ClipGate.Look look = new ClipGate.Look() {
             @Override
@@ -456,15 +441,27 @@ final class VideoCanvas {
                 return out;
             }
         };
-        ClipGate.Result r;
-        if (own) {
-            r = new ClipGate.Result();
-            String w = ClipGate.own(look.video(first[0]));
-            if (w == null) r.videoId = first[0];
-            else r.why = w;
-        } else {
-            r = ClipGate.find(title, notASong, first == null ? null : first[0], look);
+        if (picked != null && !notASong) {
+            ClipGate.Result p = ClipGate.find(title, false, null, look, picked, ch.only, false);
+            Log.i(TAG, "canvas video: the listener's video " + picked + ": " + p);
+            if (p.videoId != null || ch.only) {
+                why[0] = p.why;
+                return p.videoId == null ? null : new String[]{p.videoId, ""};
+            }
         }
+        if (!notASong) {
+            // rule 1: the first search, then "official video"
+            first = pick(title, artists, durationSec, search.apply(0), false);
+            if (first == null) first = pick(title, artists, durationSec, search.apply(1), false);
+            // rule 12: nothing passes: the artist's lyric video, as the song's own
+            if (first == null) {
+                first = pick(title, artists, durationSec, search.apply(0), true);
+                if (first == null) first = pick(title, artists, durationSec, search.apply(1), true);
+                own = first != null;
+                if (own) Log.i(TAG, "canvas video: only a lyric video: '" + first[1] + "', taken as it is");
+            }
+        }
+        ClipGate.Result r = ClipGate.find(title, notASong, first == null ? null : first[0], look, null, false, own);
         Log.i(TAG, "canvas video: the gate: " + r + (first != null ? " (found first: " + first[0] + " '" + first[1] + "')" : ""));
         why[0] = r.why;
         if (r.videoId == null) return null;
@@ -556,7 +553,8 @@ final class VideoCanvas {
     static String[] artists(String artist) {
         List<String> out = new ArrayList<>();
         if (artist != null)
-            for (String a : artist.split("(?i)\\s*(,|&|\\band\\b|\\bx\\b|\\bfeat\\.?|\\bft\\.?|\\bwith\\b)\\s*"))
+            // canvas.md §5 rule 13: never on "and" ("The Head and the Heart" is one artist)
+            for (String a : artist.split("(?i)\\s*(,|&|\\s×\\s|\\sx\\s|\\bfeaturing\\b|\\bfeat\\b\\.?|\\bft\\b\\.?|\\bwith\\b)\\s*"))
                 if (!norm(a).isEmpty()) out.add(a.trim());
         return out.toArray(new String[0]);
     }

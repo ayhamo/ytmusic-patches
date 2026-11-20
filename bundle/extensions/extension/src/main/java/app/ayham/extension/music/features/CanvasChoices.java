@@ -32,6 +32,8 @@ final class CanvasChoices {
         final Set<String> rejected = new LinkedHashSet<>();
         /** Use (rule 7): the source the song shows, or null for the settings' order. */
         String use;
+        /** A pick being tried (not kept): only that video, no search after it. */
+        transient boolean only;
 
         boolean empty() {
             return off.isEmpty() && video == null && partMs < 0 && rejected.isEmpty() && use == null;

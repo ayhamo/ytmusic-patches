@@ -213,6 +213,16 @@ final class AnimatedCover {
         return Math.max(1f, Math.min(1.6f, h / (float) active));
     }
 
+    /**
+     * The frame is read from the view with the zoom already on it: once zoomed, the bars are cropped
+     * off (it read 1 and zoomed out, flipping 1.0 and 1.17 every few frames on a letterboxed music
+     * video) or, before the new zoom is drawn, still there (it zoomed again, up to 1.6). So it is
+     * measured only while the clip is unzoomed, and the first zoom found holds for the clip.
+     */
+    static float nextZoom(float current, float measured) {
+        return current > 1f ? current : Math.max(1f, Math.min(1.6f, measured));
+    }
+
     private static boolean isBlackRow(int[] px, int w, int y) {
         int step = Math.max(1, w / 16), sum = 0, n = 0;
         for (int x = 0; x < w; x += step, n++) {
@@ -242,7 +252,7 @@ final class AnimatedCover {
         }
         int[] px = new int[sz[0] * sz[1]];
         sample.getPixels(px, 0, sz[0], 0, 0, sz[0], sz[1]);
-        float z = letterboxZoom(px, sz[0], sz[1]);
+        float z = nextZoom(zoom, letterboxZoom(px, sz[0], sz[1]));
         if (Math.abs(z - zoom) > 0.03f) {
             Log.i(TAG, "canvas: letterbox zoom " + zoom + " -> " + z);
             zoom = z;
@@ -576,8 +586,10 @@ final class AnimatedCover {
         boolean tall = l.tall, video = true, spotify = true, apple = true;
         if (fixed.isEmpty() && video && vid != null) {
             String mvKey = CanvasCache.videoKey(vid) + CanvasSettings.videoKeySuffix(l.p) + l.ch.keySuffix(), saidMv = CanvasCache.lookup(mvKey);
-            // a saved clip the cache trim has since deleted is cut again
-            final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
+            // a saved clip the cache trim has since deleted is cut again; so is one cut before §15 wrote
+            // its .info, or the song's menu could not offer Pick another part and Not this video for it
+            final String had = saidMv != null && !saidMv.isEmpty()
+                    && (new java.io.File(saidMv).length() == 0 || VideoCanvas.infoOf(saidMv) == null) ? null : saidMv;
             if (had != null && !had.isEmpty()) {
                 Log.i(TAG, "canvas: video loop from cache");
                 main.post(() -> {

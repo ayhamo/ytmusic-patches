@@ -128,6 +128,16 @@ final class CanvasSongMenu {
             labels.add("Not this video");
             acts.add(() -> notThis(a, n));
         }
+        // the way back: every choice above for this song forgotten (its switches, Use, picks and
+        // turned-away videos), so the settings decide again
+        if (!n.ch.empty()) {
+            labels.add("Reset this song's canvas");
+            acts.add(() -> {
+                n.ch = new CanvasChoices.Song();
+                save(n, "reset");
+                Toast.makeText(a, "This song's canvas follows the settings again", Toast.LENGTH_SHORT).show();
+            });
+        }
         if (labels.isEmpty()) {
             Toast.makeText(a, "Nothing to choose for this song's canvas", Toast.LENGTH_SHORT).show();
             return;

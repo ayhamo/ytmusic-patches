@@ -477,6 +477,23 @@ public class CanvasCasesTest {
                 check(g, c, Json.write(got).equals(Json.write(want)), Json.write(got));
                 return;
             }
+            case "snap": {
+                Map<String, Object> in = map(c.get("input"));
+                List<Object> ls = list(in.get("lineStarts"));
+                long[] st = new long[ls.size()];
+                for (int i = 0; i < st.length; i++) st[i] = lng(ls.get(i));
+                Map<String, Object> t = map(in.get("tempo"));
+                long got = t == null ? BestPart.snap(lng(in.get("targetMs")), st, null, false, 0)
+                        : BestPart.snap(lng(in.get("targetMs")), st, ((Number) t.get("bpm")).doubleValue(), (Boolean) t.get("steady"), lng(t.get("firstBeatMs")));
+                check(g, c, got == lng(want), got);
+                return;
+            }
+            case "bestPartButton": {
+                Map<String, Object> in = map(c.get("input"));
+                boolean got = BestPart.shows(lng(in.get("atMs")), lng(in.get("startMs")), lng(in.get("knownAtMs")));
+                check(g, c, got == (Boolean) want, got);
+                return;
+            }
             case "chorus": {
                 Map<String, Object> in = map(c.get("input"));
                 List<Object> ls = list(in.get("lines"));

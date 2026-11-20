@@ -605,6 +605,17 @@ final class PlayerScreen {
                 if (durationMs > 0 || z != null) zone.set(z, durationMs);
             }
             zone.badge(PlayerTap.badge());
+            // canvas.md §14: the best part, its mark on the bar and its button
+            try {
+                String bpId = app.ayham.extension.music.automix.Automix.currentId();
+                long bpPos = app.ayham.extension.music.automix.Automix.positionMs(), bpDur = app.ayham.extension.music.automix.Automix.durationMs();
+                BestPart.tick(bpId, bpPos, bpDur);
+                long part = BestPart.partMs(bpId);
+                boolean button = part >= 0 && Features.switchOn("bestPartButton") && BestPart.shows(bpPos, part, BestPart.knownAtMs());
+                zone.best(part, bpDur, button, BestPart.mine(bpId));
+            } catch (Throwable t) {
+                Features.failed("bestPart", t);
+            }
             AudioManager am = (AudioManager) a.getSystemService(Context.AUDIO_SERVICE);
             volume.setValue(am.getStreamVolume(AudioManager.STREAM_MUSIC));
             refreshLine(a);
@@ -1108,6 +1119,74 @@ final class PlayerScreen {
             if (shimmer || b == app.ayham.extension.music.addons.Quality.Badge.UPGRADING) postInvalidateOnAnimation();
         }
 
+        // ---- canvas.md §14: the best part's mark (rule 4) and its button (rule 3) ----
+        private long bestMs = -1, bestDur;
+        private boolean bestButton, bestMine;
+        private final android.graphics.RectF pill = new android.graphics.RectF();
+        private long downAt = -1;
+        private final Runnable longPress = () -> {
+            downAt = -1;
+            if (getContext() instanceof Activity) BestPart.yours((Activity) getContext());
+        };
+
+        void best(long ms, long durationMs, boolean button, boolean mine) {
+            if (ms == bestMs && durationMs == bestDur && button == bestButton && mine == bestMine) return;
+            bestMs = ms;
+            bestDur = durationMs;
+            bestButton = button;
+            bestMine = mine;
+            invalidate();
+        }
+
+        private void drawBest(Canvas canvas, float d, float left, float right, float cy) {
+            if (bestMs < 0 || bestDur <= 0) {
+                pill.setEmpty();
+                return;
+            }
+            float f = bestMs / (float) bestDur;
+            if (f > 0.01f && f < 0.99f) {
+                paint.setShader(null);
+                paint.setColor(0xE6FFFFFF);
+                canvas.drawCircle(left + (right - left) * f, cy, 2.5f * d, paint);
+            }
+            if (!bestButton) {
+                pill.setEmpty();
+                return;
+            }
+            String text = (bestMine ? "\uD83D\uDD25 Your best part" : "Best part");
+            float tw = label.measureText(text), h = 22 * d, pr = right - 48 * d, ty = cy + 13 * d;
+            pill.set(pr - tw - 20 * d, ty - h / 2, pr, ty + h / 2);
+            paint.setShader(null);
+            paint.setColor(0x33FFFFFF);
+            canvas.drawRoundRect(pill, h / 2, h / 2, paint);
+            label.setAlpha(230);
+            canvas.drawText(text, pill.centerX(), ty - (label.descent() + label.ascent()) / 2, label);
+        }
+
+        @Override
+        public boolean onTouchEvent(android.view.MotionEvent e) {
+            // only the button's own touches: the rest go on to YT's seek bar underneath
+            if (pill.isEmpty()) return false;
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    if (!pill.contains(e.getX(), e.getY())) return false;
+                    downAt = android.os.SystemClock.uptimeMillis();
+                    postDelayed(longPress, android.view.ViewConfiguration.getLongPressTimeout());
+                    return true;
+                case android.view.MotionEvent.ACTION_UP:
+                    removeCallbacks(longPress);
+                    if (downAt >= 0 && pill.contains(e.getX(), e.getY()) && getContext() instanceof Activity) BestPart.play((Activity) getContext());
+                    downAt = -1;
+                    return true;
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    removeCallbacks(longPress);
+                    downAt = -1;
+                    return true;
+                default:
+                    return downAt >= 0;
+            }
+        }
+
         void set(long[] z, long durationMs) {
             long f = z == null ? -1 : z[0];
             long d = z == null || z[1] <= 0 ? durationMs : z[1];
@@ -1168,6 +1247,7 @@ final class PlayerScreen {
                 canvas.drawRoundRect(left, cy - h / 2, left + (right - left) * w, cy + h / 2, h / 2, h / 2, paint);
                 // BitChord's time label turns into "Mixing" (the extension's too), pulsing on the same beat,
                 // just under the bar (it sat level with YT's times and touched the pause button: item 5)
+                pill.setEmpty();
                 label.setAlpha(Math.round(255 * look[2]));
                 canvas.drawText("Mixing", getWidth() / 2f, cy + 12 * d - (label.descent() + label.ascent()) / 2, label);
                 postInvalidateOnAnimation();
@@ -1178,6 +1258,7 @@ final class PlayerScreen {
             showYts();
             // just above YT's times (their digits sit 19 dp under the bar's line; at 19 the badge met the play button, 16 sat a bit low)
             drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 13 * d);
+            drawBest(canvas, d, left, right, (barH > 0 ? barH : getHeight()) / 2f);
             if (running) postInvalidateDelayed(100); // the decks get onto YT's clock in a moment
             if (from < 0 || dur <= 0 || from >= dur) return;
             float x = left + (right - left) * from / dur;
@@ -1758,7 +1839,7 @@ final class PlayerScreen {
     private static void menu(Activity a, View anchor) {
         android.widget.PopupMenu m = new android.widget.PopupMenu(a, anchor);
         m.getMenu().add(0, 4, 0, "Automix overview");
-        m.getMenu().add(0, 5, 0, "Jump to the most replayed part");
+        m.getMenu().add(0, 5, 0, "Play from the best part");
         m.getMenu().add(0, 1, 0, "Fullscreen cover art").setCheckable(true).setChecked(Features.switchOn("fullArt"));
         m.getMenu().add(0, 2, 1, "Animated covers").setCheckable(true).setChecked(Features.switchOn("canvas"));
         m.getMenu().add(0, 6, 1, "Canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"))
@@ -1783,7 +1864,7 @@ final class PlayerScreen {
                     MixOverview.show(a);
                     return true;
                 case 5:
-                    BestPart.jump(a);
+                    BestPart.play(a);
                     return true;
                 case 7:
                     // the song changed while the menu was open: its label was for the one before

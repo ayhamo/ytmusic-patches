@@ -124,6 +124,11 @@ public final class Automix {
     private static volatile long queueAt;
     private static volatile boolean queueBusy;
 
+    /** The song YT's queue plays next, or null. */
+    public static String nextId() {
+        return nextId;
+    }
+
     public static String currentId() {
         return curId;
     }

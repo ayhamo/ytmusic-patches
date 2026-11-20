@@ -132,6 +132,7 @@ val playerFeaturesPatch = patch(
                         Triple("ayham_artistArt", "Artist colours", "The player takes the artist's colours and photo from their Apple Music page."),
                         Triple("ayham_canvas", "Animated covers", "The album's motion art from Apple Music plays muted over YT's art, where the album has one. Off: Apple is never asked. Also in the player's … menu."),
                         Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Spotify canvas, or a loop of its music video). Off: neither is looked up. Also in the player's … menu."),
+                        Triple("ayham_bestPartButton", "Best part button", "A button under the seek bar jumps to the song's best part (the part people replay most, or the one you set by holding it) early in the song. Off: only the mark on the bar and the menu's Play from the best part stay."),
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
                         Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
                         Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),

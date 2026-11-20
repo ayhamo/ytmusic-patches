@@ -130,8 +130,8 @@ val playerFeaturesPatch = patch(
                         Triple("ayham_ui", "BitChord player screen", "The now-playing screen laid out like BitChord: info lines, title, lyric line, seek bar, big controls, volume and output. YT's own buttons and menus stay underneath, so Morphe's settings still apply to them."),
                         Triple("ayham_fullArt", "Fullscreen cover art", "On the BitChord screen in portrait, the cover fills the top of the screen and fades into the colours below while a song plays (or its animated cover shows); paused, it goes back to a card. Also in the player's … menu."),
                         Triple("ayham_artistArt", "Artist colours", "The player takes the artist's colours and photo from their Apple Music page."),
-                        Triple("ayham_canvas", "Animated covers", "The album's motion art from Apple Music plays muted over YT's art, where the album has one. Also in the player's … menu."),
-                        Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Canvas, or a loop of its music video); off, the other animated covers only. Also in the player's … menu."),
+                        Triple("ayham_canvas", "Animated covers", "The album's motion art from Apple Music plays muted over YT's art, where the album has one. Off: Apple is never asked. Also in the player's … menu."),
+                        Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Spotify canvas, or a loop of its music video). Off: neither is looked up. Also in the player's … menu."),
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
                         Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
                         Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),
@@ -143,7 +143,31 @@ val playerFeaturesPatch = patch(
                             setAttribute("android:title", title)
                             setAttribute("android:summary", summary)
                             setAttribute("android:defaultValue", if (key == "ayham_eq") "false" else "true")
-                            if (key == "ayham_canvasSpotify") setAttribute("android:dependency", "ayham_canvas")
+                        }
+                        // canvas.md §13: the sources in the order tried, mobile data, the qualities and the mode
+                        if (key == "ayham_canvasSpotify") {
+                            appendChild("app.ayham.extension.music.features.CanvasSourcesPreference") {
+                                setAttribute("android:key", "ayham_canvas_sources")
+                            }
+                            appendChild("SwitchPreference") {
+                                setAttribute("android:key", "ayham_canvas_mobile")
+                                setAttribute("android:title", "Off on mobile data")
+                                setAttribute("android:summary", "On mobile data no canvas or animated cover is looked up or played.")
+                                setAttribute("android:defaultValue", "false")
+                            }
+                            listOf(
+                                Triple("ayham_canvas_apple_quality", "Animated cover quality", "720"),
+                                Triple("ayham_canvas_yt_quality", "Music video canvas quality", "480"),
+                                Triple("ayham_canvas_yt_mode", "Music video canvas mode", "clips"),
+                            ).forEach { (k, t, d) ->
+                                appendChild("$AUTOMIX.AutomixVersionPreference") {
+                                    setAttribute("android:key", k)
+                                    setAttribute("android:title", t)
+                                    setAttribute("android:summary", "%s")
+                                    setAttribute("android:defaultValue", d)
+                                    setAttribute("android:dependency", if (k == "ayham_canvas_apple_quality") "ayham_canvas" else "ayham_canvasSpotify")
+                                }
+                            }
                         }
                         if (key == "ayham_canvas") appendChild("app.ayham.extension.music.features.ClearCanvasCachePreference") {
                             setAttribute("android:key", "ayham_clear_canvas_cache")

@@ -47,6 +47,15 @@ final class VideoCanvas {
      * [songMs] the song's length (0 unknown: the video's length is then not checked against it).
      */
     static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo) throws Exception {
+        return clip(songId, songTitle, artist, songMs, dir, artPx, noVideo, 0, false);
+    }
+
+    /**
+     * [height]: the stream's height the listener asked (canvas.md §13 rule 6), 0 for Auto (the art's
+     * size). [full]: Full video mode (rule 7), the whole music video, muted, instead of the best part.
+     */
+    static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo,
+                                  int height, boolean full) throws Exception {
         long t0 = System.currentTimeMillis();
         String[] video = findVideo(songTitle, artist, Math.round(songMs / 1000.0));
         if (video == null) {
@@ -61,7 +70,7 @@ final class VideoCanvas {
         }
         // the square crop shows the video's full height across the art (the screen's width): 360p up to 1080p
         int screen = android.content.res.Resources.getSystem().getDisplayMetrics().widthPixels;
-        int want = Math.max(artPx, screen) < 480 ? 360 : Math.max(artPx, screen) < 900 ? 720 : 1080;
+        int want = height > 0 ? height : Math.max(artPx, screen) < 480 ? 360 : Math.max(artPx, screen) < 900 ? 720 : 1080;
         JSONObject f = pickFormat(player.optJSONObject("streamingData"), want);
         if (f == null) {
             noVideo[0] = true;
@@ -71,7 +80,7 @@ final class VideoCanvas {
         double dur = player.optJSONObject("videoDetails") == null ? 0 : player.getJSONObject("videoDetails").optDouble("lengthSeconds", 0);
         File canvas = new File(dir, "canvas");
         if (!canvas.isDirectory() && !canvas.mkdirs()) return null;
-        File out = new File(canvas, "mv_" + songId + ".mp4");
+        File out = new File(canvas, "mv_" + songId + (height > 0 ? "_q" + height : "") + (full ? "_full" : "") + ".mp4");
 
         // Prism's first look: the storyboard (bars, a still upload, the best window near the peak, the crop)
         long length = Math.round(dur * 1000);
@@ -128,7 +137,11 @@ final class VideoCanvas {
         // a part that flashes gives way to the next other part once, and if that flashes too, no canvas
         JSONObject low = pickFormat(player.optJSONObject("streamingData"), 240);
         double end = start + CLIP_SEC;
-        if (low != null) {
+        if (full) {
+            // Full video: the whole of it, from its start
+            start = 0;
+            end = length / 1000.0;
+        } else if (low != null) {
             for (int attempt = 0; attempt < 2; attempt++) {
                 double e = refine(low, start, canvas);
                 if (e > 0) {
@@ -150,7 +163,7 @@ final class VideoCanvas {
             }
         }
         double from = cut(f, start, end, canvas, out); // the loop starts on the key frame at or before [start]
-        try (java.io.FileWriter w = new java.io.FileWriter(new File(canvas, "mv_" + songId + ".crop"))) {
+        try (java.io.FileWriter w = new java.io.FileWriter(new File(canvas, out.getName().substring(0, out.getName().length() - 4) + ".crop"))) {
             w.write(String.format(Locale.ROOT, "%.3f %.3f %.3f %.3f %.3f", crop, bars[0], bars[1], bars[2], bars[3]));
         }
         HlsClip.trim(canvas, out);

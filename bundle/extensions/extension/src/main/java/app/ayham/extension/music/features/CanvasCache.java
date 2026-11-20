@@ -111,6 +111,22 @@ final class CanvasCache {
         save();
     }
 
+    /** canvas.md §13 rule 10: the saved misses go (a settings change tries the new choice at once). */
+    static synchronized int forgetMisses() {
+        if (props == null) return 0;
+        int n = 0;
+        for (String k : props.stringPropertyNames()) {
+            if (!k.startsWith("song.")) continue;
+            String v = props.getProperty(k);
+            if (v != null && v.endsWith("|")) {
+                props.remove(k);
+                n++;
+            }
+        }
+        if (n > 0) save();
+        return n;
+    }
+
     static synchronized String[] token() {
         if (props == null) return null;
         String t = props.getProperty("token"), exp = props.getProperty("tokenExpires");

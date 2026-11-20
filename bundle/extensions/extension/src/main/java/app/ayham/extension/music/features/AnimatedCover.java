@@ -80,8 +80,9 @@ final class AnimatedCover {
     }
 
     private static void tick(Activity activity, View decor, int pageId, int thumbId, int artistId, int titleId) {
-        if (!"1".equals(Features.props().getProperty("canvas"))) {
-            // switched off in the settings: drop the clip and show YT's art
+        Properties ps = Features.props();
+        if (!CanvasSettings.anyMaster(ps) || CanvasSettings.blockedByMobile(activity, ps)) {
+            // switched off in the settings (or on mobile data, when asked): drop the clip and show YT's art
             if (!key.isEmpty() || player != null) {
                 key = "";
                 stop();
@@ -146,8 +147,14 @@ final class AnimatedCover {
         lastTextCheck = now;
         String title = text(page, titleId, artistId, true);
         String artist = text(page, titleId, artistId, false);
-        // the sources are part of the key: switching Spotify's canvas on or off looks the song up again
-        String sources = "0".equals(Features.props().getProperty("canvasSpotify")) ? "" : "\u0000sp";
+        // the settings are part of the key: a change looks the song up again, and forgets the
+        // "failed" marks so the new choice is tried at once (canvas.md §13 rule 10)
+        String sources = "\u0000" + CanvasSettings.signature(Features.props());
+        if (!lastSettings.isEmpty() && !lastSettings.equals(sources)) {
+            int n = CanvasCache.forgetMisses();
+            Log.i(TAG, "canvas: settings changed: " + n + " failed marks forgotten");
+        }
+        lastSettings = sources;
         if (title != null && artist != null && !(title + "\u0000" + artist + sources).equals(key)) {
             key = title + "\u0000" + artist + sources;
             onSong(title, artist);
@@ -156,6 +163,7 @@ final class AnimatedCover {
     }
 
     private static long lastTextCheck;
+    private static String lastSettings = "";
     private static boolean lastWanted, prepared;
 
     /** The animated cover is on the screen (the fullscreen art stays up while it plays, paused or not). */
@@ -440,7 +448,7 @@ final class AnimatedCover {
                 Log.i(TAG, "canvas: '" + title + "' skipped before lookup");
                 return;
             }
-            String songKey = CanvasCache.appleKey(title, artist, tall);
+            String songKey = CanvasCache.appleKey(title, artist, tall) + CanvasSettings.appleKeySuffix(p);
             String saved = null, vid = null;
             if (fixed.isEmpty()) {
                 // a downloaded song's clip by its video id first (works offline)
@@ -483,140 +491,196 @@ final class AnimatedCover {
                 }
             }
             final long songMs = songLength;
-            // Metrolist's source order: the song's music video first, then Apple's animated cover
-            if (fixed.isEmpty() && video && vid != null) {
-                String mvKey = CanvasCache.videoKey(vid), saidMv = CanvasCache.lookup(mvKey);
-                // a saved clip the cache trim has since deleted is cut again
-                final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
-                if (had != null && !had.isEmpty()) {
-                    Log.i(TAG, "canvas: video loop from cache");
-                    main.post(() -> {
-                        if (forKey.equals(key)) play(had);
-                    });
-                    return;
-                }
-                if (had == null) {
-                    try {
-                        boolean[] none = {false};
-                        java.io.File f;
-                        synchronized (VideoCanvas.class) {
-                            // one cut at a time: by the time this one's turn comes the queue may have moved
-                            // on, or the look-ahead may have cut it already
-                            if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
-                                Log.i(TAG, "canvas: the queue moved on before its cut: none made");
-                                return;
-                            }
-                            String now = CanvasCache.lookup(mvKey);
-                            if (now != null && !now.isEmpty() && new java.io.File(now).length() > 0) {
-                                main.post(() -> {
-                                    if (forKey.equals(key)) play(now);
-                                });
-                                return;
-                            }
-                            f = VideoCanvas.clip(vid, title, artist, songMs, cacheDir, artPx, none);
-                        }
-                        // still this song: a clip cut while the queue moved on is not saved under its id
-                        if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
-                            Log.i(TAG, "canvas: the queue moved on while cutting: not saved");
-                            if (f != null && !f.delete()) Log.w(TAG, "canvas: could not delete " + f.getName());
-                            return;
-                        }
-                        if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
-                        if (f != null) {
-                            String path = f.getAbsolutePath();
-                            Log.i(TAG, "canvas: video loop in " + (System.currentTimeMillis() - lookupStart) + " ms");
-                            main.post(() -> {
-                                if (forKey.equals(key)) play(path);
-                            });
-                            return;
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, "canvas video: failed: " + t);
-                    }
-                    if (!forKey.equals(key)) return;
-                }
+            Look l = new Look();
+            l.title = title;
+            l.artist = artist;
+            l.forKey = forKey;
+            l.vid = vid;
+            l.songMs = songMs;
+            l.artPx = artPx;
+            l.tall = tall;
+            l.songKey = songKey;
+            l.fixed = fixed;
+            l.p = p;
+            if (!fixed.isEmpty()) {
+                lookApple(l);
+                return;
             }
-            // then Spotify's Canvas (Metrolist's order: video, Spotify, Apple), saved by title and artist
-            if (fixed.isEmpty() && spotify) {
-                String spKey = CanvasCache.spotifyKey(title, artist), had = CanvasCache.lookup(spKey);
-                if (had != null && !had.isEmpty() && new java.io.File(had).length() > 0) {
-                    Log.i(TAG, "canvas: spotify canvas from cache");
-                    main.post(() -> {
-                        if (forKey.equals(key)) play(had);
-                    });
-                    return;
-                }
-                if (had == null || !had.isEmpty()) {
-                    try {
-                        java.io.File f = SpotifyCanvas.find(title, artist, null, songMs, cacheDir);
-                        CanvasCache.put(spKey, f == null ? null : f.getAbsolutePath());
-                        if (f != null) {
-                            String path = f.getAbsolutePath();
-                            Log.i(TAG, "canvas: spotify canvas in " + (System.currentTimeMillis() - lookupStart) + " ms");
-                            main.post(() -> {
-                                if (forKey.equals(key)) play(path);
-                            });
-                            return;
-                        }
-                    } catch (Throwable t) {
-                        // a failed lookup is not saved as a miss: asked again next time
-                        Log.w(TAG, "canvas spotify: failed: " + t);
-                    }
-                    if (!forKey.equals(key)) return;
-                }
+            // canvas.md §13: the sources strictly in the listener's order, each under its switches
+            for (String src : CanvasSettings.order(p)) {
+                if (!forKey.equals(key)) return;
+                if (!CanvasSettings.on(p, src)) continue;
+                boolean stop = CanvasSettings.VIDEO.equals(src) ? lookVideo(l) : CanvasSettings.SPOTIFY.equals(src) ? lookSpotify(l) : lookApple(l);
+                if (stop) return;
             }
-            // then Apple's, saved by title and artist (a miss for 24 h, or the clip file)
-            if (fixed.isEmpty()) {
-                String saidApple = CanvasCache.lookup(songKey);
-                final String hadApple = saidApple != null && !saidApple.isEmpty() && !saidApple.contains("://")
-                        && new java.io.File(saidApple).length() == 0 ? null : saidApple;
-                if (hadApple != null) {
-                    Log.i(TAG, "canvas: saved lookup: " + (hadApple.isEmpty() ? "no clip" : "clip " + new java.io.File(hadApple).getName()));
-                    if (!hadApple.isEmpty()) main.post(() -> {
-                        if (forKey.equals(key)) play(hadApple);
-                    });
-                    return;
-                }
-            }
-            String url = null;
-            String alt = null;
-            boolean failed = false;
-            try {
-                if (!fixed.isEmpty()) url = fixed;
-                else if (apple) {
-                    String[] found = AppleCanvas.find(title, artist, null, tall);
-                    if (found != null) {
-                        url = found[0];
-                        alt = found[1];
-                    }
-                }
-            } catch (Throwable t) {
-                failed = true;
-                Log.w(TAG, "canvas: lookup failed: " + t);
-            }
-            if (url != null && url.contains(".m3u8") && forKey.equals(key)) {
-                // the clip for the art's shape, else the other shape's (Prism's tall alternate)
-                java.io.File f = null;
-                for (String u : new String[]{url, alt}) {
-                    if (u == null || f != null) continue;
-                    try {
-                        f = HlsClip.fetch(u, cacheDir, artPx);
-                    } catch (Throwable t) {
-                        Log.w(TAG, "canvas: clip download failed: " + t);
-                    }
-                }
-                url = f == null ? null : f.getAbsolutePath();
-                // no file is a failed download, not "no clip": not saved as a miss for 24 h
-                if (f == null) failed = true;
-            }
-            if (!failed && fixed.isEmpty() && apple && (url == null || !url.contains(".m3u8"))) CanvasCache.put(songKey, url);
-            final String found = url;
-            Log.i(TAG, "canvas: lookup " + (found == null ? "none" : "hit") + " in "
-                    + (System.currentTimeMillis() - lookupStart) + " ms");
-            if (found != null) main.post(() -> {
-                if (forKey.equals(key)) play(found);
-            });
+            Log.i(TAG, "canvas: no source has a clip for '" + title + "' in " + (System.currentTimeMillis() - lookupStart) + " ms");
         }, "ayham-canvas").start();
+    }
+
+    /** One song's lookup, as the sources share it. */
+    private static final class Look {
+        String title, artist, forKey, vid, songKey, fixed;
+        long songMs;
+        int artPx;
+        boolean tall;
+        Properties p;
+    }
+
+    /** The music video's loop (canvas.md §5-7). True: stop here (it plays, or the song moved on). */
+    private static boolean lookVideo(Look l) {
+        String title = l.title, artist = l.artist, forKey = l.forKey, vid = l.vid, songKey = l.songKey, fixed = l.fixed;
+        long songMs = l.songMs;
+        int artPx = l.artPx;
+        boolean tall = l.tall, video = true, spotify = true, apple = true;
+        if (fixed.isEmpty() && video && vid != null) {
+            String mvKey = CanvasCache.videoKey(vid) + CanvasSettings.videoKeySuffix(l.p), saidMv = CanvasCache.lookup(mvKey);
+            // a saved clip the cache trim has since deleted is cut again
+            final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
+            if (had != null && !had.isEmpty()) {
+                Log.i(TAG, "canvas: video loop from cache");
+                main.post(() -> {
+                    if (forKey.equals(key)) play(had);
+                });
+                return true;
+            }
+            if (had == null) {
+                try {
+                    boolean[] none = {false};
+                    java.io.File f;
+                    synchronized (VideoCanvas.class) {
+                        // one cut at a time: by the time this one's turn comes the queue may have moved
+                        // on, or the look-ahead may have cut it already
+                        if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
+                            Log.i(TAG, "canvas: the queue moved on before its cut: none made");
+                            return true;
+                        }
+                        String now = CanvasCache.lookup(mvKey);
+                        if (now != null && !now.isEmpty() && new java.io.File(now).length() > 0) {
+                            main.post(() -> {
+                                if (forKey.equals(key)) play(now);
+                            });
+                            return true;
+                        }
+                        f = VideoCanvas.clip(vid, title, artist, songMs, cacheDir, artPx, none, CanvasSettings.ytHeight(l.p), CanvasSettings.fullVideo(l.p));
+                    }
+                    // still this song: a clip cut while the queue moved on is not saved under its id
+                    if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {
+                        Log.i(TAG, "canvas: the queue moved on while cutting: not saved");
+                        if (f != null && !f.delete()) Log.w(TAG, "canvas: could not delete " + f.getName());
+                        return true;
+                    }
+                    if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
+                    if (f != null) {
+                        String path = f.getAbsolutePath();
+                        Log.i(TAG, "canvas: video loop in " + (System.currentTimeMillis() - lookupStart) + " ms");
+                        main.post(() -> {
+                            if (forKey.equals(key)) play(path);
+                        });
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "canvas video: failed: " + t);
+                }
+                if (!forKey.equals(key)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Spotify's canvas (§4). True: stop here. */
+    private static boolean lookSpotify(Look l) {
+        String title = l.title, artist = l.artist, forKey = l.forKey, vid = l.vid, songKey = l.songKey, fixed = l.fixed;
+        long songMs = l.songMs;
+        int artPx = l.artPx;
+        boolean tall = l.tall, video = true, spotify = true, apple = true;
+        if (fixed.isEmpty() && spotify) {
+            String spKey = CanvasCache.spotifyKey(title, artist), had = CanvasCache.lookup(spKey);
+            if (had != null && !had.isEmpty() && new java.io.File(had).length() > 0) {
+                Log.i(TAG, "canvas: spotify canvas from cache");
+                main.post(() -> {
+                    if (forKey.equals(key)) play(had);
+                });
+                return true;
+            }
+            if (had == null || !had.isEmpty()) {
+                try {
+                    java.io.File f = SpotifyCanvas.find(title, artist, null, songMs, cacheDir);
+                    CanvasCache.put(spKey, f == null ? null : f.getAbsolutePath());
+                    if (f != null) {
+                        String path = f.getAbsolutePath();
+                        Log.i(TAG, "canvas: spotify canvas in " + (System.currentTimeMillis() - lookupStart) + " ms");
+                        main.post(() -> {
+                            if (forKey.equals(key)) play(path);
+                        });
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    // a failed lookup is not saved as a miss: asked again next time
+                    Log.w(TAG, "canvas spotify: failed: " + t);
+                }
+                if (!forKey.equals(key)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Apple's animated cover (§3), or the test link. True: it plays. */
+    private static boolean lookApple(Look l) {
+        String title = l.title, artist = l.artist, forKey = l.forKey, vid = l.vid, songKey = l.songKey, fixed = l.fixed;
+        long songMs = l.songMs;
+        int artPx = l.artPx;
+        boolean tall = l.tall, video = true, spotify = true, apple = true;
+        if (fixed.isEmpty()) {
+            String saidApple = CanvasCache.lookup(songKey);
+            final String hadApple = saidApple != null && !saidApple.isEmpty() && !saidApple.contains("://")
+                    && new java.io.File(saidApple).length() == 0 ? null : saidApple;
+            if (hadApple != null) {
+                Log.i(TAG, "canvas: saved lookup: " + (hadApple.isEmpty() ? "no clip" : "clip " + new java.io.File(hadApple).getName()));
+                if (!hadApple.isEmpty()) main.post(() -> {
+                    if (forKey.equals(key)) play(hadApple);
+                });
+                return !hadApple.isEmpty();
+            }
+        }
+        String url = null;
+        String alt = null;
+        boolean failed = false;
+        try {
+            if (!fixed.isEmpty()) url = fixed;
+            else if (apple) {
+                String[] found = AppleCanvas.find(title, artist, null, tall);
+                if (found != null) {
+                    url = found[0];
+                    alt = found[1];
+                }
+            }
+        } catch (Throwable t) {
+            failed = true;
+            Log.w(TAG, "canvas: lookup failed: " + t);
+        }
+        if (url != null && url.contains(".m3u8") && forKey.equals(key)) {
+            // the clip for the art's shape, else the other shape's (Prism's tall alternate)
+            java.io.File f = null;
+            for (String u : new String[]{url, alt}) {
+                if (u == null || f != null) continue;
+                try {
+                    f = HlsClip.fetch(u, cacheDir, artPx, CanvasSettings.appleCap(l.p));
+                } catch (Throwable t) {
+                    Log.w(TAG, "canvas: clip download failed: " + t);
+                }
+            }
+            url = f == null ? null : f.getAbsolutePath();
+            // no file is a failed download, not "no clip": not saved as a miss for 24 h
+            if (f == null) failed = true;
+        }
+        if (!failed && fixed.isEmpty() && apple && (url == null || !url.contains(".m3u8"))) CanvasCache.put(songKey, url);
+        final String found = url;
+        Log.i(TAG, "canvas: lookup " + (found == null ? "none" : "hit") + " in "
+                + (System.currentTimeMillis() - lookupStart) + " ms");
+        if (found != null) main.post(() -> {
+            if (forKey.equals(key)) play(found);
+        });
+        return found != null;
     }
 
     private static void play(String url) {

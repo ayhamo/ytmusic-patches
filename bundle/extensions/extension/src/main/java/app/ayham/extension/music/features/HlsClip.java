@@ -35,11 +35,22 @@ final class HlsClip {
 
     /** @param trim false for the downloaded songs' clips (kept in the app's files, no size cap). */
     static File fetch(String masterUrl, File cacheDir, int artPx, boolean trim) throws Exception {
+        return fetch(masterUrl, cacheDir, artPx, trim, null, false);
+    }
+
+    /** Apple's animated cover at the listener's quality (canvas.md §13 rule 5): cap null is Original. */
+    static File fetch(String masterUrl, File cacheDir, int artPx, Integer cap) throws Exception {
+        return fetch(masterUrl, cacheDir, artPx, true, cap, true);
+    }
+
+    private static File fetch(String masterUrl, File cacheDir, int artPx, boolean trim, Integer cap, boolean byCap) throws Exception {
         File dir = new File(cacheDir, "canvas");
         if (!dir.isDirectory() && !dir.mkdirs()) return null;
-        // the art's size picks the variant: the smallest that still covers it, 360p to 1080p
+        // the art's size picks the variant: the smallest that still covers it, 360p to 1080p; or the
+        // listener's quality
         int want = artPx < 480 ? 360 : artPx < 900 ? 720 : MAX_HEIGHT;
-        File out = new File(dir, Integer.toHexString(masterUrl.hashCode()) + "-" + want + ".mp4");
+        String tag = byCap ? "q" + (cap == null ? "orig" : cap) : String.valueOf(want);
+        File out = new File(dir, Integer.toHexString(masterUrl.hashCode()) + "-" + tag + ".mp4");
         if (out.length() > 0) {
             out.setLastModified(System.currentTimeMillis());
             Log.i(TAG, "canvas: clip from cache " + out.length() / 1024 + " KB");
@@ -47,7 +58,7 @@ final class HlsClip {
         }
         long start = System.currentTimeMillis();
         String master = text(masterUrl);
-        String media = master.contains("#EXT-X-STREAM-INF") ? pickVariant(masterUrl, master, want) : masterUrl;
+        String media = !master.contains("#EXT-X-STREAM-INF") ? masterUrl : byCap ? pickByCap(masterUrl, master, cap) : pickVariant(masterUrl, master, want);
         if (media == null) return null;
         String playlist = media.equals(masterUrl) ? master : text(media);
 
@@ -150,6 +161,29 @@ final class HlsClip {
         String pick = best != null ? best : fallback;
         Log.i(TAG, "canvas: variant " + pick + (best == null ? " (no avc1, lowest bandwidth)" : ""));
         return pick == null ? null : resolve(base, pick);
+    }
+
+    /**
+     * canvas.md §13 rule 5: the H.264 variant with the most pixels whose shorter side is at most the
+     * cap (ties: the higher bandwidth), else the fewest pixels; only .m3u8 variants count.
+     */
+    private static String pickByCap(String base, String master, Integer cap) {
+        String[] lines = master.split("\n");
+        java.util.List<long[]> vs = new java.util.ArrayList<>();
+        java.util.List<String> uris = new java.util.ArrayList<>();
+        for (int i = 0; i < lines.length - 1; i++) {
+            if (!lines[i].startsWith("#EXT-X-STREAM-INF:")) continue;
+            String attrs = lines[i], uri = lines[i + 1].trim();
+            if (!attrs.toLowerCase(Locale.ROOT).contains("avc1") || !uri.contains(".m3u8")) continue;
+            Matcher res = Pattern.compile("RESOLUTION=(\\d+)x(\\d+)").matcher(attrs);
+            if (!res.find()) continue;
+            vs.add(new long[]{Long.parseLong(res.group(1)), Long.parseLong(res.group(2)), longAttr(attrs, "BANDWIDTH")});
+            uris.add(uri);
+        }
+        int i = app.ayham.extension.music.features.CanvasSettings.pickVariant(vs.toArray(new long[0][]), cap);
+        if (i < 0) return pickVariant(base, master, MAX_HEIGHT);
+        Log.i(TAG, "canvas: variant " + vs.get(i)[0] + "x" + vs.get(i)[1] + " for the quality " + (cap == null ? "Original" : cap + "p"));
+        return resolve(base, uris.get(i));
     }
 
     private static long longAttr(String attrs, String name) {

@@ -114,6 +114,13 @@ public final class Features {
                         p.setProperty(key, on ? "1" : "0");
                 }
             }
+            // canvas.md §13: the sources' order and switches, mobile data, the qualities and the mode
+            p.setProperty("canvasOrder", sp.getString(CanvasSettings.KEY_ORDER, ""));
+            p.setProperty("canvasOn", sp.getString(CanvasSettings.KEY_ON, ""));
+            p.setProperty("canvasMobile", sp.getBoolean(CanvasSettings.KEY_MOBILE, false) ? "1" : "0");
+            p.setProperty("canvasAppleQuality", sp.getString(CanvasSettings.KEY_APPLE_QUALITY, "720"));
+            p.setProperty("canvasYtQuality", sp.getString(CanvasSettings.KEY_YT_QUALITY, "480"));
+            p.setProperty("canvasYtMode", sp.getString(CanvasSettings.KEY_YT_MODE, "clips"));
         } catch (Exception e) {
             Log.w(TAG, "settings read failed", e);
         }

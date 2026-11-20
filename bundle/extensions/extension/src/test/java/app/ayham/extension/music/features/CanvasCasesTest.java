@@ -454,6 +454,29 @@ public class CanvasCasesTest {
                 check(g, c, near(got, num(want), 1e-5), got);
                 return;
             }
+            case "settings": {
+                Map<String, Object> in = map(c.get("input"));
+                Object got;
+                switch (str(c.get("kind"))) {
+                    case "settingsOrder":
+                        got = CanvasSettings.parseOrder(str(in.get("stored")));
+                        break;
+                    case "settingsEnabled":
+                        got = CanvasSettings.parseEnabled(str(in.get("stored")));
+                        break;
+                    default: {
+                        List<Object> vs = list(in.get("variants"));
+                        long[][] v = new long[vs.size()][];
+                        for (int i = 0; i < v.length; i++) {
+                            List<Object> x = list(vs.get(i));
+                            v[i] = new long[]{lng(x.get(0)), lng(x.get(1)), lng(x.get(2))};
+                        }
+                        got = (long) CanvasSettings.pickVariant(v, in.get("cap") == null ? null : (int) lng(in.get("cap")));
+                    }
+                }
+                check(g, c, Json.write(got).equals(Json.write(want)), Json.write(got));
+                return;
+            }
             default:
                 check(g, c, false, "unknown group");
         }

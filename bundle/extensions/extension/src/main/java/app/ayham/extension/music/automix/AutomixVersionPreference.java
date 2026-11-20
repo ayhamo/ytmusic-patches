@@ -41,6 +41,16 @@ public class AutomixVersionPreference extends ListPreference {
         } else if (app.ayham.extension.music.addons.AddonSettings.KEY_SLACK.equals(key)) {
             setEntries(new CharSequence[]{"Exact length only", "Up to 2 s apart", "Up to 5 s apart (default)", "Up to 10 s apart"});
             setEntryValues(new CharSequence[]{"0", "2", "5", "10"});
+        } else if (app.ayham.extension.music.features.CanvasSettings.KEY_APPLE_QUALITY.equals(key)
+                || "ayham_artist_video_quality".equals(key)) {
+            setEntries(new CharSequence[]{"360p", "720p (default)", "1080p", "Original"});
+            setEntryValues(new CharSequence[]{"360", "720", "1080", "orig"});
+        } else if (app.ayham.extension.music.features.CanvasSettings.KEY_YT_QUALITY.equals(key)) {
+            setEntries(new CharSequence[]{"Auto (sized for the art)", "2160p", "1440p", "1080p", "720p", "480p (default)"});
+            setEntryValues(new CharSequence[]{"auto", "2160", "1440", "1080", "720", "480"});
+        } else if (app.ayham.extension.music.features.CanvasSettings.KEY_YT_MODE.equals(key)) {
+            setEntries(new CharSequence[]{"Clips (the song's best part, looped)", "Full video (the whole music video, muted)"});
+            setEntryValues(new CharSequence[]{"clips", "full"});
         } else if (Automix.KEY_BARS.equals(key)) {
             setEntries(new CharSequence[]{"Auto (picks per song, like BitChord phone)", "Up to 4 bars", "Up to 8 bars",
                     "Up to 16 bars (BitChord web default)", "Up to 32 bars"});

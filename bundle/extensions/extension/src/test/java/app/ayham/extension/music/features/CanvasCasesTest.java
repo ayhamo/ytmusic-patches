@@ -477,6 +477,42 @@ public class CanvasCasesTest {
                 check(g, c, Json.write(got).equals(Json.write(want)), Json.write(got));
                 return;
             }
+            case "songMenu": {
+                Map<String, Object> in = map(c.get("input"));
+                boolean[] r = CanvasChoices.rows((Boolean) in.get("canvasOn"), (Boolean) in.get("useVideos"), (Boolean) in.get("isSong"),
+                        (Boolean) in.get("hasLoop"), (Boolean) in.get("loopOff"), (Boolean) in.get("loopShows"));
+                Map<String, Object> got = new java.util.LinkedHashMap<>();
+                got.put("canvasSwitch", r[0]);
+                got.put("pickVideo", r[1]);
+                got.put("pickPart", r[2]);
+                got.put("notThisVideo", r[3]);
+                check(g, c, Json.write(got).equals(Json.write(want)), Json.write(got));
+                return;
+            }
+            case "pickPart": {
+                Map<String, Object> in = map(c.get("input"));
+                List<Object> os = list(in.get("others"));
+                long[] o = new long[os.size()];
+                for (int i = 0; i < o.length; i++) o[i] = lng(os.get(i));
+                long[] r = CanvasChoices.pickPart(lng(in.get("startMs")), o, lng(in.get("pickMs")));
+                Map<String, Object> w = map(want);
+                List<Object> wo = list(w.get("others"));
+                boolean ok = r[0] == lng(w.get("startMs")) && r.length == wo.size() + 1;
+                for (int i = 0; ok && i < wo.size(); i++) ok = r[i + 1] == lng(wo.get(i));
+                check(g, c, ok, java.util.Arrays.toString(r));
+                return;
+            }
+            case "videoChoices": {
+                Map<String, Object> in = map(c.get("input"));
+                List<String> found = new ArrayList<>(), rej = new ArrayList<>();
+                for (Object x : list(in.get("found"))) found.add(str(x));
+                for (Object x : list(in.get("rejected"))) rej.add(str(x));
+                List<String> got = CanvasChoices.videoChoices(str(in.get("pairing")), found, new java.util.HashSet<>(rej));
+                List<String> w = new ArrayList<>();
+                for (Object x : list(want)) w.add(str(x));
+                check(g, c, got.equals(w), got);
+                return;
+            }
             case "snap": {
                 Map<String, Object> in = map(c.get("input"));
                 List<Object> ls = list(in.get("lineStarts"));

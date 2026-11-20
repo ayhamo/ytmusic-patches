@@ -21,7 +21,9 @@ final class LyricTiming {
     /** What Morphe has for the song. */
     static final int UNKNOWN = -1, NONE = 0, LOADING = 1, MISSING = 2, PLAIN = 3, TIMED = 4;
     /** An empty line shorter than this is a breath, not an instrumental: the line before stays up. */
-    private static final long SHORT_GAP_MS = 2500;
+    /** lyrics.md §6.1: a gap is this long or more without a line (Metrolist's LYRICS_GAP_MIN_MS). */
+    static final long GAP_MIN_MS = 7000;
+    private static final long SHORT_GAP_MS = GAP_MIN_MS;
 
     private static boolean ready, broken;
     private static long brokenAt;
@@ -135,6 +137,10 @@ final class LyricTiming {
      * behind its running estimate, and the fill would step back. A seek lets go of it.
      */
     private static long position(Object manager) throws Exception {
+        return lyricsPos(rawPosition(manager), offsetFor(manager));
+    }
+
+    private static long rawPosition(Object manager) throws Exception {
         long deck = deckPos(manager);
         if (deck >= 0) return deck;
         long pos = (Long) positionMs.invoke(manager);
@@ -243,11 +249,9 @@ final class LyricTiming {
             long pos = position(manager);
             int at = at(pos);
             int phase;
-            if (pos < starts[first]) phase = 1;
-            else if (at >= 0 && texts[at].isEmpty()) {
-                int v = nextVocal(at);
-                phase = v < 0 || starts[v] - starts[at] >= SHORT_GAP_MS ? 2 : 0;
-            } else return 0;
+            long[] g = gapAt(pos);
+            if (g == null) return 0;
+            phase = g[0] == 0 && pos < starts[first] ? 1 : 2;
             int v = nextVocal(Math.max(at, 0));
             String want = letters(shown == null ? "" : shown);
             if (phase != 0 && v >= 0 && !want.isEmpty() && texts[v].equals(want)) return 0;
@@ -315,6 +319,124 @@ final class LyricTiming {
         return spanEnd < 0 ? -1 : spanEnd - lastPos;
     }
 
+    /** The strip's lead (§2.4), none with "lyrics by real timing" on (§2.6). */
+    static long lead() {
+        return Features.flag("lyricsRealTiming", false) ? 0 : LEAD_MS;
+    }
+
+    // ---- lyrics.md §2.4, §3, §6 as pure functions (spec/lyrics/lyrics-cases.json) ----
+
+    /** §2.4, Metrolist's findCurrentLineIndex: line i is current while the next line's start is at or after pos + 100. */
+    static int currentLine(long[] starts, long pos) {
+        for (int i = 0; i < starts.length; i++) if (starts[i] >= pos + 100) return i - 1;
+        return starts.length - 1;
+    }
+
+    /** §3.1: the song's offset and the global one, added. */
+    static long offset(long song, long global) {
+        return song + global;
+    }
+
+    /** §3.2: the lyrics position: a positive offset shows the lyrics earlier. */
+    static long lyricsPos(long player, long offset) {
+        return player + offset;
+    }
+
+    /** §3.2: a seek by lyrics goes the other way, never below 0. */
+    static long seekFor(long lyricTime, long offset) {
+        return Math.max(0, lyricTime - offset);
+    }
+
+    /**
+     * §6.1: the gaps of 7000 or more without a line, {start, end}: the intro from 0 to the first
+     * line's start - 800 when it starts at 7000 or later; between lines from the latest end so far
+     * + 310 to the next start - 800.
+     */
+    static List<long[]> gaps(long[] starts, long[] ends) {
+        List<long[]> out = new java.util.ArrayList<>();
+        if (starts.length == 0) return out;
+        if (starts[0] >= GAP_MIN_MS) out.add(new long[]{0, starts[0] - 800});
+        long latest = ends[0];
+        for (int i = 1; i < starts.length; i++) {
+            if (starts[i] - latest >= GAP_MIN_MS) out.add(new long[]{latest + 310, starts[i] - 800});
+            latest = Math.max(latest, ends[i]);
+        }
+        return out;
+    }
+
+    /** §6.2: the gap shown at [pos] (pos + 190 inside it), or null. */
+    private static long[] gapAt(long pos) {
+        if (gapList == null) return null;
+        for (long[] g : gapList) if (pos + 190 >= g[0] && pos + 190 < g[1]) return g;
+        return null;
+    }
+
+    /** The gaps of the lyrics [lines] read last: the sung lines, each ending where a later line starts. */
+    private static List<long[]> gapList;
+
+    private static void readGaps() {
+        java.util.List<Long> s = new java.util.ArrayList<>(), e = new java.util.ArrayList<>();
+        for (int i = 0; i < starts.length; i++) {
+            if (texts[i].isEmpty()) continue;
+            int j = i + 1;
+            while (j < starts.length && starts[j] <= starts[i]) j++;
+            s.add(starts[i]);
+            e.add(j < starts.length ? starts[j] : starts[i]);
+        }
+        long[] ss = new long[s.size()], ee = new long[s.size()];
+        for (int i = 0; i < ss.length; i++) {
+            ss[i] = s.get(i);
+            ee[i] = e.get(i);
+        }
+        gapList = gaps(ss, ee);
+    }
+
+    // ---- §3: the offsets, kept: the global one and one per song (by video id) ----
+
+    private static android.content.SharedPreferences offsets() {
+        android.content.Context c = Features.appContext;
+        return c == null ? null : c.getSharedPreferences("ayham_lyrics_offset", android.content.Context.MODE_PRIVATE);
+    }
+
+    static long globalOffset() {
+        android.content.SharedPreferences p = offsets();
+        return p == null ? 0 : p.getLong("global", 0);
+    }
+
+    static long songOffset(String videoId) {
+        android.content.SharedPreferences p = offsets();
+        return p == null || videoId == null ? 0 : p.getLong("song." + videoId, 0);
+    }
+
+    /** Saved as it is changed (no Save step); 0 removes the song's. */
+    static void setOffset(String videoId, long ms) {
+        android.content.SharedPreferences p = offsets();
+        if (p == null) return;
+        String k = videoId == null ? "global" : "song." + videoId;
+        if (ms == 0) p.edit().remove(k).apply();
+        else p.edit().putLong(k, ms).apply();
+    }
+
+    /** The video id Morphe's lyrics are for, or null. */
+    static String lyricsId() {
+        try {
+            init();
+            Object v = lyricsVideo == null ? null : lyricsVideo.get(getInstance.invoke(null));
+            return v == null ? null : String.valueOf(v);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static long offsetFor(Object manager) {
+        try {
+            Object v = lyricsVideo == null ? null : lyricsVideo.get(manager);
+            return offset(songOffset(v == null ? null : String.valueOf(v)), globalOffset());
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
     private static void lines(Object lyr) throws Exception {
         if (lyr == linesFor) return;
         List<?> ls = (List<?>) lines.invoke(lyr);
@@ -328,6 +450,7 @@ final class LyricTiming {
         starts = s;
         texts = t;
         linesFor = lyr;
+        readGaps();
     }
 
     /** How long past a line's end Morphe may still name it before the line at the playhead is shown. */
@@ -368,7 +491,11 @@ final class LyricTiming {
             // player). In a fast song that is half the line still being sung, and the fill jumped to
             // the next line (Midnight Sun): the line being sung stays until the next one's own lead.
             // (+40 ms: the strip's wake-up for the next line reads a clock a few ms behind its own)
-            if (aheadOf(starts, texts, due, want, pos, LEAD_MS + 40) >= 0) return held(due);
+            // §3: with an offset Morphe's own line is on its clock, not ours: the line due is ours
+            if (offsetFor(manager) != 0) return held(due);
+            if (aheadOf(starts, texts, due, want, pos, lead() + 40) >= 0) return held(due);
+            // an empty line that is not a gap (§6.1): the line before it stays up
+            if (want.isEmpty() && due >= 0 && gapAt(pos) == null) return held(due);
             // the next sung line at least [LEAD_MS] early, so its slide ends as it is sung
             boolean early = due >= 0 && starts[due] > pos && !texts[due].equals(want);
             if (stale == null && !early && !(shown.equals(forShown) && overdue(pos, spanEnd))) return shown;
@@ -416,11 +543,11 @@ final class LyricTiming {
      * The word fill runs this far ahead of the voice: a word sweeps over its own sung time, so at
      * the playhead it is fully lit only as it ends, and reads late (the user's ear on the phone).
      */
-    static final long FILL_LEAD_MS = 150;
+    static final long FILL_LEAD_MS = 0;
 
     /** The line due at [pos] (see {@link #dueLine}), or -1. */
     private static int due(long pos) {
-        return dueLine(starts, texts, pos, LEAD_MS);
+        return dueLine(starts, texts, pos, lead());
     }
 
     /**
@@ -444,7 +571,7 @@ final class LyricTiming {
             long pos = position(manager);
             int v = 0;
             while (v < starts.length && (starts[v] <= pos || texts[v].isEmpty())) v++;
-            long ms = v >= starts.length ? -1 : starts[v] - LEAD_MS - pos;
+            long ms = v >= starts.length ? -1 : starts[v] - lead() - pos;
             return ms > 0 ? ms : -1;
         } catch (Throwable t) {
             return -1;

@@ -61,6 +61,11 @@ public final class Features {
         Log.i(TAG, "switch " + key + " -> " + on + " (from the player)");
     }
 
+    /** A Morphe switch with its own default. */
+    static boolean flag(String key, boolean def) {
+        return appContext == null ? def : appContext.getSharedPreferences("morphe_prefs", Context.MODE_PRIVATE).getBoolean("ayham_" + key, def);
+    }
+
     static boolean switchOn(String key) {
         return appContext != null && appContext.getSharedPreferences("morphe_prefs", Context.MODE_PRIVATE).getBoolean("ayham_" + key, true);
     }

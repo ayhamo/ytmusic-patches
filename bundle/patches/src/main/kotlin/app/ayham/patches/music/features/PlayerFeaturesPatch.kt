@@ -134,6 +134,7 @@ val playerFeaturesPatch = patch(
                         Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Spotify canvas, or a loop of its music video). Off: neither is looked up. Also in the player's … menu."),
                         Triple("ayham_bestPartButton", "Best part button", "A button under the seek bar jumps to the song's best part (the part people replay most, or the one you set by holding it) early in the song. Off: only the mark on the bar and the menu's Play from the best part stay."),
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
+                        Triple("ayham_lyricsRealTiming", "Lyrics by real timing", "The lyric line changes exactly on each line's start, with no lead for its slide. The lyrics' timing (this song's and all songs') is in the player's … menu."),
                         Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
                         Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),
                         Triple("ayham_native", "Download popup", "Every download asks: the lossless file from your addons or YouTube's, and whether its lyrics, animated art and canvas are saved for offline. Off: YouTube's download only. Smart downloads are always YouTube's alone."),
@@ -143,7 +144,7 @@ val playerFeaturesPatch = patch(
                             setAttribute("android:key", key)
                             setAttribute("android:title", title)
                             setAttribute("android:summary", summary)
-                            setAttribute("android:defaultValue", if (key == "ayham_eq") "false" else "true")
+                            setAttribute("android:defaultValue", if (key == "ayham_eq" || key == "ayham_lyricsRealTiming") "false" else "true")
                         }
                         // canvas.md §13: the sources in the order tried, mobile data, the qualities and the mode
                         if (key == "ayham_canvasSpotify") {

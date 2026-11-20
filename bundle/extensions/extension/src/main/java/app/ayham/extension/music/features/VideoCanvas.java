@@ -56,9 +56,15 @@ final class VideoCanvas {
      */
     static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo,
                                   int height, boolean full) throws Exception {
+        return clip(songId, songTitle, artist, songMs, dir, artPx, noVideo, height, full, null);
+    }
+
+    /** [ch]: the listener's choices for the song (canvas.md §15), or null. */
+    static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo,
+                                  int height, boolean full, CanvasChoices.Song ch) throws Exception {
         long t0 = System.currentTimeMillis();
         String[] why = new String[1];
-        String[] video = gatedVideo(songId, songTitle, artist, Math.round(songMs / 1000.0), why);
+        String[] video = gatedVideo(songId, songTitle, artist, Math.round(songMs / 1000.0), why, ch);
         if (video == null) {
             // a video that can't be played now may be another time; the rest are kept as "none"
             if (!ClipGate.RESTRICTED.equals(why[0])) noVideo[0] = true;
@@ -82,7 +88,8 @@ final class VideoCanvas {
         double dur = player.optJSONObject("videoDetails") == null ? 0 : player.getJSONObject("videoDetails").optDouble("lengthSeconds", 0);
         File canvas = new File(dir, "canvas");
         if (!canvas.isDirectory() && !canvas.mkdirs()) return null;
-        File out = new File(canvas, "mv_" + songId + (height > 0 ? "_q" + height : "") + (full ? "_full" : "") + ".mp4");
+        File out = new File(canvas, "mv_" + songId + (height > 0 ? "_q" + height : "") + (full ? "_full" : "")
+                + (ch == null ? "" : ch.keySuffix()) + ".mp4");
 
         // Prism's first look: the storyboard (bars, a still upload, the best window near the peak, the crop)
         long length = Math.round(dur * 1000);
@@ -132,6 +139,17 @@ final class VideoCanvas {
             Log.i(TAG, String.format(Locale.ROOT, "canvas video: storyboard %d frames every %d ms, bars %.2f/%.2f/%.2f/%.2f, crop %.2f, other parts %s",
                     b.frames.size(), b.interval, loop.bars[0], loop.bars[1], loop.bars[2], loop.bars[3], loop.cropX, loop.others));
         }
+        // §15 rule 4: the listener's part, in the same video, never moved by a new lookup
+        boolean picked = ch != null && ch.partMs >= 0 && video[0].equals(ch.partVideo);
+        long[] po = new long[loop.others.size()];
+        for (int i = 0; i < po.length; i++) po[i] = loop.others.get(i);
+        long[] parts = picked ? CanvasChoices.pickPart(loop.startMs, po, ch.partMs) : null;
+        if (picked) {
+            Log.i(TAG, "canvas video: the listener's part at " + ch.partMs / 1000.0 + " s");
+            loop.startMs = ch.partMs;
+            loop.others = new ArrayList<>();
+            for (int i = 1; i < parts.length; i++) loop.others.add(parts[i]);
+        }
         float[] bars = loop.bars;
         float crop = loop.cropX;
         double start = Math.max(0, Math.min(loop.startMs / 1000.0, length / 1000.0 - CLIP_SEC));
@@ -154,7 +172,8 @@ final class VideoCanvas {
                     end = e;
                     break;
                 }
-                Long next = loop.others.isEmpty() ? null : loop.others.get(0);
+                Long next = loop.others.isEmpty() || picked ? null : loop.others.get(0);
+                if (picked) break; // the listener's part is cut as it is
                 if (e == 0 || attempt == 1 || next == null) {
                     if (e < 0) {
                         noVideo[0] = true;
@@ -172,11 +191,36 @@ final class VideoCanvas {
         try (java.io.FileWriter w = new java.io.FileWriter(new File(canvas, out.getName().substring(0, out.getName().length() - 4) + ".crop"))) {
             w.write(String.format(Locale.ROOT, "%.3f %.3f %.3f %.3f %.3f", crop, bars[0], bars[1], bars[2], bars[3]));
         }
+        // §15: what the song menu offers about this loop: its video, its part and the other parts
+        try (java.io.FileWriter w = new java.io.FileWriter(infoFile(out))) {
+            StringBuilder o = new StringBuilder();
+            for (long x : loop.others) if (Math.abs(x - Math.round(start * 1000)) >= 15_000 && o.length() < 200) o.append(o.length() > 0 ? "," : "").append(x);
+            w.write(video[0] + "\t" + Math.round(start * 1000) + "\t" + o + "\t" + video[1].replace('\t', ' ').replace('\n', ' '));
+        }
         HlsClip.trim(canvas, out);
         Log.i(TAG, String.format(Locale.ROOT, "canvas video: %d KB loop %.1f-%.1f s ready %d ms after the lookup",
                 out.length() / 1024, from, end, System.currentTimeMillis() - t0));
         return out;
     }
+
+    private static File infoFile(File clip) {
+        String n = clip.getAbsolutePath();
+        return new File(n.substring(0, n.length() - 4) + ".info");
+    }
+
+    /** A video loop's info (§15): {videoId, startMs, others "a,b", title}, or null. */
+    static String[] infoOf(String clipPath) {
+        if (clipPath == null || !clipPath.endsWith(".mp4")) return null;
+        try {
+            String[] p = new String(java.nio.file.Files.readAllBytes(infoFile(new File(clipPath)).toPath()), java.nio.charset.StandardCharsets.UTF_8).split("\t", -1);
+            return p.length >= 4 ? p : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Songs the gate found are not songs (episodes, uploads, live): the song menu offers nothing for them. */
+    static final java.util.Set<String> notSongs = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
     /** The crop saved with a video loop: {cropX, bars left, top, right, bottom}, or null. */
     static float[] cropOf(String clipPath) {
@@ -311,6 +355,11 @@ final class VideoCanvas {
      * looked up.
      */
     static String[] gatedVideo(String songId, String title, String artist, long durationSec, String[] why) throws Exception {
+        return gatedVideo(songId, title, artist, durationSec, why, null);
+    }
+
+    static String[] gatedVideo(String songId, String title, String artist, long durationSec, String[] why, CanvasChoices.Song ch) throws Exception {
+        final java.util.Set<String> rejected = ch == null ? java.util.Collections.emptySet() : ch.rejected;
         String[] artists = artists(artist);
         if (title == null || title.trim().isEmpty() || artists.length == 0) {
             why[0] = ClipGate.NO_VIDEO;
@@ -325,6 +374,7 @@ final class VideoCanvas {
         } catch (Throwable t) {
             Log.w(TAG, "canvas video: the song's type not read: " + t);
         }
+        if (notASong) notSongs.add(songId);
         final java.util.Map<String, String> titles = new java.util.HashMap<>();
         final List<List<String[]>> searches = new ArrayList<>();
         String[] qs = {title + " " + artists[0], title + " " + artists[0] + " official video"};
@@ -339,13 +389,20 @@ final class VideoCanvas {
                     Log.w(TAG, "canvas video: search failed: " + t);
                 }
                 for (String[] v : found) titles.put(v[0], v[1]);
+                // §15 rule 8: the turned-away videos are left out of what the search found
+                found.removeIf(v -> rejected.contains(v[0]));
                 searches.add(found);
             }
             return searches.get(i);
         };
         boolean own = false;
         String[] first = null;
-        if (!notASong) {
+        if (!notASong && ch != null && ch.video != null && !rejected.contains(ch.video)) {
+            // §15 rule 6: the listener's video, asked first and as it is (the song's own)
+            first = new String[]{ch.video, ""};
+            own = true;
+            Log.i(TAG, "canvas video: the listener's video " + ch.video);
+        } else if (!notASong) {
             // rule 1: the first search, then "official video"
             first = pick(title, artists, durationSec, search.apply(0), false);
             if (first == null) first = pick(title, artists, durationSec, search.apply(1), false);
@@ -423,6 +480,17 @@ final class VideoCanvas {
     }
 
     private static final String MUSIC_PLAYER = "https://music.youtube.com/youtubei/v1/player?prettyPrint=false";
+
+    /** §15 rule 5: what a video search for `title artist` finds, in its order: {videoId, title, channel, length}. */
+    static List<String[]> searchVideos(String title, String artist) throws Exception {
+        String[] artists = artists(artist);
+        List<String[]> found = new ArrayList<>();
+        if (title == null || title.trim().isEmpty()) return found;
+        JSONObject body = new JSONObject().put("query", title + (artists.length > 0 ? " " + artists[0] : "")).put("params", VIDEOS).put("context", new JSONObject().put("client",
+                new JSONObject().put("clientName", "WEB_REMIX").put("clientVersion", "1.20251101.01.00").put("hl", "en").put("gl", "US")));
+        results(post(MUSIC_SEARCH, body, "Mozilla/5.0", "https://music.youtube.com"), found);
+        return found;
+    }
 
     static String[] findVideo(String title, String artist, long durationSec) throws Exception {
         String[] artists = artists(artist);

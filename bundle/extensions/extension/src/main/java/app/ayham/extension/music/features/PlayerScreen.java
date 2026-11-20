@@ -1848,6 +1848,9 @@ final class PlayerScreen {
         boolean onAddon = song != null && app.ayham.extension.music.automix.AddonDirect.inUse(song);
         if (song != null && app.ayham.extension.music.addons.AddonSettings.on())
             m.getMenu().add(0, 7, 1, onAddon ? "Use YouTube quality" : "Upgrade quality");
+        // canvas.md §15: one song's canvas
+        if (CanvasSongMenu.offers()) m.getMenu().add(0, 8, 1, "This song's canvas");
+        if (Features.switchOn("lyricLine")) m.getMenu().add(0, 9, 1, "Lyrics timing");
         m.getMenu().add(0, 3, 2, "More options");
         m.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
@@ -1862,6 +1865,12 @@ final class PlayerScreen {
                     return true;
                 case 4:
                     MixOverview.show(a);
+                    return true;
+                case 8:
+                    CanvasSongMenu.show(a);
+                    return true;
+                case 9:
+                    LyricsOffsetDialog.show(a);
                     return true;
                 case 5:
                     BestPart.play(a);

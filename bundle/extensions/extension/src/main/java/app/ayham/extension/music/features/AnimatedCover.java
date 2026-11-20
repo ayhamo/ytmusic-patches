@@ -502,14 +502,20 @@ final class AnimatedCover {
             l.songKey = songKey;
             l.fixed = fixed;
             l.p = p;
+            l.ch = vid == null ? new CanvasChoices.Song() : CanvasChoices.get(vid);
+            current = new String[]{title, artist, vid};
             if (!fixed.isEmpty()) {
                 lookApple(l);
                 return;
             }
             // canvas.md §13: the sources strictly in the listener's order, each under its switches
-            for (String src : CanvasSettings.order(p)) {
+            // §15: the listener's video (rule 6) or Use (rule 7) first; a source switched off for the song skipped
+            java.util.List<String> order = new java.util.ArrayList<>(CanvasSettings.order(p));
+            String first = l.ch.video != null ? CanvasSettings.VIDEO : l.ch.use;
+            if (first != null && order.remove(first)) order.add(0, first);
+            for (String src : order) {
                 if (!forKey.equals(key)) return;
-                if (!CanvasSettings.on(p, src)) continue;
+                if (!CanvasSettings.on(p, src) || l.ch.off.contains(src)) continue;
                 boolean stop = CanvasSettings.VIDEO.equals(src) ? lookVideo(l) : CanvasSettings.SPOTIFY.equals(src) ? lookSpotify(l) : lookApple(l);
                 if (stop) return;
             }
@@ -524,6 +530,42 @@ final class AnimatedCover {
         int artPx;
         boolean tall;
         Properties p;
+        CanvasChoices.Song ch;
+    }
+
+    static java.io.File cacheDir() {
+        return cacheDir;
+    }
+
+    /** The song the canvas looked up last: {title, artist, videoId or null}. */
+    static volatile String[] current;
+
+    /** The clip on the screen now: its path (null none) and its source (CanvasSettings.VIDEO, SPOTIFY, APPLE). */
+    static String showing() {
+        return player != null ? playingUrl : null;
+    }
+
+    static String sourceOf(String path) {
+        if (path == null) return null;
+        String n = new java.io.File(path).getName();
+        return n.startsWith("mv_") ? CanvasSettings.VIDEO : n.startsWith("sp-") ? CanvasSettings.SPOTIFY : CanvasSettings.APPLE;
+    }
+
+    /** §15: the song's canvas looked at again at once (as a settings change does). */
+    static void relook() {
+        main.post(() -> {
+            key = "";
+            lastTextCheck = 0;
+        });
+    }
+
+    /** The cache key of the song's music video loop under the settings and its choices. */
+    static String loopKey(String vid, CanvasChoices.Song ch) {
+        return CanvasCache.videoKey(vid) + CanvasSettings.videoKeySuffix(Features.props()) + ch.keySuffix();
+    }
+
+    static String appleKeyNow(String title, String artist) {
+        return CanvasCache.appleKey(title, artist, FullArt.on()) + CanvasSettings.appleKeySuffix(Features.props());
     }
 
     /** The music video's loop (canvas.md §5-7). True: stop here (it plays, or the song moved on). */
@@ -533,7 +575,7 @@ final class AnimatedCover {
         int artPx = l.artPx;
         boolean tall = l.tall, video = true, spotify = true, apple = true;
         if (fixed.isEmpty() && video && vid != null) {
-            String mvKey = CanvasCache.videoKey(vid) + CanvasSettings.videoKeySuffix(l.p), saidMv = CanvasCache.lookup(mvKey);
+            String mvKey = CanvasCache.videoKey(vid) + CanvasSettings.videoKeySuffix(l.p) + l.ch.keySuffix(), saidMv = CanvasCache.lookup(mvKey);
             // a saved clip the cache trim has since deleted is cut again
             final String had = saidMv != null && !saidMv.isEmpty() && new java.io.File(saidMv).length() == 0 ? null : saidMv;
             if (had != null && !had.isEmpty()) {
@@ -561,7 +603,7 @@ final class AnimatedCover {
                             });
                             return true;
                         }
-                        f = VideoCanvas.clip(vid, title, artist, songMs, cacheDir, artPx, none, CanvasSettings.ytHeight(l.p), CanvasSettings.fullVideo(l.p));
+                        f = VideoCanvas.clip(vid, title, artist, songMs, cacheDir, artPx, none, CanvasSettings.ytHeight(l.p), CanvasSettings.fullVideo(l.p), l.ch);
                     }
                     // still this song: a clip cut while the queue moved on is not saved under its id
                     if (!vid.equals(app.ayham.extension.music.automix.Automix.currentIdFor(title))) {

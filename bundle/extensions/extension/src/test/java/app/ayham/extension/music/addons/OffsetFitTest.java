@@ -305,4 +305,50 @@ public class OffsetFitTest {
         OffsetFit.Result r = OffsetFit.guided(ytSide(), OffsetFit.Side.of(cat(otherMix(0), song(7, 12))), 0, 5);
         assertEquals(r.toString(), "length", r.none);
     }
+
+    // ---- the streamed copy's 12 s window (ours) ----
+
+    /** The addon copy known only over [winSec, winSec + 12) of its own time: silence elsewhere. */
+    private static OffsetFit.Result window(float[] ad, double winSec) {
+        float[] w = new float[ad.length];
+        int a = (int) Math.round(winSec * R), b = Math.min(ad.length, (int) Math.round((winSec + OffsetFit.WINDOW_SEC) * R));
+        System.arraycopy(ad, a, w, a, b - a);
+        return OffsetFit.window(ytSide(), OffsetFit.Side.of(w), winSec, OffsetFit.WINDOW_SEC);
+    }
+
+    /** Poker Face's addon copy is 117 ms behind YouTube's: every window finds it. */
+    @Test
+    public void aWindowFindsTheOffset() {
+        float[] ad = cut(yt(), 0.117, null);
+        for (double at : new double[]{5, 40, 90}) {
+            OffsetFit.Result r = window(ad, at);
+            near("offset at " + at + " s " + r, r.offsetSec, -0.117, 0.001);
+        }
+        near("a lead-in", window(cat(silence(2.3), yt()), 50).offsetSec, 2.3, 0.001);
+    }
+
+    /** offset-map.md, Window check: shifts of seconds either way, at 15 s and 75 s, within 1 ms. */
+    @Test
+    public void aWindowFindsShiftsOfSeconds() {
+        for (double shift : new double[]{0.7, -2.3, -0.1172, 11, -9}) {
+            float[] ad = shift > 0 ? cat(silence(shift), yt()) : cut(yt(), -shift, null);
+            for (double at : new double[]{15, 75}) {
+                OffsetFit.Result r = window(ad, at);
+                assertTrue("shift " + shift + " at " + at + " s: " + r, r.none == null && r.score >= 0.8 && r.coarseScore >= 0.8);
+                near("shift " + shift + " at " + at + " s", r.offsetSec, shift, 0.001);
+            }
+        }
+    }
+
+    @Test
+    public void aWindowRefusesAnotherSong() {
+        OffsetFit.Result r = window(song(2, SEC), 40);
+        assertEquals(r.toString(), "no match", r.none);
+    }
+
+    @Test
+    public void aSilentWindowIsNoAnswer() {
+        OffsetFit.Result r = window(cat(silence(60), cut(yt(), 60, null)), 20);
+        assertEquals(r.toString(), "silent", r.none);
+    }
 }

@@ -32,6 +32,7 @@ public final class AudioStream {
         final int itag;
         final String url, mime;
         final long length;
+        double loudnessDb = Double.NaN;
 
         Pick(int itag, String url, String mime, long length) {
             this.itag = itag;
@@ -59,6 +60,45 @@ public final class AudioStream {
         return (byte[]) stream.getClass().getMethod("streamingData").invoke(stream);
     }
 
+    /**
+     * YouTube's loudnessDb for the song (its audio format's field 47, a float: Poker Face 6.69; field
+     * 53 is the perceptual one, 14 dB under it), as YouTube's player normalises with it: a cut of
+     * that many dB when it is positive (offset-map.md, Level). Kept beside YouTube's copy when it
+     * is fetched; asked for when that copy came from an earlier run. NaN when not known.
+     */
+    public static double loudnessDb(android.content.Context c, String videoId) {
+        File f = new File(c.getCacheDir(), "automix/loudness/" + videoId);
+        try {
+            if (f.exists()) return Double.parseDouble(new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim());
+            byte[] r = playerResponse(videoId);
+            Pick p = r == null ? null : best(r);
+            if (p == null) return Double.NaN;
+            saveLoudness(new File(c.getCacheDir(), "automix/dl"), videoId, p.loudnessDb);
+            return p.loudnessDb;
+        } catch (Throwable t) {
+            Log.w(TAG, videoId + ": loudnessDb not read: " + t);
+            return Double.NaN;
+        }
+    }
+
+    private static void saveLoudness(File dlDir, String videoId, double db) {
+        if (Double.isNaN(db)) return;
+        File d = new File(dlDir.getParentFile(), "loudness");
+        //noinspection ResultOfMethodCallIgnored
+        d.mkdirs();
+        try (FileOutputStream os = new FileOutputStream(new File(d, videoId))) {
+            os.write(String.valueOf(db).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            Log.w(TAG, videoId + ": loudnessDb not kept: " + e);
+        }
+    }
+
+    private static double floatField(ProtoWire w, int number) {
+        ProtoWire.Field f = w.first(number);
+        if (f == null || f.wireType != 5 || f.data == null || f.data.length != 4) return Double.NaN;
+        return java.nio.ByteBuffer.wrap(f.data).order(java.nio.ByteOrder.LITTLE_ENDIAN).getFloat();
+    }
+
     /** The audio format with the highest bitrate that has a plain url and a length, or null. */
     static Pick best(byte[] playerResponse) {
         Pick best = null;
@@ -73,6 +113,7 @@ public final class AudioStream {
             if (rate > bestRate) {
                 bestRate = rate;
                 best = new Pick((int) format.varint(1, 0), url, mime, length);
+                best.loudnessDb = floatField(format, 47);
             }
         }
         return best;
@@ -85,6 +126,7 @@ public final class AudioStream {
         Pick pick = best(response);
         if (pick == null) throw new IOException("no audio format for " + videoId);
         Log.i(TAG, videoId + ": itag=" + pick.itag + " " + pick.mime + " length=" + pick.length);
+        saveLoudness(dir, videoId, pick.loudnessDb);
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         File out = new File(dir, videoId + (pick.mime.contains("mp4") ? ".m4a" : ".webm"));

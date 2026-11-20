@@ -127,6 +127,14 @@ public class PickCasesTest {
             out.add(new Object[]{"sameAddon " + c.get(0) + " ~ " + c.get(1),
                     (Check) () -> new Object[]{Protocol.sameAddon((String) c.get(0), (String) c.get(1)), c.get(2)}});
         }
+        for (Object o : (List<Object>) doc.get("loudnessGain")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            Map<String, Object> ac = (Map<String, Object>) c.get("audioConfig");
+            Object l = ac.get("loudnessDb");
+            double db = OffsetFit.loudnessGainDb(l instanceof Number ? ((Number) l).doubleValue() : Double.NaN);
+            out.add(new Object[]{"loudnessGain: " + c.get("name"),
+                    (Check) () -> new Object[]{db + 0.0, ((Number) c.get("expectDb")).doubleValue() + 0.0}});
+        }
         return out;
     }
 

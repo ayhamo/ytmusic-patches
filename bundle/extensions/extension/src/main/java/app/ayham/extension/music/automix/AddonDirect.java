@@ -430,7 +430,8 @@ public final class AddonDirect {
                 Class<?> crg = cl.loadClass("crg"), ctb = cl.loadClass("ctb"), dvp = cl.loadClass("dvp"), dme = cl.loadClass("dme"),
                         cmj = cl.loadClass("cmj"), dvy = cl.loadClass("dvy"), cdv = cl.loadClass("cdv"), ceg = cl.loadClass("ceg"),
                         cmq = cl.loadClass("cmq");
-                Object data = cmq.getConstructor(Context.class).newInstance(ctx);
+                // streamed (AddonPrep.streamAndFit): read in ranges through the addon cache
+                Object data = p.stream != null ? CachedDataSource.factory(cl, p.stream) : cmq.getConstructor(Context.class).newInstance(ctx);
                 Object ext = dvp.getConstructor().newInstance();
                 dvp.getMethod("d").invoke(ext); // constant-bitrate seeking for a header-less MP3
                 Object factory = dme.getConstructor(cmj, dvy).newInstance(data, ext);
@@ -443,7 +444,7 @@ public final class AddonDirect {
                 vol = ctb.getMethod("E", float.class);
                 speed = ctb.getMethod("patch_setPlaybackParameters", float.class, float.class);
                 Object mib = cdv.getConstructor().newInstance();
-                cdv.getField("b").set(mib, Uri.fromFile(p.file));
+                cdv.getField("b").set(mib, p.stream != null ? Uri.parse("https://addon.stream/" + p.stream.key) : Uri.fromFile(p.file));
                 Object src = dme.getMethod("a", ceg).invoke(factory, cdv.getMethod("a").invoke(mib));
                 long at = Math.max(0, Math.round(target(ytMs)));
                 ctb.getMethod("ae", List.class, long.class).invoke(pl, Collections.singletonList(src), at);
@@ -1005,6 +1006,8 @@ public final class AddonDirect {
                         Log.i(TAG, "test: fail " + fail + " at YT " + Automix.position(host) + " ms");
                         if ("release".equals(fail)) {
                             s.pl.getClass().getMethod("L").invoke(s.pl);
+                        } else if ("truncate".equals(fail) && s.p.file == null) {
+                            Log.i(TAG, "test: truncate: a streamed song has no file of its own");
                         } else if ("truncate".equals(fail)) {
                             try (RandomAccessFile f = new RandomAccessFile(s.p.file, "rw")) {
                                 f.setLength(4096);

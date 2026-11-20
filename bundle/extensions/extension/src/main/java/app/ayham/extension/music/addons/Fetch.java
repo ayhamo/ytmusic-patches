@@ -105,6 +105,20 @@ final class Fetch {
         return null;
     }
 
+    /**
+     * A streamed file (playback): the track's MIME type the extractor read against what the addon
+     * said (BitChord's decoder check): a lossless promise must be FLAC, ALAC or PCM; null when fine.
+     */
+    static String mimeRefusal(Protocol.Stream s, String mime) {
+        if (mime == null || !mime.startsWith("audio/")) return "not an audio file (" + mime + ")";
+        String said = ((s.codec == null ? "" : s.codec) + " " + (s.tier == null ? "" : s.tier)).toLowerCase(Locale.ROOT);
+        boolean lossless = said.contains("flac") || said.contains("alac") || said.contains("wav") || said.contains("lossless") || said.contains("hi_res") || said.contains("hires");
+        String m = mime.toLowerCase(Locale.ROOT);
+        if (lossless && !m.contains("flac") && !m.contains("alac") && !m.equals("audio/raw") && !m.contains("wav"))
+            return "said lossless (" + s.codec + ") but is " + mime;
+        return null;
+    }
+
     /** What the file really is, from its bytes: lossless, and Hi-Res when asked; null when fine. */
     static String formatRefusal(File f, String ext, String tier, Protocol.Stream s) throws IOException {
         byte[] head = new byte[1 << 16];

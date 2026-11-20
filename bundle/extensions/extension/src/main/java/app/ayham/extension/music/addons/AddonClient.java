@@ -438,6 +438,19 @@ public final class AddonClient {
         return s;
     }
 
+    /**
+     * A fresh /stream answer for a row whose link stopped working (an addon's links can expire
+     * within a minute, while the player still reads the file): the remembered answer is dropped.
+     */
+    public Protocol.Stream streamAgain(Addon addon, Pick.Row row, boolean atmos) {
+        Protocol.Manifest man = manifest(addon.base);
+        String url = Protocol.streamUrl(addon.base, row.id, Protocol.paramsFor(man, addon.tier, addon.quality, atmos));
+        synchronized (this) {
+            cache.remove("t|" + url);
+        }
+        return stream(addon, row, man, atmos);
+    }
+
     /** §7: Range bytes=0-0 (4 s): the file must hold the whole song. Unmeasurable is not refused. */
     public Pick.Verdict probe(String url, String tier, Double kbps, Double songSec, double slackSec, Map<String, String> headers) {
         try {

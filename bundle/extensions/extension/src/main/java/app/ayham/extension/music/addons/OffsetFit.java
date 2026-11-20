@@ -343,6 +343,54 @@ public final class OffsetFit {
         return r;
     }
 
+    /** The streamed copy's window: at least this long to fit on. */
+    public static final double WINDOW_SEC = 12, MIN_WINDOW_FINE_SEC = 4;
+
+    /**
+     * Ours (the phone, streaming like BitChord): the addon copy is known only over
+     * [winSec, winSec + lenSec) of its own time, the window the audition buffered at YouTube's
+     * position (ad holds silence elsewhere). The same coarse (±15 s on the envelope) and fine (±20 ms
+     * at 4 kHz) stages and 0.8 bars as {@link #fit}, on YouTube's span 1 s inside that window. On the
+     * 9 pair songs it found the full-song offset within 0.01 ms in 37 of 37 windows and refused both
+     * other recordings in every window. No end check and no length rule: the player's length watch
+     * stands in for them.
+     */
+    public static Result window(Side yt, Side ad, double winSec, double lenSec) {
+        yt.finish();
+        ad.finish();
+        final double ytDur = yt.durationSec();
+        float[] ytRms = yt.rms(), adRms = ad.rms();
+        double start = winSec + 1, span = lenSec - 2;
+        if (span < MIN_WINDOW_FINE_SEC || ytDur <= 0) return none("no match");
+        float[] read = slice(adRms, Math.round(winSec / ENV_WIN_SEC), Math.round((winSec + lenSec) / ENV_WIN_SEC));
+        int loud = 0;
+        for (float r : read) if (r >= SILENT_RMS) loud++;
+        if (read.length == 0 || loud < 0.5 * read.length) return none("silent");
+        // the template (addon time [winSec + 1, winSec + lenSec - 1)) slid over YouTube's copy, as the
+        // extension's fitWindow (offset-map.md, Window check): every sample compared is known whatever
+        // the offset. coarse() and fine() slide their second side under the first, so they return
+        // YouTube time - addon time, the negative of offsetSec.
+        Lag c = coarse(logEnv(adRms), logEnv(ytRms), start, span, 0, COARSE_LAG_SEC);
+        if (c == null || c.score < MIN_SCORE) {
+            Result r = none("no match");
+            r.score = c == null ? null : c.score;
+            return r;
+        }
+        Lag f = fine(ad, yt, start, span, c.offsetSec);
+        if (f == null || f.score < MIN_SCORE) {
+            Result r = none("no match");
+            r.score = c.score;
+            r.fineScore = f == null ? null : f.score;
+            return r;
+        }
+        Result r = new Result();
+        r.offsetSec = -f.offsetSec + 0.0;
+        r.score = f.score;
+        r.coarseScore = c.score;
+        r.checkSec = winSec;
+        return r;
+    }
+
     static final double GUIDE_STEP_SEC = 0.03, GUIDE_SPREAD_SEC = 0.005;
     static final int GUIDE_WINDOWS = 4, GUIDE_STEPS = 3;
 
@@ -609,6 +657,14 @@ public final class OffsetFit {
         public String toString() {
             return "{gainDb=" + gainDb + ", wantDb=" + wantDb + ", capped=" + capped + ", truePeakDb=" + truePeakDb + "}";
         }
+    }
+
+    /**
+     * The phone's level (offset-map.md, Level): YouTube's loudnessDb as its player normalises with
+     * it, a cut of that many dB when positive and nothing otherwise; NaN (not known) is nothing.
+     */
+    public static double loudnessGainDb(double loudnessDb) {
+        return Double.isNaN(loudnessDb) || loudnessDb <= 0 ? 0 : -loudnessDb;
     }
 
     /**

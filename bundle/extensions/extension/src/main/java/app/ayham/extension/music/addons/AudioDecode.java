@@ -31,10 +31,32 @@ public final class AudioDecode {
     public static final double MAX_SEC = 15 * 60;
 
     public static void decode(File file, Sink sink) throws IOException {
+        decode(file, null, 0, -1, sink, null);
+    }
+
+    /** What a ranged decode read: the first block's time in the file, and the track's MIME type. */
+    public static final class Range {
+        public double firstSec = Double.NaN;
+        public String mime;
+        /** The track's length the container states, or NaN. */
+        public double durationSec = Double.NaN;
+    }
+
+    /**
+     * A part of a streamed file: from the sync point at or before fromSec until untilSec (the
+     * extractor reads only the bytes it seeks to). out gets where the first block starts.
+     */
+    public static void decode(android.media.MediaDataSource src, double fromSec, double untilSec, Sink sink, Range out) throws IOException {
+        decode(null, src, fromSec, untilSec, sink, out);
+    }
+
+    private static void decode(File file, android.media.MediaDataSource src, double fromSec, double untilSec, Sink sink, Range range) throws IOException {
         MediaExtractor ex = new MediaExtractor();
         MediaCodec codec = null;
+        long untilUs = untilSec < 0 ? Long.MAX_VALUE : Math.round(untilSec * 1e6);
         try {
-            ex.setDataSource(file.getPath());
+            if (file != null) ex.setDataSource(file.getPath());
+            else ex.setDataSource(src);
             MediaFormat fmt = null;
             for (int i = 0; i < ex.getTrackCount(); i++) {
                 MediaFormat f = ex.getTrackFormat(i);
@@ -46,6 +68,11 @@ public final class AudioDecode {
                 }
             }
             if (fmt == null) throw new IOException("no audio track");
+            if (range != null) {
+                range.mime = fmt.getString(MediaFormat.KEY_MIME);
+                if (fmt.containsKey(MediaFormat.KEY_DURATION) && fmt.getLong(MediaFormat.KEY_DURATION) > 0) range.durationSec = fmt.getLong(MediaFormat.KEY_DURATION) / 1e6;
+            }
+            if (fromSec > 0) ex.seekTo(Math.round(fromSec * 1e6), MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
             codec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME));
             codec.configure(fmt, null, null, 0);
             codec.start();
@@ -66,6 +93,7 @@ public final class AudioDecode {
                     if (in < 0) break;
                     ByteBuffer b = codec.getInputBuffer(in);
                     int n = b == null ? -1 : ex.readSampleData(b, 0);
+                    if (n >= 0 && ex.getSampleTime() > untilUs) n = -1;   // the range's end
                     if (n < 0) {
                         codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                         inputDone = true;
@@ -94,6 +122,13 @@ public final class AudioDecode {
                 }
                 ByteBuffer buf = codec.getOutputBuffer(out);
                 if (buf != null && info.size > 0) {
+                    if (range != null && Double.isNaN(range.firstSec)) range.firstSec = info.presentationTimeUs / 1e6;
+                    // a ranged decode ends on the output's own time too: the extractor's sample times
+                    // didn't stop a FLAC stream's input (the phone decoded 30 s of a 12 s window)
+                    if (range != null && untilUs != Long.MAX_VALUE && info.presentationTimeUs > untilUs) {
+                        codec.releaseOutputBuffer(out, false);
+                        break;
+                    }
                     buf = buf.order(ByteOrder.nativeOrder());
                     buf.position(info.offset).limit(info.offset + info.size);
                     int bytes = enc == AudioFormat.ENCODING_PCM_FLOAT ? 4 : enc == AudioFormat.ENCODING_PCM_24BIT_PACKED ? 3
@@ -129,7 +164,7 @@ public final class AudioDecode {
             if (!told) throw new IOException("nothing decoded");
             long took = android.os.SystemClock.elapsedRealtime() - t0;
             android.util.Log.i("AyhamAddons", String.format(java.util.Locale.US, "decoded %s: %.1f s of audio in %d ms (%d ms of it in our own processing, %s)",
-                    file.getName(), frames / (double) rate, took, inSink, enc == AudioFormat.ENCODING_PCM_FLOAT ? "float" : enc == AudioFormat.ENCODING_PCM_16BIT ? "16-bit" : "enc " + enc));
+                    file != null ? file.getName() : String.format(java.util.Locale.US, "a stream window (asked %.1f-%.1f s, first block at %.2f s)", fromSec, untilSec, range == null ? Double.NaN : range.firstSec), frames / (double) rate, took, inSink, enc == AudioFormat.ENCODING_PCM_FLOAT ? "float" : enc == AudioFormat.ENCODING_PCM_16BIT ? "16-bit" : "enc " + enc));
         } finally {
             if (codec != null) {
                 try {

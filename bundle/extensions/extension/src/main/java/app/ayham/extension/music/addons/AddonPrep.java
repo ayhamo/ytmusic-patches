@@ -94,6 +94,12 @@ public final class AddonPrep {
 
         /** Dolby Atmos: the fit's gain, in the WAV's samples (AtmosWav); gainDb is then 0. */
         public double bakedDb;
+        /**
+         * Streamed (not Atmos, not a download): no file of its own; the player reads the addon's
+         * audio in ranges through this cache entry (StreamCache), released when the song goes.
+         */
+        public StreamCache.Entry stream;
+
         /** Dolby Atmos: the WAV our decode was written to (AtmosWav), deleted with the song even when saved. */
         public File wav;
 
@@ -106,7 +112,7 @@ public final class AddonPrep {
         public String toString() {
             return String.format(Locale.US, "%s via %s: offset %+.4f s, gain %+.2f dB%s, %s%s %d Hz %d ch, score %.3f", id, addon, offsetSec,
                     gainDb + bakedDb, gain != null && gain.capped != null ? " (" + gain.capped + ")" : "", atmos ? "Dolby Atmos " : "", codec, rate, channels, score)
-                    + (ownDecode() ? " (from our decode)" : "");
+                    + (ownDecode() ? " (from our decode)" : "") + (stream != null ? " (streamed)" : "");
         }
     }
 
@@ -319,7 +325,8 @@ public final class AddonPrep {
                 if (AddonDownloads.has(ctx, id)) p = AddonDownloads.load(ctx, id);
                 else {
                     p = prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
-                    decksDue = p != null;
+                    // a streamed song has no file to write deck audio from: a mix takes YouTube's
+                    decksDue = p != null && p.stream == null;
                 }
                 why = p == null ? "no addon has a file that fits" : null;
                 if (p == null && stale()) throw new Stale();
@@ -393,8 +400,9 @@ public final class AddonPrep {
     private static void deleteFiles(Prepared p) {
         if (p == null) return;
         //noinspection ResultOfMethodCallIgnored
-        if (!p.saved) p.file.delete();
+        if (!p.saved && p.file != null) p.file.delete();
         deleteQuietly(p.wav);
+        if (p.stream != null) StreamCache.release(p.stream);
         app.ayham.extension.music.automix.AddonPcm.delete(ctx, p.id);
     }
 
@@ -606,6 +614,7 @@ public final class AddonPrep {
                 Prepared p = fetchAndFit(c, id, o, ytDecode, opt.slackSec, dl, held);
                 ytDecode.done();
                 if (p.score < 0) {
+                    if (p.stream != null) StreamCache.release(p.stream);
                     if (p.file != null) //noinspection ResultOfMethodCallIgnored
                         p.file.delete();
                     deleteQuietly(p.wav);
@@ -616,6 +625,7 @@ public final class AddonPrep {
                     held[0] = null;
                     if (a != null) {
                         deleteQuietly(p.file);
+                        if (p.stream != null) StreamCache.release(p.stream);
                         p = a;
                     }
                 }
@@ -678,7 +688,149 @@ public final class AddonPrep {
                 throw e;
             }
         }
+        // Dolby Atmos keeps the whole file: our own decode plays it (AtmosWav), and another mix
+        // is placed by a stereo row's offset (placeAtmos)
+        if (!s.atmos) return streamAndFit(c, id, o, s, yt);
         return fetchAndFitPlayback(c, id, o, s, ext, yt, slack, held);
+    }
+
+    /** The audition window (BitChord): this many seconds of the addon's audio are read to fit it. */
+    static final double WINDOW_SEC = OffsetFit.WINDOW_SEC;
+
+    /**
+     * Playback, streamed (BitChord; protocol.md §8): only a 12 s window of the addon's file is read,
+     * at the playing song's position or at the start of the next one, and fitted to YouTube's audio
+     * there (OffsetFit.window, offset-map.md Window check). The rest is read by the player as it
+     * plays, through the same cache. Level: YouTube's loudnessDb. The mix decks take YouTube's audio
+     * (no file to write them from).
+     */
+    private static Prepared streamAndFit(Context c, String id, AddonClient.Opened o, Protocol.Stream s, YtDecode yt) throws Exception {
+        long t0 = SystemClock.elapsedRealtime();
+        StreamCache.Entry e = StreamCache.open(c, StreamCache.key(o.addon.host, (o.row == null ? id : o.row.id) + "_" + s.codec));
+        boolean kept = false;
+        try {
+            e.source(s.url, s.headers);
+            final AddonClient.Addon addon = o.addon;
+            final Pick.Row row = o.row;
+            if (row != null) e.refresh = en -> {
+                Protocol.Stream ns = client().streamAgain(addon, row, false);
+                if (ns == null || ns.url == null) return null;
+                java.util.List<String> out = new java.util.ArrayList<>();
+                out.add(ns.url);
+                if (ns.headers != null) for (Map.Entry<String, String> h : ns.headers.entrySet()) {
+                    out.add(h.getKey());
+                    out.add(h.getValue());
+                }
+                return out.toArray(new String[0]);
+            };
+            double from = 0;
+            if (id.equals(current)) {
+                // the window starts at YouTube's position as the audition starts (offset-map.md, Window check)
+                long pos = app.ayham.extension.music.automix.Automix.positionMs();
+                if (pos > 0) from = pos / 1000.0;
+            }
+            Prepared p = streamWindow(id, o, s, e, yt, from);
+            Log.i(TAG, String.format(Locale.US, "%s: %s's stream: %d KB read for the fit in %d ms", id, o.addon.name, e.fetched / 1024, SystemClock.elapsedRealtime() - t0));
+            if (p.score >= 0) {
+                p.stream = e;
+                kept = true;
+            }
+            return p;
+        } finally {
+            if (!kept) StreamCache.release(e);
+        }
+    }
+
+    private static Prepared streamWindow(String id, AddonClient.Opened o, Protocol.Stream s, StreamCache.Entry e, YtDecode yt, double from) throws Exception {
+        final OffsetFit.Side side = new OffsetFit.Side();
+        final AudioDecode.ToFit fit = new AudioDecode.ToFit(side);
+        final AudioDecode.Range range = new AudioDecode.Range();
+        final int[] fmt = new int[2];
+        final boolean[] padded = new boolean[1];
+        AudioDecode.decode(new StreamCache.Source(e), from, from + WINDOW_SEC, new AudioDecode.Sink() {
+            @Override
+            public void format(int rate, int channels) {
+                fmt[0] = rate;
+                fmt[1] = channels;
+                fit.format(rate);
+            }
+
+            @Override
+            public void block(float[][] planar, int frames) throws IOException {
+                if (stale()) throw new Stale();
+                if (!padded[0]) {
+                    // the file before the window is not read: silence there, so the window keeps its time
+                    padded[0] = true;
+                    long n = Math.round(Math.max(0, range.firstSec) * OffsetFit.FIT_RATE);
+                    float[] z = new float[8192];
+                    for (long i = 0; i < n; i += z.length) side.add(z, 0, (int) Math.min(z.length, n - i));
+                }
+                fit.add(planar, frames);
+            }
+        }, range);
+        fit.finish();
+        yt.done();
+        final OffsetFit.Side ytSide = yt.side;
+        Prepared p = new Prepared();
+        p.id = id;
+        p.addon = o.addon.name;
+        p.host = o.addon.host;
+        p.rowId = o.row == null ? null : o.row.id;
+        p.rate = fmt[0];
+        p.channels = fmt[1];
+        p.ytDurationSec = ytSide.durationSec();
+        String bad = Fetch.mimeRefusal(s, range.mime);
+        if (bad != null) {
+            p.score = -1;
+            p.codec = bad;
+            return p;
+        }
+        double win = Math.max(0, range.firstSec), len = side.durationSec() - win;
+        OffsetFit.Result r = OffsetFit.window(ytSide, side, win, len);
+        Log.i(TAG, String.format(Locale.US, "%s: %s's window %.1f-%.1f s (%s) fitted: %s", id, o.addon.name, win, win + len, range.mime, r));
+        if (r.none != null) {
+            p.score = -1;
+            p.codec = "does not fit YouTube's audio (" + r.none + ")";
+            return p;
+        }
+        p.offsetSec = r.offsetSec;
+        p.score = r.score;
+        p.addonDurationSec = Double.isNaN(range.durationSec) ? p.ytDurationSec + r.offsetSec : range.durationSec;
+        // level: YouTube's loudnessDb, as its player normalises its own copy (offset-map.md, Level,
+        // phone): a cut of that many dB when positive, nothing measured, no boost
+        double ldb = ytLoudnessDb(id);
+        p.gain = new OffsetFit.Gain();
+        p.gain.wantDb = OffsetFit.loudnessGainDb(ldb);
+        p.gainDb = p.gain.gainDb = p.gain.wantDb;
+        // the same master: the file's level is YouTube's copy's
+        p.env = envFromYt(ytSide.rms(), r.offsetSec, p.addonDurationSec, 0);
+        p.codec = s.codec;
+        Log.i(TAG, String.format(Locale.US, "%s: level: YouTube's loudnessDb %.2f: %+.2f dB", id, ldb, p.gainDb));
+        return p;
+    }
+
+    private static double ytLoudnessDb(String id) {
+        Context c = ctx;
+        return c == null ? Double.NaN : app.ayham.extension.music.features.AudioStream.loudnessDb(c, id);
+    }
+
+    /** The file's level per ENV_HOP of its own time (Prepared.env), from YouTube's, shifted by the offset and the level step. */
+    static float[] envFromYt(float[] ytRms, double offsetSec, double addonSec, double stepDb) {
+        int n = (int) Math.max(0, Math.floor(addonSec / Envelope.HOP));
+        float[] out = new float[n];
+        int per = (int) Math.round(Envelope.HOP / OffsetFit.ENV_WIN_SEC);
+        for (int i = 0; i < n; i++) {
+            int j0 = (int) Math.round((i * Envelope.HOP - offsetSec) / OffsetFit.ENV_WIN_SEC);
+            double sum = 0;
+            int k = 0;
+            for (int j = j0; j < j0 + per; j++) {
+                if (j < 0 || j >= ytRms.length) continue;
+                sum += (double) ytRms[j] * ytRms[j];
+                k++;
+            }
+            out[i] = k == 0 || sum <= 0 ? -120f : (float) (10 * Math.log10(sum / k) + stepDb);
+        }
+        return out;
     }
 
     private static Prepared checkAndFit(String id, AddonClient.Opened o, File f, File reuse, String ext, YtDecode yt,

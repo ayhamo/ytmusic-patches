@@ -231,4 +231,52 @@ public final class Pick {
                 ? new Verdict(false, "file holds at most " + Math.round(maxSec) + " s", null)
                 : new Verdict(true, null, maxSec);
     }
+
+    // ---- the lossy floor and the lossless pass (protocol.md 8.2.1) ----
+
+    private static final java.util.regex.Pattern LOSSLESS_CODEC = java.util.regex.Pattern.compile("flac|alac|wav|pcm|aiff?", java.util.regex.Pattern.CASE_INSENSITIVE),
+            LOSSY_CODEC = java.util.regex.Pattern.compile("mp3|mpeg|aac|mp4a|opus|vorbis|ogg", java.util.regex.Pattern.CASE_INSENSITIVE);
+    static final double FLOOR_KBPS = 96, YT_KBPS_USUAL = 160;
+
+    private static double n(Double d) {
+        return d == null || d.isNaN() ? 0 : d;
+    }
+
+    /** 0 lossy, 1 lossless up to 16-bit/48 kHz, 2 Hi-Res. A lossless tier naming a lossy codec is lossy. */
+    public static int qualityRank(Protocol.Stream st) {
+        String c = st == null || st.codec == null ? "" : st.codec;
+        boolean lossless = LOSSLESS_CODEC.matcher(c).find() || (st != null && LOSSLESS.equals(st.tier) && !LOSSY_CODEC.matcher(c).find());
+        if (!lossless) return 0;
+        return n(st.bitDepth) > 16 || n(st.sampleRate) > 48000 ? 2 : 1;
+    }
+
+    /** Lossless always; lossy at 96 kbps or more over YouTube's (160 when unknown): null, or why not. */
+    public static String floorRefusal(Protocol.Stream st, double ytKbps) {
+        if (qualityRank(st) >= 1) return null;
+        double yt = ytKbps > 0 ? ytKbps : YT_KBPS_USUAL, b = n(st == null ? null : st.bitrate);
+        if (b <= 0) return "lossy, bitrate unknown";
+        return b >= yt + FLOOR_KBPS ? null : "lossy " + Js.number(b) + " kbps, not " + Js.number(FLOOR_KBPS) + " kbps over YouTube's " + Js.number(yt);
+    }
+
+    /** The pass after a copy plays: which addons are asked again, for what. */
+    public static final class Upgrade {
+        public final boolean aboveOnly;
+        public final int minRank;
+
+        Upgrade(boolean aboveOnly, int minRank) {
+            this.aboveOnly = aboveOnly;
+            this.minRank = minRank;
+        }
+    }
+
+    /**
+     * null: no pass. A lossy copy: every addon asked again for lossless (when the tier asked is
+     * lossless). A cached copy under the tier asked: only the addons ranked above it, for better.
+     */
+    public static Upgrade upgradeWanted(Protocol.Stream st, String tier, boolean cached) {
+        int r = qualityRank(st), want = LOSSLESS.equals(tier) || HIRES.equals(tier) ? 2 : CD.equals(tier) ? 1 : 0;
+        if (r >= want) return null;
+        if (cached) return new Upgrade(true, r + 1);
+        return r == 0 ? new Upgrade(false, 1) : null;
+    }
 }

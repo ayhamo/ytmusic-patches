@@ -609,6 +609,12 @@ public final class AddonPrep {
             try {
                 String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
                 if (early != null) return early;
+                // the lossy floor (protocol.md 8.2.1): a lossy answer under 96 kbps over YouTube's
+                // doesn't win the race (playback; a download has its own tier check)
+                if (dl == null && o.stream != null && !o.stream.atmos) {
+                    String floor = Pick.floorRefusal(o.stream, app.ayham.extension.music.features.AudioStream.kbps(c, id));
+                    if (floor != null) return "under the lossy floor: " + floor;
+                }
                 // one Atmos file waits at a time: a second would take the same names (id.atmos.*)
                 if (held != null && held[0] != null && o.stream != null && o.stream.atmos)
                     return "Atmos: another addon's Atmos file already waits for a stereo row";

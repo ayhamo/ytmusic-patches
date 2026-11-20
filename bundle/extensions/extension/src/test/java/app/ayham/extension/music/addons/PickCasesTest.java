@@ -127,6 +127,37 @@ public class PickCasesTest {
             out.add(new Object[]{"sameAddon " + c.get(0) + " ~ " + c.get(1),
                     (Check) () -> new Object[]{Protocol.sameAddon((String) c.get(0), (String) c.get(1)), c.get(2)}});
         }
+        for (Object o : (List<Object>) doc.get("qualityRank")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            out.add(new Object[]{"qualityRank: " + c.get("name"),
+                    (Check) () -> new Object[]{(double) Pick.qualityRank(stream(c.get("stream"))), ((Number) c.get("expect")).doubleValue()}});
+        }
+        for (Object o : (List<Object>) doc.get("floorVerdict")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            out.add(new Object[]{"floorVerdict: " + c.get("name"), (Check) () -> {
+                String why = Pick.floorRefusal(stream(c.get("stream")), ((Number) c.get("ytKbps")).doubleValue());
+                return new Object[]{why == null ? (Object) Boolean.TRUE : why, c.get("expect")};
+            }});
+        }
+        for (Object o : (List<Object>) doc.get("upgradeWanted")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            out.add(new Object[]{"upgradeWanted: " + c.get("name"), (Check) () -> {
+                Pick.Upgrade u = Pick.upgradeWanted(stream(c.get("stream")), (String) c.get("tier"), Boolean.TRUE.equals(c.get("cached")));
+                Map<String, Object> got = null;
+                if (u != null) {
+                    got = new LinkedHashMap<>();
+                    got.put("aboveOnly", u.aboveOnly);
+                    got.put("minRank", (double) u.minRank);
+                }
+                Object want = c.get("expect");
+                if (want instanceof Map) {
+                    Map<String, Object> w = new LinkedHashMap<>((Map<String, Object>) want);
+                    w.put("minRank", ((Number) w.get("minRank")).doubleValue());
+                    want = w;
+                }
+                return new Object[]{got, want};
+            }});
+        }
         for (Object o : (List<Object>) doc.get("loudnessGain")) {
             Map<String, Object> c = (Map<String, Object>) o;
             Map<String, Object> ac = (Map<String, Object>) c.get("audioConfig");
@@ -136,6 +167,17 @@ public class PickCasesTest {
                     (Check) () -> new Object[]{db + 0.0, ((Number) c.get("expectDb")).doubleValue() + 0.0}});
         }
         return out;
+    }
+
+    private static Protocol.Stream stream(Object o) {
+        Map<String, Object> m = (Map<String, Object>) o;
+        Protocol.Stream st = new Protocol.Stream();
+        st.codec = (String) m.get("codec");
+        st.tier = (String) m.get("tier");
+        if (m.get("bitDepth") != null) st.bitDepth = ((Number) m.get("bitDepth")).doubleValue();
+        if (m.get("sampleRate") != null) st.sampleRate = ((Number) m.get("sampleRate")).doubleValue();
+        if (m.get("bitrate") != null) st.bitrate = ((Number) m.get("bitrate")).doubleValue();
+        return st;
     }
 
     private final Check check;

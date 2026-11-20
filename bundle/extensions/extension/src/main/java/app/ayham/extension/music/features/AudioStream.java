@@ -33,6 +33,8 @@ public final class AudioStream {
         final String url, mime;
         final long length;
         double loudnessDb = Double.NaN;
+        /** Its average bitrate in kbps (field 6 is bits per second). */
+        double kbps = Double.NaN;
 
         Pick(int itag, String url, String mime, long length) {
             this.itag = itag;
@@ -67,27 +69,46 @@ public final class AudioStream {
      * is fetched; asked for when that copy came from an earlier run. NaN when not known.
      */
     public static double loudnessDb(android.content.Context c, String videoId) {
-        File f = new File(c.getCacheDir(), "automix/loudness/" + videoId);
-        try {
-            if (f.exists()) return Double.parseDouble(new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim());
-            byte[] r = playerResponse(videoId);
-            Pick p = r == null ? null : best(r);
-            if (p == null) return Double.NaN;
-            saveLoudness(new File(c.getCacheDir(), "automix/dl"), videoId, p.loudnessDb);
-            return p.loudnessDb;
-        } catch (Throwable t) {
-            Log.w(TAG, videoId + ": loudnessDb not read: " + t);
-            return Double.NaN;
-        }
+        return known(c, videoId)[0];
     }
 
-    private static void saveLoudness(File dlDir, String videoId, double db) {
+    /** YouTube's audio bitrate for the song (kbps, its best audio format, as kept with loudnessDb); 0 when not known. */
+    public static double kbps(android.content.Context c, String videoId) {
+        double k = known(c, videoId)[1];
+        return Double.isNaN(k) ? 0 : k;
+    }
+
+    /** {loudnessDb, kbps} kept beside YouTube's copy, or asked for; NaN when not known. */
+    private static double[] known(android.content.Context c, String videoId) {
+        File f = new File(c.getCacheDir(), "automix/loudness/" + videoId);
+        double[] out = {Double.NaN, Double.NaN};
+        try {
+            if (f.exists()) {
+                String[] t = new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim().split(" ");
+                out[0] = Double.parseDouble(t[0]);
+                if (t.length > 1) out[1] = Double.parseDouble(t[1]);
+                if (t.length > 1) return out;
+            }
+            byte[] r = playerResponse(videoId);
+            Pick p = r == null ? null : best(r);
+            if (p == null) return out;
+            saveLoudness(new File(c.getCacheDir(), "automix/dl"), videoId, p);
+            out[0] = p.loudnessDb;
+            out[1] = p.kbps;
+        } catch (Throwable t) {
+            Log.w(TAG, videoId + ": loudnessDb not read: " + t);
+        }
+        return out;
+    }
+
+    private static void saveLoudness(File dlDir, String videoId, Pick p) {
+        double db = p.loudnessDb;
         if (Double.isNaN(db)) return;
         File d = new File(dlDir.getParentFile(), "loudness");
         //noinspection ResultOfMethodCallIgnored
         d.mkdirs();
         try (FileOutputStream os = new FileOutputStream(new File(d, videoId))) {
-            os.write(String.valueOf(db).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            os.write((db + " " + p.kbps).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (IOException e) {
             Log.w(TAG, videoId + ": loudnessDb not kept: " + e);
         }
@@ -114,6 +135,7 @@ public final class AudioStream {
                 bestRate = rate;
                 best = new Pick((int) format.varint(1, 0), url, mime, length);
                 best.loudnessDb = floatField(format, 47);
+                best.kbps = rate / 1000.0;
             }
         }
         return best;
@@ -126,7 +148,7 @@ public final class AudioStream {
         Pick pick = best(response);
         if (pick == null) throw new IOException("no audio format for " + videoId);
         Log.i(TAG, videoId + ": itag=" + pick.itag + " " + pick.mime + " length=" + pick.length);
-        saveLoudness(dir, videoId, pick.loudnessDb);
+        saveLoudness(dir, videoId, pick);
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         File out = new File(dir, videoId + (pick.mime.contains("mp4") ? ".m4a" : ".webm"));

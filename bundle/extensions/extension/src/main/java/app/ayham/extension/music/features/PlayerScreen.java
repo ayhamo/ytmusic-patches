@@ -1047,6 +1047,8 @@ final class PlayerScreen {
             // chromeWhite(0.7), text at 0.73 ("full" under the blend); unconfirmed rows at 0.45.
             // Each chrome white is 0.15 under its plain strength, so more of the backdrop shows.
             float all = gw + gap + tw, top = cy - 12 * d, bottom = cy + 12 * d;
+            // the Best part button (canvas.md §14 rule 3) is up for a few seconds: the badge waits
+            if (!pill.isEmpty() && pill.left < x0 + all + 6 * d) return;
             if (layerPaint == null) {
                 layerPaint = new Paint();
                 layerPaint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD));
@@ -1257,8 +1259,8 @@ final class PlayerScreen {
             mixStart = -1;
             showYts();
             // just above YT's times (their digits sit 19 dp under the bar's line; at 19 the badge met the play button, 16 sat a bit low)
-            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 13 * d);
             drawBest(canvas, d, left, right, (barH > 0 ? barH : getHeight()) / 2f);
+            drawBadge(canvas, d, (barH > 0 ? barH : getHeight()) / 2f + 13 * d);
             if (running) postInvalidateDelayed(100); // the decks get onto YT's clock in a moment
             if (from < 0 || dur <= 0 || from >= dur) return;
             float x = left + (right - left) * from / dur;

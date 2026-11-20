@@ -41,6 +41,16 @@ final class LyricsOffsetDialog {
         new AlertDialog.Builder(a).setTitle("Lyrics timing").setView(col).setPositiveButton("Done", null).show();
     }
 
+    /** A narrow borderless button: four of them and the field fit the dialog's width. */
+    private static Button small(Activity a) {
+        Button b = new Button(a, null, android.R.attr.borderlessButtonStyle);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        int p = Math.round(10 * a.getResources().getDisplayMetrics().density);
+        b.setPadding(p, 0, p, 0);
+        return b;
+    }
+
     private static void row(Activity a, LinearLayout col, String title, String songId, long start) {
         TextView head = new TextView(a);
         head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
@@ -54,7 +64,7 @@ final class LyricsOffsetDialog {
         EditText field = new EditText(a);
         field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
         field.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        field.setEms(5);
+        field.setEms(3);
         final long[] v = {start};
         final boolean[] quiet = {false};
         Runnable apply = () -> {
@@ -93,7 +103,7 @@ final class LyricsOffsetDialog {
             return false;
         });
         for (String label : new String[]{"−" + STEP, "+" + STEP}) {
-            Button b = new Button(a, null, android.R.attr.borderlessButtonStyle);
+            Button b = small(a);
             b.setText(label);
             b.setAllCaps(false);
             b.setOnClickListener(x -> {
@@ -103,7 +113,7 @@ final class LyricsOffsetDialog {
             r.addView(b);
         }
         r.addView(field);
-        Button reset = new Button(a, null, android.R.attr.borderlessButtonStyle);
+        Button reset = small(a);
         reset.setText("Reset");
         reset.setAllCaps(false);
         reset.setOnClickListener(x -> {

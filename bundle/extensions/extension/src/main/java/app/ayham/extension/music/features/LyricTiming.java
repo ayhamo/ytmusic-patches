@@ -105,7 +105,12 @@ final class LyricTiming {
             Object m = getInstance.invoke(null);
             Object lyr = current.get(m);
             if (lyr == null || (Boolean) isEmpty.invoke(lyr) || !(Boolean) synced.invoke(lyr)) return null;
-            if (lyricsVideo != null && videoId != null && !videoId.equals(String.valueOf(lyricsVideo.get(m)))) return null;
+            // Morphe's id can be empty: unknown, not another song's
+            Object lv = lyricsVideo == null ? null : lyricsVideo.get(m);
+            if (lv != null && !String.valueOf(lv).isEmpty() && videoId != null && !videoId.equals(String.valueOf(lv))) {
+                Log.i(TAG, "synced lines for " + videoId + ": Morphe's are for " + lyricsVideo.get(m));
+                return null;
+            }
             List<?> ls = (List<?>) lines.invoke(lyr);
             long[] st = new long[ls.size()];
             String[] tx = new String[ls.size()];
@@ -115,6 +120,7 @@ final class LyricTiming {
             }
             return new Object[]{st, tx};
         } catch (Throwable t) {
+            Log.i(TAG, "synced lines for " + videoId + ": unreadable: " + t);
             return null;
         }
     }
@@ -417,21 +423,30 @@ final class LyricTiming {
         else p.edit().putLong(k, ms).apply();
     }
 
-    /** The video id Morphe's lyrics are for, or null. */
+    /** The video id Morphe's lyrics are for; its id can be empty: then the playing song's. Null: none. */
     static String lyricsId() {
         try {
             init();
-            Object v = lyricsVideo == null ? null : lyricsVideo.get(getInstance.invoke(null));
-            return v == null ? null : String.valueOf(v);
+            return idOf(getInstance.invoke(null));
         } catch (Throwable t) {
             return null;
         }
     }
 
-    private static long offsetFor(Object manager) {
+    private static String idOf(Object manager) {
+        String id = null;
         try {
             Object v = lyricsVideo == null ? null : lyricsVideo.get(manager);
-            return offset(songOffset(v == null ? null : String.valueOf(v)), globalOffset());
+            id = v == null ? null : String.valueOf(v);
+        } catch (Throwable ignored) {
+        }
+        if (id == null || id.isEmpty()) id = app.ayham.extension.music.automix.Automix.currentId();
+        return id == null || id.isEmpty() ? null : id;
+    }
+
+    private static long offsetFor(Object manager) {
+        try {
+            return offset(songOffset(idOf(manager)), globalOffset());
         } catch (Throwable t) {
             return 0;
         }

@@ -111,6 +111,9 @@ final class BestPart {
     private static volatile String forId;
     private static volatile long partMs = -1, autoMs = -1, knownAtMs;
     private static volatile boolean mine, asking;
+    /** The automatic part before its snap, and whether the snap had the lyrics (rule 2). */
+    private static volatile long autoTarget = -1, resnapAt;
+    private static volatile boolean snappedToLines;
 
     static long partMs(String id) {
         return id != null && id.equals(forId) ? partMs : -1;
@@ -136,9 +139,22 @@ final class BestPart {
             autoMs = -1;
             mine = false;
             asking = false;
+            autoTarget = -1;
+            snappedToLines = false;
         }
         if (partMs >= 0 || asking) {
             // the lyrics can arrive after the part was worked out without them: snapped again once
+            long now = android.os.SystemClock.uptimeMillis();
+            if (partMs >= 0 && !snappedToLines && autoTarget >= 0 && now - resnapAt > 1000) {
+                resnapAt = now;
+                Object[] lyr = LyricTiming.syncedFor(id);
+                if (lyr != null) {
+                    snappedToLines = true;
+                    autoMs = snap(autoTarget, (long[]) lyr[0], null, false, 0);
+                    if (!mine) partMs = autoMs;
+                    Log.i(TAG, String.format(Locale.US, "best part: %s snapped to its lyrics: %.1f s", id, autoMs / 1000.0));
+                }
+            }
             return;
         }
         asking = true;
@@ -179,7 +195,11 @@ final class BestPart {
             Long c = chorusMs(durMs, (long[]) lyr[0], (String[]) lyr[1]);
             if (c != null) target = c;
         }
+        Log.i(TAG, "best part: " + id + " curve " + (heat == null ? "none" : heat.length / 3 + " points") + ", synced lyrics "
+                + (lyr == null ? "none" : ((long[]) lyr[0]).length + " lines") + ", target " + target);
         if (target < 0) return -1;
+        autoTarget = target;
+        snappedToLines = lyr != null;
         return snap(target, lyr == null ? null : (long[]) lyr[0], null, false, 0);
     }
 
@@ -193,8 +213,11 @@ final class BestPart {
             if (f != null && f.exists()) {
                 String[] p = new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim().split(" ");
                 long age = System.currentTimeMillis() - f.lastModified();
-                if ("none".equals(p[0]) && age < NONE_DAYS * 86_400_000L) return null;
-                if (!"none".equals(p[0]) && age < CURVE_DAYS * 86_400_000L) {
+                if ("nocurve".equals(p[0]) && age < NONE_DAYS * 86_400_000L) {
+                    Log.i(TAG, "best part: " + id + " curve: none, kept " + age / 60_000 + " min ago");
+                    return null;
+                }
+                if (!"nocurve".equals(p[0]) && !"none".equals(p[0]) && age < CURVE_DAYS * 86_400_000L) {
                     double[] h = new double[p.length];
                     for (int i = 0; i < p.length; i++) h[i] = Double.parseDouble(p[i]);
                     return h;
@@ -203,9 +226,11 @@ final class BestPart {
         } catch (Throwable ignored) {
         }
         double[] h = VideoCanvas.heatmap(id);
-        if (f != null) {
+        Log.i(TAG, "best part: " + id + " curve fetched: " + (h == null ? "none" : h.length / 3 + " points"));
+        // a failed fetch is not kept: asked again on the next try
+        if (f != null && (h != null || VideoCanvas.answered(id))) {
             try (java.io.FileWriter w = new java.io.FileWriter(f)) {
-                if (h == null) w.write("none");
+                if (h == null) w.write("nocurve");
                 else {
                     StringBuilder b = new StringBuilder();
                     for (double v : h) b.append(v).append(' ');
@@ -332,12 +357,16 @@ final class BestPart {
         col.addView(bar);
         android.widget.LinearLayout row = new android.widget.LinearLayout(a);
         row.setGravity(android.view.Gravity.CENTER);
+        android.widget.LinearLayout row2 = new android.widget.LinearLayout(a);
+        row2.setGravity(android.view.Gravity.CENTER);
         String[] labels = {"−5 s", "+5 s", "Now", "Listen from here"};
         for (int i = 0; i < labels.length; i++) {
             final int k = i;
             android.widget.Button b = new android.widget.Button(a, null, android.R.attr.borderlessButtonStyle);
             b.setText(labels[i]);
             b.setAllCaps(false);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
             b.setOnClickListener(v -> {
                 if (k == 0) at[0] = Math.max(0, at[0] - 5000);
                 else if (k == 1) at[0] = Math.min(dur, at[0] + 5000);
@@ -345,9 +374,11 @@ final class BestPart {
                 else seek(at[0]);
                 show.run();
             });
-            row.addView(b);
+            // Listen from here on a row of its own: four in one row squeezed it into a column
+            (k < 3 ? row : row2).addView(b);
         }
         col.addView(row);
+        col.addView(row2);
         show.run();
         android.app.AlertDialog.Builder d = new android.app.AlertDialog.Builder(a)
                 .setTitle("Your best part")

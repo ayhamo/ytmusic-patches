@@ -759,6 +759,11 @@ final class VideoCanvas {
         }
     }
 
+    /** Whether YouTube answered for [videoId] (with or without a curve): a failed fetch is not an answer. */
+    static boolean answered(String videoId) {
+        return heats.containsKey(videoId);
+    }
+
     private static double[] fetchHeatmap(String videoId) throws Exception {
         JSONObject body = new JSONObject().put("videoId", videoId).put("context", new JSONObject().put("client",
                 new JSONObject().put("clientName", "WEB").put("clientVersion", "2.20251101.01.00").put("hl", "en").put("gl", "US")));

@@ -50,6 +50,11 @@ public final class AudioDecode {
         decode(null, src, fromSec, untilSec, sink, out);
     }
 
+    /** A part of a local file (YouTube's copy around a window), as the streamed one. */
+    public static void decode(File file, double fromSec, double untilSec, Sink sink, Range out) throws IOException {
+        decode(file, null, fromSec, untilSec, sink, out);
+    }
+
     private static void decode(File file, android.media.MediaDataSource src, double fromSec, double untilSec, Sink sink, Range range) throws IOException {
         MediaExtractor ex = new MediaExtractor();
         MediaCodec codec = null;

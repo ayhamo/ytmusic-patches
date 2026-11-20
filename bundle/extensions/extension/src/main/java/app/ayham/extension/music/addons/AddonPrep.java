@@ -53,7 +53,7 @@ public final class AddonPrep {
         /** Dolby Atmos from the addon (the switch on, or an Atmos download): its decoder's 2-channel render plays. */
         public boolean atmos;
         /** The file's loudness (dBFS, mono RMS) every ENV_HOP seconds of its own time: where it is quiet. */
-        public float[] env;
+        public volatile float[] env;
         public static final double ENV_HOP = Envelope.HOP;
 
         /**
@@ -485,10 +485,13 @@ public final class AddonPrep {
         double known = containerSec(yt);
         if (Double.isNaN(known)) ytDecode.run();   // no length in the container: the decode gives it
         else new Thread(ytDecode, "addon-prep-yt").start();
+        Prepared got = null;
         try {
-            return prepareFrom(c, id, title, artist, isVideo, dl, ytSide, ytDecode, Double.isNaN(known) ? ytSide.durationSec() : known);
+            got = prepareFrom(c, id, title, artist, isVideo, dl, ytSide, ytDecode, Double.isNaN(known) ? ytSide.durationSec() : known);
+            return got;
         } finally {
-            ytDecode.cancelled = true;
+            // a streamed song's level envelope still comes from it (streamWindow)
+            if (got == null || got.stream == null) ytDecode.cancelled = true;
         }
     }
 
@@ -612,7 +615,9 @@ public final class AddonPrep {
                 // YouTube's decode is waited for only where the fit compares (fit): the fetch and the
                 // file's decode run beside it
                 Prepared p = fetchAndFit(c, id, o, ytDecode, opt.slackSec, dl, held);
-                ytDecode.done();
+                // a streamed song was fitted on a slice of YouTube's copy: its whole decode runs on
+                // for the level envelope only, not waited for
+                if (p.stream == null && p.score >= 0) ytDecode.done();
                 if (p.score < 0) {
                     if (p.stream != null) StreamCache.release(p.stream);
                     if (p.file != null) //noinspection ResultOfMethodCallIgnored
@@ -769,8 +774,22 @@ public final class AddonPrep {
             }
         }, range);
         fit.finish();
-        yt.done();
-        final OffsetFit.Side ytSide = yt.side;
+        // YouTube's copy only where the window can land (offset-map.md, Window check: the template
+        // [p + 1, p + 11) over +-15 s): its whole decode took 16-21 s on the phone, this slice ~2 s
+        double ytFrom = Math.max(0, from - OffsetFit.COARSE_LAG_SEC - 1), ytUntil = from + WINDOW_SEC + OffsetFit.COARSE_LAG_SEC + 1;
+        OffsetFit.Side ytSide;
+        long ty = SystemClock.elapsedRealtime();
+        try {
+            ytSide = sliceOf(yt.yt, ytFrom, ytUntil);
+        } catch (Stale x) {
+            throw x;
+        } catch (Throwable t) {
+            // the copy went (or doesn't seek): the whole decode, as before
+            Log.w(TAG, id + ": YouTube's slice not decoded (" + t + "): its whole copy instead");
+            yt.done();
+            ytSide = yt.side;
+        }
+        Log.i(TAG, String.format(Locale.US, "%s: YouTube's %.1f-%.1f s decoded for the window in %d ms", id, ytFrom, ytUntil, SystemClock.elapsedRealtime() - ty));
         Prepared p = new Prepared();
         p.id = id;
         p.addon = o.addon.name;
@@ -778,7 +797,8 @@ public final class AddonPrep {
         p.rowId = o.row == null ? null : o.row.id;
         p.rate = fmt[0];
         p.channels = fmt[1];
-        p.ytDurationSec = ytSide.durationSec();
+        double known = containerSec(yt.yt);
+        p.ytDurationSec = Double.isNaN(known) ? ytSide.durationSec() : known;
         String bad = Fetch.mimeRefusal(s, range.mime);
         if (bad != null) {
             p.score = -1;
@@ -803,7 +823,20 @@ public final class AddonPrep {
         p.gain.wantDb = OffsetFit.loudnessGainDb(ldb);
         p.gainDb = p.gain.gainDb = p.gain.wantDb;
         // the same master: the file's level is YouTube's copy's
-        p.env = envFromYt(ytSide.rms(), r.offsetSec, p.addonDurationSec, 0);
+        // the level envelope wants the whole song: YouTube's full decode fills it when done (the mix
+        // reads none until then, as for a song not analysed)
+        final Prepared ready = p;
+        final double offset = r.offsetSec;
+        Thread envThread = new Thread(() -> {
+            try {
+                yt.done();
+                ready.env = envFromYt(yt.side.rms(), offset, ready.addonDurationSec, 0);
+            } catch (Throwable t) {
+                Log.i(TAG, id + ": no level envelope (" + t + ")");
+            }
+        }, "addon-env");
+        envThread.setDaemon(true);
+        envThread.start();
         p.codec = s.codec;
         Log.i(TAG, String.format(Locale.US, "%s: level: YouTube's loudnessDb %.2f: %+.2f dB", id, ldb, p.gainDb));
         return p;
@@ -812,6 +845,34 @@ public final class AddonPrep {
     private static double ytLoudnessDb(String id) {
         Context c = ctx;
         return c == null ? Double.NaN : app.ayham.extension.music.features.AudioStream.loudnessDb(c, id);
+    }
+
+    /** YouTube's copy decoded from fromSec to untilSec into a fit side, silence before it (its time kept). */
+    private static OffsetFit.Side sliceOf(File yt, double fromSec, double untilSec) throws IOException {
+        final OffsetFit.Side side = new OffsetFit.Side();
+        final AudioDecode.ToFit fit = new AudioDecode.ToFit(side);
+        final AudioDecode.Range range = new AudioDecode.Range();
+        final boolean[] padded = new boolean[1];
+        AudioDecode.decode(yt, fromSec, untilSec, new AudioDecode.Sink() {
+            @Override
+            public void format(int rate, int channels) {
+                fit.format(rate);
+            }
+
+            @Override
+            public void block(float[][] planar, int frames) throws IOException {
+                if (stale()) throw new Stale();
+                if (!padded[0]) {
+                    padded[0] = true;
+                    long n = Math.round(Math.max(0, range.firstSec) * OffsetFit.FIT_RATE);
+                    float[] z = new float[8192];
+                    for (long i = 0; i < n; i += z.length) side.add(z, 0, (int) Math.min(z.length, n - i));
+                }
+                fit.add(planar, frames);
+            }
+        }, range);
+        fit.finish();
+        return side;
     }
 
     /** The file's level per ENV_HOP of its own time (Prepared.env), from YouTube's, shifted by the offset and the level step. */

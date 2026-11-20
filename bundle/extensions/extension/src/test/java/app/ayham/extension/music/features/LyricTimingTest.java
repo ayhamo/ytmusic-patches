@@ -78,6 +78,15 @@ public class LyricTimingTest {
     }
 
     @Test
+    public void anEmptyLyricsIdIsTheDecksOwnSong() {
+        // Morphe's lyricsVideoId reads "" on the S21 FE's Morphe: the lines still follow the deck
+        assertEquals(8_000, LyricTiming.deckFor("", "bi7ad9Kk62o", 8_000));
+        assertEquals(8_000, LyricTiming.deckFor(null, "bi7ad9Kk62o", 8_000));
+        assertEquals(-1, LyricTiming.deckFor("", null, 8_000));                      // no mix
+        assertEquals(-1, LyricTiming.deckFor("", "bi7ad9Kk62o", -1));                 // handed over
+    }
+
+    @Test
     public void aLineWithAnAdLibAtTheSameMomentEndsAtTheNextLaterLine() {
         // "Bounce on the stage..." and its ad-lib "back it up" both at 45.55 s, "Let me see you go" at 47.88 s
         long[] starts = {44_000, 45_550, 45_550, 47_880};

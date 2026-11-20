@@ -172,9 +172,14 @@ final class LyricTiming {
         }
     }
 
-    /** The deck's position [ms] counts only when Morphe's lyrics belong to the incoming song. */
+    /**
+     * The deck's position [ms] counts only when Morphe's lyrics belong to the incoming song. Morphe's
+     * id can be empty (unknown): then they are taken as the deck's own song's, as YT has moved on to it.
+     */
     static long deckFor(String lyricsVideoId, String incomingId, long ms) {
-        return ms >= 0 && incomingId != null && incomingId.equals(lyricsVideoId) ? ms : -1;
+        if (ms < 0 || incomingId == null) return -1;
+        boolean unknown = lyricsVideoId == null || lyricsVideoId.isEmpty() || "null".equals(lyricsVideoId);
+        return unknown || incomingId.equals(lyricsVideoId) ? ms : -1;
     }
 
     /**

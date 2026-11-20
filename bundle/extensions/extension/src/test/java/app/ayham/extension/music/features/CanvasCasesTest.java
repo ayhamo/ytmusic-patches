@@ -513,6 +513,25 @@ public class CanvasCasesTest {
                 check(g, c, got.equals(w), got);
                 return;
             }
+            case "songReset": {
+                // the PC's choice: loopOff/spotifyOff/appleOff, use, picked, part {video, startMs}, rejected
+                Map<String, Object> ch = map(map(c.get("input")).get("choice"));
+                CanvasChoices.Song s = new CanvasChoices.Song();
+                if (Boolean.TRUE.equals(ch.get("loopOff"))) s.off.add(CanvasSettings.VIDEO);
+                if (Boolean.TRUE.equals(ch.get("spotifyOff"))) s.off.add(CanvasSettings.SPOTIFY);
+                if (Boolean.TRUE.equals(ch.get("appleOff"))) s.off.add(CanvasSettings.APPLE);
+                s.use = str(ch.get("use"));
+                s.video = str(ch.get("picked"));
+                Map<String, Object> part = map(ch.get("part"));
+                if (part != null) {
+                    s.partVideo = str(part.get("video"));
+                    s.partMs = lng(part.get("startMs"));
+                }
+                if (ch.get("rejected") != null) for (Object x : list(ch.get("rejected"))) s.rejected.add(str(x));
+                boolean got = CanvasChoices.hasChoice(s);
+                check(g, c, got == (Boolean) want, got);
+                return;
+            }
             case "videoArtists": {
                 Map<String, Object> in = map(c.get("input"));
                 List<String> got = Arrays.asList(VideoCanvas.artists(str(in.get("artist"))));

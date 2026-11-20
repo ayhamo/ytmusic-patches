@@ -128,9 +128,9 @@ final class CanvasSongMenu {
             labels.add("Not this video");
             acts.add(() -> notThis(a, n));
         }
-        // the way back: every choice above for this song forgotten (its switches, Use, picks and
-        // turned-away videos), so the settings decide again
-        if (!n.ch.empty()) {
+        // rule 10, the way back: every choice above for this song forgotten (its switches, Use, picks
+        // and turned-away videos), so the settings decide again
+        if (CanvasChoices.hasChoice(n.ch)) {
             labels.add("Reset this song's canvas");
             acts.add(() -> {
                 n.ch = new CanvasChoices.Song();

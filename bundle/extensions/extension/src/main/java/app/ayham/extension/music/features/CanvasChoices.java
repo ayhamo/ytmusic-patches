@@ -78,6 +78,11 @@ final class CanvasChoices {
 
     // ---- the rules as pure functions (canvas-cases.json: songMenu, pickPart, videoChoices) ----
 
+    /** Rule 10: Reset this song's canvas shows while the song has any choice. */
+    static boolean hasChoice(Song s) {
+        return s != null && !s.empty();
+    }
+
     /** The song menu's rows: {canvasSwitch, pickVideo, pickPart, notThisVideo} (rules 1, 3, 5, 8). */
     static boolean[] rows(boolean canvasOn, boolean useVideos, boolean isSong, boolean hasLoop, boolean loopOff, boolean loopShows) {
         boolean base = canvasOn && useVideos && isSong;

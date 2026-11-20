@@ -48,7 +48,7 @@ public class AddonClientTest {
     private long now = 1_000_000;
     private final List<Long> sleeps = new ArrayList<>();
     private final List<String> logs = new ArrayList<>();
-    private final List<Hit> hits = new ArrayList<>();
+    private final List<Hit> hits = Collections.synchronizedList(new ArrayList<Hit>());
     private final Map<String, Map<String, Route>> addons = new HashMap<>();
     private final Map<String, Long> fileBytes = new HashMap<>();
 
@@ -267,6 +267,56 @@ public class AddonClientTest {
     }
 
     // ---- the whole path ----
+
+    /** The race (protocol.md 8.1.4): a slow addon ranked first loses to a quick one. */
+    @Test
+    public void raceTakesTheFirstAnswerReady() {
+        String rows = tracks(row("fine", ""));
+        good("quick", rows);
+        addon("slow", "search", (k, id, q) -> {
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException ignored) {
+            }
+            return json(200, rows);
+        });
+        addon("slow", "stream", (k, id, q) -> json(200, "{\"url\":\"" + fileUrl("slow", id) + "\",\"format\":\"flac\",\"codec\":\"flac\"}"));
+        AddonClient.Opened got = client().race(song(), list("slow", "quick"), null);
+        assertNull(got.none);
+        assertEquals("Mock quick", got.addon.name);
+    }
+
+    /** A refused answer (the fit) sends the race on to the other lane's; tried in rank order. */
+    @Test
+    public void raceGoesOnPastARefusal() {
+        String rows = tracks(row("fine", ""));
+        good("one", rows);
+        good("two", rows);
+        AddonClient.Options opt = new AddonClient.Options();
+        final List<String> checked = Collections.synchronizedList(new ArrayList<String>());
+        opt.check = o -> {
+            checked.add(o.addon.name);
+            return checked.size() == 1 ? "does not fit" : null;
+        };
+        AddonClient.Opened got = client().race(song(), list("one", "two"), opt);
+        assertNull(got.none);
+        assertEquals(2, checked.size());
+        assertFalse(checked.get(0).equals(got.addon.name));
+        assertEquals(1, got.tried.size());
+        assertEquals("does not fit", got.tried.get(0).why);
+    }
+
+    /** No lane has it: every lane's misses, in rank order. */
+    @Test
+    public void raceWithNoAnswerListsEveryLane() {
+        addon("a", "search", (k, id, q) -> json(200, tracks()));
+        addon("b", "manifest.json", (k, id, q) -> json(500, "{}"));
+        AddonClient.Opened got = client().race(song(), list("a", "b"), null);
+        assertEquals("no addon has it", got.none);
+        assertEquals(2, got.tried.size());
+        assertEquals("no match", got.tried.get(0).why);
+        assertEquals("server error (500)", got.tried.get(1).why);
+    }
 
     private void good(String name, String rowsJson) {
         addon(name, "search", (k, id, q) -> json(200, rowsJson));

@@ -290,6 +290,28 @@ public final class StreamCache {
                 + (e.length < 0 ? "?" : String.valueOf((e.length + CHUNK - 1) / CHUNK)) + " chunks on disk");
     }
 
+    /**
+     * "Upgrade quality" (protocol.md 8.1.7): the kept files of these rows go, or the replay would
+     * bring the same file back. An entry in use stays. Returns how many went.
+     */
+    public static synchronized int drop(Context c, java.util.Collection<String> keyPrefixes) {
+        File[] fs = dir(c).listFiles((d, n) -> n.endsWith(".bin"));
+        if (fs == null) return 0;
+        int n = 0;
+        for (File f : fs) {
+            String key = f.getName().substring(0, f.getName().length() - 4);
+            boolean ours = false;
+            for (String k : keyPrefixes) if (key.startsWith(k)) ours = true;
+            if (!ours || open.containsKey(key)) continue;
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            //noinspection ResultOfMethodCallIgnored
+            new File(f.getParentFile(), key + ".meta").delete();
+            n++;
+        }
+        return n;
+    }
+
     /** Oldest first, past MAX_BYTES; entries in use stay. */
     static synchronized void trim(Context c) {
         File[] fs = dir(c).listFiles((d, n) -> n.endsWith(".bin"));

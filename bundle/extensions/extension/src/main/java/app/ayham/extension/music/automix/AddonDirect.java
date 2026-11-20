@@ -227,6 +227,21 @@ public final class AddonDirect {
         if (a != null) a.end("not needed", false);
     }
 
+    /** protocol.md 8.1.3: the next song is opened this long before the transition. */
+    static final long READ_AHEAD_MS = 25_000;
+
+    /**
+     * Ms until the playing song hands over: the planned mix's takeover when Automix has one (0 while
+     * it runs), else the song's end; -1 when YT's player doesn't say.
+     */
+    private static long untilTransitionMs() {
+        long dur = Automix.durationMs(), pos = Automix.positionMs();
+        if (dur <= 0 || pos < 0) return -1;
+        long[] z = Automix.zone();
+        long at = z != null && z[0] > 0 ? z[0] : dur;
+        return Math.max(0, at - pos);
+    }
+
     private static void step() throws Exception {
         long now = SystemClock.elapsedRealtime();
         if (now - lastQueue > 1500) {
@@ -236,8 +251,13 @@ public final class AddonDirect {
         String[] q = Automix.queue();
         String cur = q[0], next = q[3];
         if (cur != null && q[1] != null && q[2] != null) AddonPrep.request(ctx, cur, q[1], q[2], Features.isMusicVideo(cur), true);
-        if (next != null && !next.equals(cur) && q[4] != null && q[5] != null)
-            AddonPrep.request(ctx, next, q[4], q[5], Features.isMusicVideo(next), false);
+        if (next != null && !next.equals(cur) && q[4] != null && q[5] != null) {
+            // the read-ahead (protocol.md 8.1.3): the next song is searched for at once, opened
+            // (its /stream call), fetched and fitted from 25 s before the transition
+            long left = untilTransitionMs();
+            if (left >= 0 && left <= READ_AHEAD_MS) AddonPrep.request(ctx, next, q[4], q[5], Features.isMusicVideo(next), false);
+            else AddonPrep.findAhead(ctx, next, q[4], q[5], Features.isMusicVideo(next));
+        }
 
         // the Dolby Atmos switch went off: Atmos audio hands back to YT's (in step underneath) at once,
         // and the songs are asked again in stereo
@@ -273,7 +293,14 @@ public final class AddonDirect {
             // the length tells songs apart only when they differ by over 2 s: one the queue no longer names
             // (refreshed every 1.5 s) is gone too
             boolean named = cur == null || s == null || s.p.id.equals(cur) || s.p.id.equals(next);
-            if (s != null && !s.done && s.p != onHost && dur > 0 && (Math.abs(dur - s.p.ytDurationSec) > SAME_SONG_SEC || !named)) {
+            if (s != null && !s.done && onHost != null && s.p != onHost && s.p.id.equals(onHost.id) && !mix) {
+                // a better copy of the same song (the lossless pass, "Upgrade quality"): ours stops,
+                // YT carries it while the new one locks on
+                AddonPrep.Prepared old = s.p;
+                s.end("a better copy is ready", false);
+                begin(host, onHost, pos, false, false);
+                AddonPrep.retire(old);
+            } else if (s != null && !s.done && s.p != onHost && dur > 0 && (Math.abs(dur - s.p.ytDurationSec) > SAME_SONG_SEC || !named)) {
                 // YT's player moved to another song: a prepared one carries on on the addon from its
                 // start with YT kept silent; else YT's audio comes back
                 Shadow n = onHost == null || mix ? null : begin(host, onHost, pos, s.share >= 0.5f, false);
@@ -307,6 +334,11 @@ public final class AddonDirect {
             } else if (s.host == host && s.mode != Mode.ON) {
                 locking = true;
             }
+        }
+        // a lossy copy that plays: one pass for lossless (protocol.md 8.2.1)
+        if (host != null) {
+            Shadow on = get(host);
+            if (on != null && !on.done && on.mode == Mode.ON) AddonPrep.playing(on.p);
         }
         AddonPlayback.upgrading(AddonPrep.waiting(cur) || locking);
         AddonPrep.held = Automix.mixing();
@@ -979,7 +1011,7 @@ public final class AddonDirect {
 
     /**
      * adb shell am broadcast -p PKG -a app.ayham.ADDON_TEST [--ef speed 1.05] [--el seekMs 60000 | --el leftMs 45000]
-     * [--es fail release|truncate]: YT's speed or position, or a failure of our player (released as
+     * [--es fail release|truncate] [--es upgrade VIDEO_ID]: YT's speed or position, or a failure of our player (released as
      * by a crash; its file cut short and read again).
      */
     private static void registerTest() {
@@ -987,6 +1019,12 @@ public final class AddonDirect {
             @Override
             public void onReceive(Context c, Intent i) {
                 try {
+                    if (i.hasExtra("upgrade")) {
+                        // the menu's "Upgrade quality" for this song
+                        Log.i(TAG, "test: upgrade " + i.getStringExtra("upgrade"));
+                        app.ayham.extension.music.addons.AddonPrep.upgrade(i.getStringExtra("upgrade"));
+                        return;
+                    }
                     Object host = PlayerTap.current();
                     if (host == null) return;
                     if (i.hasExtra("speed")) {

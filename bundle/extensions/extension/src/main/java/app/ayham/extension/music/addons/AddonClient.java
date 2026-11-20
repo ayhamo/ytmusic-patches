@@ -439,6 +439,28 @@ public final class AddonClient {
     }
 
     /**
+     * "Upgrade quality" (protocol.md 8.1.7): the song's remembered search answers (empty ones
+     * too: every search that named its title) and the /stream answers of the rows tried for it.
+     * Returns how many went.
+     */
+    public synchronized int forgetSong(String title, java.util.Collection<String> rowIds) {
+        String t = title == null || title.isEmpty() ? null : "title=" + Js.encode(title) + "&";
+        int n = 0;
+        Iterator<String> it = cache.keySet().iterator();
+        while (it.hasNext()) {
+            String k = it.next();
+            boolean drop = t != null && k.startsWith("s|") && (k + "&").contains(t);
+            if (!drop && k.startsWith("t|") && rowIds != null)
+                for (String r : rowIds) if (k.contains("/stream/" + Js.encode(r) + "?")) drop = true;
+            if (drop) {
+                it.remove();
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
      * A fresh /stream answer for a row whose link stopped working (an addon's links can expire
      * within a minute, while the player still reads the file): the remembered answer is dropped.
      */
@@ -512,60 +534,65 @@ public final class AddonClient {
     public FindResult find(TrackMatcher.Target target, List<Addon> addons, Options opt) {
         if (opt == null) opt = new Options();
         FindResult out = new FindResult();
-        boolean atmosOk = opt.atmos || opt.atmosOnly;
         List<Found> stereo = new ArrayList<>();
         for (Addon a : addons) {
             if (cancelled(opt)) break;
-            Addon addon = a.copy();
-            if (addon.tier == null) addon.tier = opt.tier;
-            addon.base = Protocol.baseOf(a.base);
-            String host = Protocol.redact(addon.base);
-            if (resting(addon.base)) {
-                out.tried.add(new Tried(host, null, "resting after failures", null));
-                continue;
-            }
-            long t0 = now();
-            try {
-                Protocol.Manifest man = manifest(addon.base);
-                if (man.needsOfficial) {
-                    out.tried.add(new Tried(host, null, Protocol.NEEDS_OFFICIAL, null));
-                    continue;
-                }
-                if (!man.usable) {
-                    out.tried.add(new Tried(host, null, "no search", null));
-                    continue;
-                }
-                if (opt.forDownload && !man.allowDownloads) {
-                    out.tried.add(new Tried(host, null, "no downloads", null));
-                    continue;
-                }
-                Pick.Choice choice = new Pick.Choice();
-                List<Pick.Row> atmosRows = new ArrayList<>();
-                for (String q : TrackMatcher.queries(target)) {
-                    choice = Pick.rowsToOpen(search(addon, target, q, man, atmosOk), target, opt.slackSec, opt.forDownload, atmosOk);
-                    // the first query's Atmos rows are kept; the stereo fallback still needs its own match
-                    if (atmosRows.isEmpty()) atmosRows.addAll(choice.atmos);
-                    if (opt.atmosOnly ? !atmosRows.isEmpty() : !choice.open.isEmpty()) break;
-                }
-                choice.atmos.clear();
-                choice.atmos.addAll(atmosRows);
-                boolean none = opt.atmosOnly ? choice.atmos.isEmpty() : choice.open.isEmpty() && choice.atmos.isEmpty();
-                note(addon.base, true, none ? "no match" : "ok", now() - t0);
-                if (none) {
-                    out.tried.add(new Tried(host, null, opt.atmosOnly ? "no Atmos match" : "no match", choice.refused));
-                    continue;
-                }
-                addon.name = man.name;
-                addon.host = host;
-                // Atmos rows of every addon first, in priority order; then the stereo rows as before
-                if (!choice.atmos.isEmpty()) out.found.add(new Found(addon, choice.atmos, true));
-                if (!opt.atmosOnly && !choice.open.isEmpty()) stereo.add(new Found(addon, choice.open));
-            } catch (RuntimeException e) {
-                failed(addon.base, host, e, t0, out.tried);
-            }
+            findOne(a, target, opt, out.found, stereo, out.tried);
         }
         out.found.addAll(stereo);
         return out;
+    }
+
+    /** One addon's searches: its Atmos rows to atmosOut, its stereo rows to stereoOut, or why not to tried. */
+    private void findOne(Addon a, TrackMatcher.Target target, Options opt, List<Found> atmosOut, List<Found> stereoOut, List<Tried> tried) {
+        boolean atmosOk = opt.atmos || opt.atmosOnly;
+        Addon addon = a.copy();
+        if (addon.tier == null) addon.tier = opt.tier;
+        addon.base = Protocol.baseOf(a.base);
+        String host = Protocol.redact(addon.base);
+        if (resting(addon.base)) {
+            tried.add(new Tried(host, null, "resting after failures", null));
+            return;
+        }
+        long t0 = now();
+        try {
+            Protocol.Manifest man = manifest(addon.base);
+            if (man.needsOfficial) {
+                tried.add(new Tried(host, null, Protocol.NEEDS_OFFICIAL, null));
+                return;
+            }
+            if (!man.usable) {
+                tried.add(new Tried(host, null, "no search", null));
+                return;
+            }
+            if (opt.forDownload && !man.allowDownloads) {
+                tried.add(new Tried(host, null, "no downloads", null));
+                return;
+            }
+            Pick.Choice choice = new Pick.Choice();
+            List<Pick.Row> atmosRows = new ArrayList<>();
+            for (String q : TrackMatcher.queries(target)) {
+                choice = Pick.rowsToOpen(search(addon, target, q, man, atmosOk), target, opt.slackSec, opt.forDownload, atmosOk);
+                // the first query's Atmos rows are kept; the stereo fallback still needs its own match
+                if (atmosRows.isEmpty()) atmosRows.addAll(choice.atmos);
+                if (opt.atmosOnly ? !atmosRows.isEmpty() : !choice.open.isEmpty()) break;
+            }
+            choice.atmos.clear();
+            choice.atmos.addAll(atmosRows);
+            boolean none = opt.atmosOnly ? choice.atmos.isEmpty() : choice.open.isEmpty() && choice.atmos.isEmpty();
+            note(addon.base, true, none ? "no match" : "ok", now() - t0);
+            if (none) {
+                tried.add(new Tried(host, null, opt.atmosOnly ? "no Atmos match" : "no match", choice.refused));
+                return;
+            }
+            addon.name = man.name;
+            addon.host = host;
+            // Atmos rows of every addon first, in priority order; then the stereo rows as before
+            if (!choice.atmos.isEmpty()) atmosOut.add(new Found(addon, choice.atmos, true));
+            if (!opt.atmosOnly && !choice.open.isEmpty()) stereoOut.add(new Found(addon, choice.open));
+        } catch (RuntimeException e) {
+            failed(addon.base, host, e, t0, tried);
+        }
     }
 
     /** Just before the song is needed: /stream and the probe, row by row, addon by addon. */
@@ -584,55 +611,8 @@ public final class AddonClient {
                         none.tried = tried;
                         return none;
                     }
-                    Protocol.Stream s;
-                    try {
-                        s = stream(addon, row, man, f.atmos);
-                    } catch (AddonError e) {
-                        if (!"miss".equals(e.kind)) throw e;
-                        s = Protocol.Stream.miss(e.getMessage());
-                    }
-                    if (s.miss != null) {
-                        tried.add(new Tried(addon.host, row.id, Protocol.scrub(s.miss), null));
-                        continue;
-                    }
-                    if (!"file".equals(s.transport)) {
-                        tried.add(new Tried(addon.host, row.id, s.transport + " (not played yet)", null));
-                        continue;
-                    }
-                    if (!Protocol.allowed(s.url, allowLocalHttp)) {
-                        tried.add(new Tried(addon.host, row.id, "not https", null));
-                        continue;
-                    }
-                    if (s.atmos && opt.atmosDecodes != null && !opt.atmosDecodes.test(s.codec)) {
-                        tried.add(new Tried(addon.host, row.id, "Atmos in " + (s.codec != null ? s.codec : "an unknown codec") + ": no decoder on this phone", null));
-                        continue;
-                    }
-                    if (opt.atmosOnly && !s.atmos) {
-                        tried.add(new Tried(addon.host, row.id, "not Atmos", null));
-                        continue;
-                    }
-                    if (opt.forDownload && !s.atmos && !Protocol.goodForDownload(s)) {
-                        tried.add(new Tried(addon.host, row.id, "lossy at 256 kbps or under", null));
-                        continue;
-                    }
-                    Pick.Verdict p = probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
-                            target.durationSec, opt.forDownload ? Pick.DOWNLOAD_SLACK_SEC : opt.slackSec, s.headers);
-                    if (!p.ok) {
-                        tried.add(new Tried(addon.host, row.id, p.why, null));
-                        continue;
-                    }
-                    note(addon.base, true, "ok", now() - t0);
-                    log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id + ", "
-                            + (s.atmos ? "Dolby Atmos " : "") + (s.codec != null ? s.codec : "?")
-                            + (s.sampleRate != null && s.sampleRate != 0 ? " " + Js.number(s.sampleRate / 1000) + " kHz" : "")
-                            + (s.bitDepth != null && s.bitDepth != 0 ? "/" + Js.number(s.bitDepth) : ""));
-                    Opened o = new Opened();
-                    o.addon = new Addon(addon.base);
-                    o.addon.name = man.name;
-                    o.addon.host = addon.host;
-                    o.row = row;
-                    o.stream = s;
-                    o.tried = tried;
+                    Opened o = openRow(f, man, row, target, opt, tried, t0);
+                    if (o == null) continue;
                     String refused = opt.check == null ? null : opt.check.refuse(o);
                     if (refused != null) {
                         log.log("addons: " + man.name + " row " + row.id + " refused: " + refused);
@@ -657,9 +637,196 @@ public final class AddonClient {
         return none;
     }
 
+    /** One row: its /stream answer and the probe. The answer to check, or null (why in tried). */
+    private Opened openRow(Found f, Protocol.Manifest man, Pick.Row row, TrackMatcher.Target target, Options opt, List<Tried> tried, long t0) {
+        Addon addon = f.addon;
+        Protocol.Stream s;
+        try {
+            s = stream(addon, row, man, f.atmos);
+        } catch (AddonError e) {
+            if (!"miss".equals(e.kind)) throw e;
+            s = Protocol.Stream.miss(e.getMessage());
+        }
+        if (s.miss != null) {
+            tried.add(new Tried(addon.host, row.id, Protocol.scrub(s.miss), null));
+            return null;
+        }
+        if (!"file".equals(s.transport)) {
+            tried.add(new Tried(addon.host, row.id, s.transport + " (not played yet)", null));
+            return null;
+        }
+        if (!Protocol.allowed(s.url, allowLocalHttp)) {
+            tried.add(new Tried(addon.host, row.id, "not https", null));
+            return null;
+        }
+        if (s.atmos && opt.atmosDecodes != null && !opt.atmosDecodes.test(s.codec)) {
+            tried.add(new Tried(addon.host, row.id, "Atmos in " + (s.codec != null ? s.codec : "an unknown codec") + ": no decoder on this phone", null));
+            return null;
+        }
+        if (opt.atmosOnly && !s.atmos) {
+            tried.add(new Tried(addon.host, row.id, "not Atmos", null));
+            return null;
+        }
+        if (opt.forDownload && !s.atmos && !Protocol.goodForDownload(s)) {
+            tried.add(new Tried(addon.host, row.id, "lossy at 256 kbps or under", null));
+            return null;
+        }
+        Pick.Verdict p = probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
+                target.durationSec, opt.forDownload ? Pick.DOWNLOAD_SLACK_SEC : opt.slackSec, s.headers);
+        if (!p.ok) {
+            tried.add(new Tried(addon.host, row.id, p.why, null));
+            return null;
+        }
+        note(addon.base, true, "ok", now() - t0);
+        log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id + ", "
+                + (s.atmos ? "Dolby Atmos " : "") + (s.codec != null ? s.codec : "?")
+                + (s.sampleRate != null && s.sampleRate != 0 ? " " + Js.number(s.sampleRate / 1000) + " kHz" : "")
+                + (s.bitDepth != null && s.bitDepth != 0 ? "/" + Js.number(s.bitDepth) : ""));
+        Opened o = new Opened();
+        o.addon = new Addon(addon.base);
+        o.addon.name = man.name;
+        o.addon.host = addon.host;
+        o.row = row;
+        o.stream = s;
+        o.tried = tried;
+        return o;
+    }
+
     /** The first addon, in priority order, with a row that opens and passes the probe. */
     public Opened resolve(TrackMatcher.Target target, List<Addon> addons, Options opt) {
         FindResult f = find(target, addons, opt);
         return open(f.found, target, opt, f.tried);
+    }
+
+    /** One addon's lane in the race: the answer waiting for the check, its misses, and whether it ended. */
+    private static final class Lane {
+        Opened ready;
+        boolean done;
+        final List<Tried> tried = java.util.Collections.synchronizedList(new ArrayList<Tried>());
+    }
+
+    /**
+     * The race (protocol.md 8.1.4): each addon is a lane of its own (its search, then its rows in
+     * order: /stream and the probe), all at once. The first answer ready wins, and of answers ready
+     * together the higher-ranked addon's. The check (the fetch and the fit) runs on the calling
+     * thread, one answer at a time; a refusal sends that lane on to its next row. Once one is taken,
+     * a lane still searching finishes (its answers land in the cache) but makes no further /stream
+     * call. tried holds each lane's misses in rank order. Dolby Atmos (its rows of every addon go
+     * first) and a single addon keep resolve.
+     */
+    public Opened race(TrackMatcher.Target target, List<Addon> addons, Options opt) {
+        if (opt == null) opt = new Options();
+        if (opt.atmos || opt.atmosOnly || addons.size() < 2) return resolve(target, addons, opt);
+        final Options o = opt;
+        final int n = addons.size();
+        final Lane[] lanes = new Lane[n];
+        final Object lock = new Object();
+        final boolean[] over = new boolean[1];
+        for (int i = 0; i < n; i++) lanes[i] = new Lane();
+        for (int i = 0; i < n; i++) {
+            final Lane lane = lanes[i];
+            final Addon a = addons.get(i);
+            Thread t = new Thread(() -> runLane(a, target, o, lane, lock, over), "addon-lane-" + i);
+            t.setDaemon(true);
+            t.start();
+        }
+        Opened won = null;
+        String why = "no addon has it";
+        try {
+            while (true) {
+                int pick = -1;
+                Opened c;
+                synchronized (lock) {
+                    while (true) {
+                        boolean all = true;
+                        for (int i = 0; i < n && pick < 0; i++) {
+                            if (lanes[i].ready != null) pick = i;
+                            else if (!lanes[i].done) all = false;
+                        }
+                        if (pick >= 0 || all || cancelled(o)) break;
+                        lock.wait(200);
+                    }
+                    c = pick < 0 ? null : lanes[pick].ready;
+                }
+                if (c == null) {
+                    if (cancelled(o)) why = "cancelled";
+                    break;
+                }
+                String refused = o.check == null ? null : o.check.refuse(c);
+                synchronized (lock) {
+                    if (refused == null) {
+                        won = c;
+                        over[0] = true;
+                    } else {
+                        log.log("addons: " + c.addon.name + " row " + c.row.id + " refused: " + refused);
+                        lanes[pick].tried.add(new Tried(c.addon.host, c.row.id, refused, null));
+                        lanes[pick].ready = null;
+                    }
+                    lock.notifyAll();
+                }
+                if (won != null) break;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            why = "cancelled";
+        } finally {
+            synchronized (lock) {
+                over[0] = true;
+                lock.notifyAll();
+            }
+        }
+        List<Tried> tried = new ArrayList<>();
+        for (Lane l : lanes) synchronized (l.tried) {
+            tried.addAll(l.tried);
+        }
+        if (won != null) {
+            won.tried = tried;
+            return won;
+        }
+        Opened none = new Opened();
+        none.none = why;
+        none.tried = tried;
+        return none;
+    }
+
+    private void runLane(Addon a, TrackMatcher.Target target, Options o, Lane lane, Object lock, boolean[] over) {
+        try {
+            List<Found> found = new ArrayList<>();
+            findOne(a, target, o, new ArrayList<Found>(), found, lane.tried);
+            for (Found f : found) {
+                long t0 = now();
+                try {
+                    Protocol.Manifest man = manifest(f.addon.base);
+                    for (Pick.Row row : f.rows) {
+                        synchronized (lock) {
+                            if (over[0]) return;
+                        }
+                        if (cancelled(o)) return;
+                        Opened c = openRow(f, man, row, target, o, lane.tried, t0);
+                        if (c == null) continue;
+                        synchronized (lock) {
+                            lane.ready = c;
+                            lock.notifyAll();
+                            while (lane.ready != null && !over[0]) lock.wait();
+                            if (over[0]) return;
+                        }
+                    }
+                } catch (AddonError e) {
+                    if ("limit".equals(e.kind)) lane.tried.add(new Tried(f.addon.host, null, e.getMessage(), null));
+                    else failed(f.addon.base, f.addon.host, e, t0, lane.tried);
+                } catch (RuntimeException e) {
+                    failed(f.addon.base, f.addon.host, e, t0, lane.tried);
+                }
+            }
+        } catch (InterruptedException ignored) {
+            // the race is over
+        } catch (RuntimeException e) {
+            lane.tried.add(new Tried(Protocol.redact(Protocol.baseOf(a.base)), null, Protocol.scrub(String.valueOf(e)), null));
+        } finally {
+            synchronized (lock) {
+                lane.done = true;
+                lock.notifyAll();
+            }
+        }
     }
 }

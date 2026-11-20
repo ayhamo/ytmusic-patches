@@ -100,6 +100,9 @@ public final class AddonPrep {
          */
         public StreamCache.Entry stream;
 
+        /** Pick.qualityRank of its stream (0 lossy, 1 lossless, 2 Hi-Res), -1 unknown: the lossless pass (8.2.1). */
+        public int rank = -1;
+
         /** Dolby Atmos: the WAV our decode was written to (AtmosWav), deleted with the song even when saved. */
         public File wav;
 
@@ -237,8 +240,95 @@ public final class AddonPrep {
         if (id == null) return;
         youtubeOnly.remove(id);
         failedAt.remove(id);
-        Log.i(TAG, id + ": upgrade asked");
+        // protocol.md 8.1.7: its remembered answers and kept files go, so it is found and fetched afresh
+        String[] info = asked.get(id);
+        java.util.Set<String> rows = rowsTried.get(id);
+        java.util.List<String> keys = new ArrayList<>();
+        java.util.List<String> ids = new ArrayList<>();
+        if (rows != null) for (String r : rows) {
+            String[] hr = r.split("\t", 2);
+            ids.add(hr[1]);
+            keys.add(StreamCache.key(hr[0], hr[1] + "_"));
+        }
+        int answers = client().forgetSong(info == null ? null : info[0], ids);
+        int files = ctx == null || keys.isEmpty() ? 0 : StreamCache.drop(ctx, keys);
+        Prepared p = ready.get(id);
+        boolean playing = p != null && app.ayham.extension.music.automix.AddonDirect.inUse(id);
+        if (p != null && !playing) {
+            ready.remove(id);
+            deleteFiles(p);
+        }
+        Log.i(TAG, id + ": upgrade asked (" + answers + " remembered answers and " + files + " kept files dropped)"
+                + (playing ? "; the playing copy stays until a new one is ready" : ""));
+        if (playing) pass(id, new Pass(p, -1, false));
+        else if (info != null) request(ctx, id, info[0], info[1], "1".equals(info[2]), id.equals(current));
     }
+
+    /**
+     * A second look for a song whose copy plays: "Upgrade quality" (8.1.7, any copy) or the lossless
+     * pass (8.2.1: better than the playing one, its row left out). The playing copy stays in ready
+     * until a new one is; it is then kept here until our player leaves it (retire).
+     */
+    static final class Pass {
+        final Prepared old;
+        final int minRank;
+        final boolean leaveOut;
+
+        Pass(Prepared old, int minRank, boolean leaveOut) {
+            this.old = old;
+            this.minRank = minRank;
+            this.leaveOut = leaveOut;
+        }
+
+        /** Why this answer can't replace the playing copy, or null. */
+        String refuse(AddonClient.Opened o) {
+            if (leaveOut && old.rowId != null && o.row != null && old.rowId.equals(o.row.id) && old.host != null && old.host.equals(o.addon.host))
+                return "the playing copy";
+            if (minRank >= 0 && Pick.qualityRank(o.stream) < minRank) return "not better than the playing copy";
+            return null;
+        }
+    }
+
+    private static final Map<String, Pass> passes = new HashMap<>();
+    /** Copies replaced while our player was on them: released when it leaves them (retire). */
+    private static final Map<String, Prepared> replaced = new HashMap<>();
+    /** Songs whose lossless pass ran (once per song). */
+    private static final java.util.Set<String> passDone = new java.util.HashSet<>();
+
+    private static synchronized void pass(String id, Pass ps) {
+        if (ctx == null || !asked.containsKey(id)) return;
+        passes.put(id, ps);
+        queue.remove(id);
+        if (id.equals(current)) queue.addFirst(id);
+        else queue.addLast(id);
+        if (worker == null) {
+            worker = new Thread(AddonPrep::work, "addon-prep");
+            worker.start();
+        }
+        AddonPrep.class.notifyAll();
+    }
+
+    /**
+     * Our player is on this copy (AddonDirect): a lossy one is followed by one pass for lossless or
+     * better, its row left out (protocol.md 8.2.1). Once per song.
+     */
+    public static synchronized void playing(Prepared p) {
+        if (p == null || p.saved || p.atmos || p.rank != 0 || passes.containsKey(p.id) || !passDone.add(p.id)) return;
+        if (passDone.size() > 200) passDone.clear();
+        Log.i(TAG, p.id + ": a lossy copy plays (" + p.addon + ", " + p.codec + "): one pass for lossless");
+        pass(p.id, new Pass(p, 1, true));
+    }
+
+    /** Our player left a copy a better one replaced: its stream and files go. */
+    public static synchronized void retire(Prepared old) {
+        if (old != null && replaced.get(old.id) == old) {
+            replaced.remove(old.id);
+            deleteFiles(old);
+        }
+    }
+
+    /** The rows tried for a song (host, a tab, rowId), for "Upgrade quality". */
+    private static final Map<String, java.util.Set<String>> rowsTried = new java.util.concurrent.ConcurrentHashMap<>();
 
     public static boolean youtubeChosen(String id) {
         return id != null && youtubeOnly.contains(id);
@@ -294,6 +384,41 @@ public final class AddonPrep {
         AddonPrep.class.notifyAll();
     }
 
+    /** Songs whose searches ran ahead (findAhead), once each. */
+    private static final java.util.Set<String> foundAhead = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * The read-ahead (protocol.md 8.1.3): the next song's searches as soon as the queue shows it,
+     * no /stream call (its answers wait in the client's cache); its OPEN, fetch and fit start 25 s
+     * before the transition (request).
+     */
+    public static void findAhead(Context c, String id, String title, String artist, boolean isVideo) {
+        if (c == null || id == null || title == null || artist == null || !AddonSettings.on()) return;
+        if (ready.containsKey(id) || failed(id)) return;
+        if (foundAhead.size() > 64) foundAhead.clear();
+        if (!foundAhead.add(id)) return;
+        final Context app = c.getApplicationContext();
+        Thread th = new Thread(() -> {
+            try {
+                TrackMatcher.Target t = new TrackMatcher.Target();
+                t.title = title;
+                t.artist = artist;
+                t.isVideo = isVideo;
+                List<AddonClient.Addon> addons = new ArrayList<>();
+                for (String l : AddonSettings.links(app)) addons.add(new AddonClient.Addon(l));
+                AddonClient.Options opt = new AddonClient.Options();
+                opt.atmos = AddonSettings.atmos();
+                long t0 = SystemClock.elapsedRealtime();
+                AddonClient.FindResult f = client().find(t, addons, opt);
+                Log.i(TAG, id + ": searched ahead: " + f.found.size() + " addons have it (" + (SystemClock.elapsedRealtime() - t0) + " ms); its /stream waits for the last 25 s");
+            } catch (Throwable e) {
+                Log.w(TAG, id + ": search ahead failed: " + Protocol.scrub(String.valueOf(e)));
+            }
+        }, "addon-find-ahead");
+        th.setPriority(Thread.MIN_PRIORITY);
+        th.start();
+    }
+
     private static synchronized AddonClient client() {
         if (client == null) client = AddonClient.create(line -> Log.i(TAG, Protocol.scrub(line)));
         return client;
@@ -314,7 +439,7 @@ public final class AddonPrep {
                 }
                 id = queue.pollFirst();
                 info = asked.get(id);
-                if (info == null || ready.containsKey(id) || !AddonSettings.on()) continue;
+                if (info == null || (ready.containsKey(id) && !passes.containsKey(id)) || !AddonSettings.on()) continue;
                 working = id;
             }
             long t0 = SystemClock.elapsedRealtime();
@@ -346,6 +471,28 @@ public final class AddonPrep {
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 Log.w(TAG, "prepare " + id + " failed: " + why);
+            }
+            Pass ps;
+            synchronized (AddonPrep.class) {
+                ps = passes.remove(id);
+            }
+            if (ps != null) {
+                synchronized (AddonPrep.class) {
+                    working = null;
+                    if (p != null && ready.get(id) == ps.old) {
+                        ready.put(id, p);
+                        if (app.ayham.extension.music.automix.AddonDirect.inUse(id)) replaced.put(id, ps.old);
+                        else deleteFiles(ps.old);
+                    } else if (p != null) {
+                        deleteFiles(p);   // the song went meanwhile
+                        p = null;
+                        why = "the playing copy went meanwhile";
+                    }
+                }
+                Log.i(TAG, id + ": " + (ps.minRank >= 0 ? "lossless pass" : "upgrade") + ": "
+                        + (p != null ? "a new copy replaces the playing one: " + p : "nothing better (" + why + "); the playing copy stays")
+                        + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
+                continue;
             }
             synchronized (AddonPrep.class) {
                 working = null;
@@ -606,7 +753,15 @@ public final class AddonPrep {
         if (dl == null) opt.cancelled = AddonPrep::stale;
         opt.check = o -> {
             if (dl == null && stale()) return "no longer playing or next";
+            if (o.row != null && o.row.id != null)
+                rowsTried.computeIfAbsent(id, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(o.addon.host + "\t" + o.row.id);
             try {
+                Pass ps;
+                synchronized (AddonPrep.class) {
+                    ps = dl == null ? passes.get(id) : null;
+                }
+                String notBetter = ps == null ? null : ps.refuse(o);
+                if (notBetter != null) return notBetter;
                 String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
                 if (early != null) return early;
                 // the lossy floor (protocol.md 8.2.1): a lossy answer under 96 kbps over YouTube's
@@ -653,7 +808,8 @@ public final class AddonPrep {
         };
         AddonClient.Opened o;
         try {
-            o = client().resolve(t, addons, opt);
+            // the race (protocol.md 8.1.4): every addon at once; the fit checks one answer at a time
+            o = client().race(t, addons, opt);
         } finally {
             // an Atmos file no stereo row placed
             if (held != null && held[0] != null) {
@@ -744,6 +900,7 @@ public final class AddonPrep {
             Log.i(TAG, String.format(Locale.US, "%s: %s's stream: %d KB read for the fit in %d ms", id, o.addon.name, e.fetched / 1024, SystemClock.elapsedRealtime() - t0));
             if (p.score >= 0) {
                 p.stream = e;
+                p.rank = Pick.qualityRank(s);
                 kept = true;
             }
             return p;

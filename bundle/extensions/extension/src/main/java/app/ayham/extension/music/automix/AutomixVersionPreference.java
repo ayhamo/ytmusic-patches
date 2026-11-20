@@ -45,6 +45,9 @@ public class AutomixVersionPreference extends ListPreference {
                 || "ayham_artist_video_quality".equals(key)) {
             setEntries(new CharSequence[]{"360p", "720p (default)", "1080p", "Original"});
             setEntryValues(new CharSequence[]{"360", "720", "1080", "orig"});
+        } else if ("ayham_artist_videos".equals(key)) {
+            setEntries(new CharSequence[]{"Follow Artist images (default)", "On: the artist's moving picture, muted", "Off"});
+            setEntryValues(new CharSequence[]{"follow", "on", "off"});
         } else if (app.ayham.extension.music.features.CanvasSettings.KEY_YT_QUALITY.equals(key)) {
             setEntries(new CharSequence[]{"Auto (sized for the art)", "2160p", "1440p", "1080p", "720p", "480p (default)"});
             setEntryValues(new CharSequence[]{"auto", "2160", "1440", "1080", "720", "480"});

@@ -272,6 +272,13 @@ final class AppleCanvas {
         return null;
     }
 
+    /** Apple's catalog at [path] ("us/artists/123?..."), with the web player's token. */
+    static JSONObject catalog(String path) throws Exception {
+        String bearer = token();
+        if (bearer == null) throw new IllegalStateException("no web player token");
+        return new JSONObject(get(AMP + path, bearer));
+    }
+
     private static synchronized String token() throws Exception {
         long now = System.currentTimeMillis();
         if (token != null && now < tokenExpires - 60_000) return token;

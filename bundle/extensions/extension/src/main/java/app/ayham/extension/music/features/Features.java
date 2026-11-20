@@ -633,6 +633,11 @@ public final class Features {
 
         final Runnable tick = () -> {
             try {
+                try {
+                    ArtistHeader.tick(activity, decor);
+                } catch (Throwable t) {
+                    failed("artistHeader", t);
+                }
                 View page = decor.findViewById(pageId);
                 if (page == null) return;
                 if (overlay[0] == null && page instanceof ViewGroup) {

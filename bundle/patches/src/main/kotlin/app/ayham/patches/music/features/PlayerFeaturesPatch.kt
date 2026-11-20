@@ -171,6 +171,26 @@ val playerFeaturesPatch = patch(
                                 }
                             }
                         }
+                        // canvas.md §13 rule 8: Apple's artist image and video on YT's artist pages, off by default
+                        if (key == "ayham_artistArt") {
+                            appendChild("SwitchPreference") {
+                                setAttribute("android:key", "ayham_artist_images")
+                                setAttribute("android:title", "Artist images")
+                                setAttribute("android:summary", "An artist's page shows their Apple Music picture at the top, where Apple has the artist under that exact name.")
+                                setAttribute("android:defaultValue", "false")
+                            }
+                            listOf(
+                                Triple("ayham_artist_videos", "Artist videos", "follow"),
+                                Triple("ayham_artist_video_quality", "Artist video quality", "720"),
+                            ).forEach { (k, t, d) ->
+                                appendChild("$AUTOMIX.AutomixVersionPreference") {
+                                    setAttribute("android:key", k)
+                                    setAttribute("android:title", t)
+                                    setAttribute("android:summary", "%s")
+                                    setAttribute("android:defaultValue", d)
+                                }
+                            }
+                        }
                         if (key == "ayham_canvas") appendChild("app.ayham.extension.music.features.ClearCanvasCachePreference") {
                             setAttribute("android:key", "ayham_clear_canvas_cache")
                             setAttribute("android:dependency", "ayham_canvas")

@@ -6627,5 +6627,1095 @@
    },
    "expect": 1
   }
- ]
+ ],
+  "chorus": [
+    {
+      "name": "the most repeated lyric (Prism's test)",
+      "input": {
+        "durationMs": 200000,
+        "lines": [
+          {
+            "timeMs": 2000,
+            "text": "Intro line here"
+          },
+          {
+            "timeMs": 10000,
+            "text": "First verse goes"
+          },
+          {
+            "timeMs": 14000,
+            "text": "Another verse line"
+          },
+          {
+            "timeMs": 30000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 34000,
+            "text": "Sing it all together"
+          },
+          {
+            "timeMs": 50000,
+            "text": "Second verse now"
+          },
+          {
+            "timeMs": 70000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 74000,
+            "text": "Sing it all together"
+          },
+          {
+            "timeMs": 100000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 104000,
+            "text": "Sing it all together"
+          }
+        ]
+      },
+      "expect": 30000
+    },
+    {
+      "name": "nothing repeats: none (Prism's test)",
+      "input": {
+        "durationMs": 200000,
+        "lines": [
+          {
+            "timeMs": 10000,
+            "text": "Line number 1 is different"
+          },
+          {
+            "timeMs": 20000,
+            "text": "Line number 2 is different"
+          },
+          {
+            "timeMs": 30000,
+            "text": "Line number 3 is different"
+          },
+          {
+            "timeMs": 40000,
+            "text": "Line number 4 is different"
+          },
+          {
+            "timeMs": 50000,
+            "text": "Line number 5 is different"
+          },
+          {
+            "timeMs": 60000,
+            "text": "Line number 6 is different"
+          },
+          {
+            "timeMs": 70000,
+            "text": "Line number 7 is different"
+          },
+          {
+            "timeMs": 80000,
+            "text": "Line number 8 is different"
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "a song under 60 s: none",
+      "input": {
+        "durationMs": 50000,
+        "lines": [
+          {
+            "timeMs": 2000,
+            "text": "Intro line here"
+          },
+          {
+            "timeMs": 10000,
+            "text": "First verse goes"
+          },
+          {
+            "timeMs": 14000,
+            "text": "Another verse line"
+          },
+          {
+            "timeMs": 30000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 34000,
+            "text": "Sing it all together"
+          },
+          {
+            "timeMs": 50000,
+            "text": "Second verse now"
+          },
+          {
+            "timeMs": 70000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 74000,
+            "text": "Sing it all together"
+          },
+          {
+            "timeMs": 100000,
+            "text": "This is the chorus"
+          },
+          {
+            "timeMs": 104000,
+            "text": "Sing it all together"
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "pulled back over the pre-chorus that repeats (most - 1 times)",
+      "input": {
+        "durationMs": 200000,
+        "lines": [
+          {
+            "timeMs": 10000,
+            "text": "Verse one line"
+          },
+          {
+            "timeMs": 20000,
+            "text": "Pre chorus rises"
+          },
+          {
+            "timeMs": 24000,
+            "text": "Big chorus hook"
+          },
+          {
+            "timeMs": 50000,
+            "text": "Verse two line"
+          },
+          {
+            "timeMs": 60000,
+            "text": "Pre chorus rises"
+          },
+          {
+            "timeMs": 64000,
+            "text": "Big chorus hook"
+          },
+          {
+            "timeMs": 90000,
+            "text": "Big chorus hook"
+          }
+        ]
+      },
+      "expect": 20000
+    },
+    {
+      "name": "a repeat before 5 s is not the start",
+      "input": {
+        "durationMs": 200000,
+        "lines": [
+          {
+            "timeMs": 1000,
+            "text": "Hey hey hey"
+          },
+          {
+            "timeMs": 10000,
+            "text": "Verse line one"
+          },
+          {
+            "timeMs": 20000,
+            "text": "Hey hey hey"
+          },
+          {
+            "timeMs": 40000,
+            "text": "Verse line two"
+          },
+          {
+            "timeMs": 60000,
+            "text": "Hey hey hey"
+          }
+        ]
+      },
+      "expect": 20000
+    }
+  ],
+  "titleGate": [
+    {
+      "name": "a word in the song's own title doesn't count",
+      "input": {
+        "songTitle": "Blue Amber (Live at Nissan Stadium)",
+        "videoTitle": "back number - Blue Amber (Live at Nissan Stadium)"
+      },
+      "expect": false
+    },
+    {
+      "name": "'cover' in the song's title",
+      "input": {
+        "songTitle": "Cover Me",
+        "videoTitle": "Cover Me (Official Video)"
+      },
+      "expect": false
+    },
+    {
+      "name": "a live take of a studio song",
+      "input": {
+        "songTitle": "Blue Amber",
+        "videoTitle": "back number - Blue Amber (Live at Nissan Stadium)"
+      },
+      "expect": true
+    },
+    {
+      "name": "'live' not inside 'alive'",
+      "input": {
+        "songTitle": "Alive",
+        "videoTitle": "Artist - Alive (Official Video)"
+      },
+      "expect": false
+    },
+    {
+      "name": "'stage' not inside 'backstage'",
+      "input": {
+        "songTitle": "Backstage",
+        "videoTitle": "Artist - Backstage (Official Video)"
+      },
+      "expect": false
+    },
+    {
+      "name": "a visualizer is allowed",
+      "input": {
+        "songTitle": "Song",
+        "videoTitle": "Artist - Song (Official Visualizer)"
+      },
+      "expect": false
+    },
+    {
+      "name": "an audio upload",
+      "input": {
+        "songTitle": "Song",
+        "videoTitle": "Artist - Song (Official Audio)"
+      },
+      "expect": true
+    },
+    {
+      "name": "a lyric video",
+      "input": {
+        "songTitle": "Song",
+        "videoTitle": "Artist - Song [Official Lyric Video]"
+      },
+      "expect": true
+    },
+    {
+      "name": "en vivo",
+      "input": {
+        "songTitle": "Canción",
+        "videoTitle": "Artista - Canción (En Vivo)"
+      },
+      "expect": true
+    },
+    {
+      "name": "ao vivo",
+      "input": {
+        "songTitle": "Canção",
+        "videoTitle": "Artista - Canção (Ao Vivo)"
+      },
+      "expect": true
+    },
+    {
+      "name": "letra",
+      "input": {
+        "songTitle": "Canción",
+        "videoTitle": "Artista - Canción (Letra)"
+      },
+      "expect": true
+    },
+    {
+      "name": "'full song' without 'video'",
+      "input": {
+        "songTitle": "Darlingey",
+        "videoTitle": "Darlingey Full Song || Mirchi"
+      },
+      "expect": true
+    },
+    {
+      "name": "'full video song' is the video",
+      "input": {
+        "songTitle": "Seeti Maar",
+        "videoTitle": "Seeti Maar Full Video Song | Allu Arjun"
+      },
+      "expect": false
+    },
+    {
+      "name": "a Korean fancam",
+      "input": {
+        "songTitle": "RUDE!",
+        "videoTitle": "Hearts2Hearts RUDE! 직캠"
+      },
+      "expect": true
+    },
+    {
+      "name": "a Korean stage",
+      "input": {
+        "songTitle": "RUDE!",
+        "videoTitle": "Hearts2Hearts - RUDE! 무대"
+      },
+      "expect": true
+    },
+    {
+      "name": "an MV",
+      "input": {
+        "songTitle": "RUDE!",
+        "videoTitle": "Hearts2Hearts 'RUDE!' MV"
+      },
+      "expect": false
+    },
+    {
+      "name": "Prism's Pleaser lyric video",
+      "input": {
+        "songTitle": "Pleaser",
+        "videoTitle": "Wallows - Pleaser (Lyric Video)"
+      },
+      "expect": true
+    }
+  ],
+  "clipFind": [
+    {
+      "name": "a lyric video found first: the music video one search away",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "lyric",
+        "videos": {
+          "lyric": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Lyric Video)",
+            "status": "OK",
+            "still": false
+          },
+          "real": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": [
+          "real"
+        ]
+      },
+      "expect": {
+        "videoId": "real",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "an official lyric video and nothing better: that one",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "lyric",
+        "videos": {
+          "lyric": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Lyric Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": "lyric",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "the second search finds only refused ones: the first as it is",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "lyric",
+        "videos": {
+          "lyric": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Lyric Video)",
+            "status": "OK",
+            "still": false
+          },
+          "audio": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Pleaser (Official Audio)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": [
+          "lyric",
+          "audio"
+        ]
+      },
+      "expect": {
+        "videoId": "lyric",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "a still lyric video is still a still",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "lyric",
+        "videos": {
+          "lyric": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Lyric Video)",
+            "status": "OK",
+            "still": true
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": null,
+        "why": "STILL",
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "a live take and nothing better: the live take",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "v",
+        "videos": {
+          "v": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Live at Coachella)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": "v",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "not marked official and nothing better: still the song's video",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "v",
+        "videos": {
+          "v": {
+            "type": "MUSIC_VIDEO_TYPE_UGC",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": "v",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "a live take found first, the music video in the second search",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "live",
+        "videos": {
+          "live": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Pleaser (Live)",
+            "status": "OK",
+            "still": false
+          },
+          "real": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": [
+          "real"
+        ]
+      },
+      "expect": {
+        "videoId": "real",
+        "why": null,
+        "otherSearches": 1
+      }
+    },
+    {
+      "name": "a good first video is not searched past",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "v1",
+        "videos": {
+          "v1": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          },
+          "v2": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": [
+          "v2"
+        ]
+      },
+      "expect": {
+        "videoId": "v1",
+        "why": null,
+        "otherSearches": 0
+      }
+    },
+    {
+      "name": "no video found",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": null,
+        "videos": {},
+        "others": []
+      },
+      "expect": {
+        "videoId": null,
+        "why": "NO_VIDEO",
+        "otherSearches": 0
+      }
+    },
+    {
+      "name": "not a song: no search",
+      "input": {
+        "song": {
+          "title": "Pleaser",
+          "notASong": true
+        },
+        "first": "v",
+        "videos": {
+          "v": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Wallows - Pleaser (Official Video)",
+            "status": "OK",
+            "still": false
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": null,
+        "why": "NOT_A_SONG",
+        "otherSearches": 0
+      }
+    },
+    {
+      "name": "a live take that can't be played: none",
+      "input": {
+        "song": {
+          "title": "Pleaser"
+        },
+        "first": "v",
+        "videos": {
+          "v": {
+            "type": "MUSIC_VIDEO_TYPE_OMV",
+            "title": "Pleaser (Live)",
+            "status": "LOGIN_REQUIRED",
+            "still": false
+          }
+        },
+        "others": []
+      },
+      "expect": {
+        "videoId": null,
+        "why": "RESTRICTED",
+        "otherSearches": 1
+      }
+    }
+  ],
+  "snap": [
+    {
+      "name": "a lyric line just before (Prism's test)",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [
+          20000,
+          42000,
+          50000
+        ],
+        "tempo": null
+      },
+      "expect": 41750
+    },
+    {
+      "name": "a line just after is taken too (Prism's test)",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [
+          20000,
+          44000
+        ],
+        "tempo": null
+      },
+      "expect": 43750
+    },
+    {
+      "name": "no line near: the bar before on a steady grid (Prism's test)",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [],
+        "tempo": {
+          "bpm": 120,
+          "steady": true,
+          "firstBeatMs": 500
+        }
+      },
+      "expect": 42500
+    },
+    {
+      "name": "no line, no grid: a second before (Prism's test)",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [],
+        "tempo": null
+      },
+      "expect": 42000
+    },
+    {
+      "name": "a line after counts 1500 farther",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [
+          41000,
+          44000
+        ],
+        "tempo": null
+      },
+      "expect": 40750
+    },
+    {
+      "name": "a line 4.5 s before is too far: a second before",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [
+          38500
+        ],
+        "tempo": null
+      },
+      "expect": 42000
+    },
+    {
+      "name": "an unsteady grid is not used",
+      "input": {
+        "targetMs": 43000,
+        "lineStarts": [],
+        "tempo": {
+          "bpm": 120,
+          "steady": false,
+          "firstBeatMs": 500
+        }
+      },
+      "expect": 42000
+    },
+    {
+      "name": "never below 0",
+      "input": {
+        "targetMs": 500,
+        "lineStarts": [],
+        "tempo": null
+      },
+      "expect": 0
+    }
+  ],
+  "bestPartButton": [
+    {
+      "name": "early in the song, the part ahead",
+      "input": {
+        "atMs": 10000,
+        "startMs": 60000,
+        "knownAtMs": 0
+      },
+      "expect": true
+    },
+    {
+      "name": "past 30 s, known at the start",
+      "input": {
+        "atMs": 31000,
+        "startMs": 60000,
+        "knownAtMs": 0
+      },
+      "expect": false
+    },
+    {
+      "name": "known late: 15 s from then",
+      "input": {
+        "atMs": 40000,
+        "startMs": 90000,
+        "knownAtMs": 28000
+      },
+      "expect": true
+    },
+    {
+      "name": "never after 45 s",
+      "input": {
+        "atMs": 46000,
+        "startMs": 90000,
+        "knownAtMs": 40000
+      },
+      "expect": false
+    },
+    {
+      "name": "less than 3 s ahead: gone",
+      "input": {
+        "atMs": 57500,
+        "startMs": 60000,
+        "knownAtMs": 50000
+      },
+      "expect": false
+    },
+    {
+      "name": "exactly 3 s ahead: gone",
+      "input": {
+        "atMs": 27000,
+        "startMs": 30000,
+        "knownAtMs": 0
+      },
+      "expect": false
+    }
+  ],
+  "songMenu": [
+    {
+      "name": "a song with its loop showing: every row",
+      "input": {
+        "canvasOn": true,
+        "useVideos": true,
+        "isSong": true,
+        "hasLoop": true,
+        "loopOff": false,
+        "loopShows": true
+      },
+      "expect": {
+        "canvasSwitch": true,
+        "pickVideo": true,
+        "pickPart": true,
+        "notThisVideo": true
+      }
+    },
+    {
+      "name": "a song with no loop yet: Pick another video only",
+      "input": {
+        "canvasOn": true,
+        "useVideos": true,
+        "isSong": true,
+        "hasLoop": false,
+        "loopOff": false,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": false,
+        "pickVideo": true,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    },
+    {
+      "name": "switched off for the song: the switch stays, nothing else (Prism)",
+      "input": {
+        "canvasOn": true,
+        "useVideos": true,
+        "isSong": true,
+        "hasLoop": true,
+        "loopOff": true,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": true,
+        "pickVideo": false,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    },
+    {
+      "name": "Canvas off: nothing",
+      "input": {
+        "canvasOn": false,
+        "useVideos": true,
+        "isSong": true,
+        "hasLoop": true,
+        "loopOff": false,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": false,
+        "pickVideo": false,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    },
+    {
+      "name": "music video source off: nothing",
+      "input": {
+        "canvasOn": true,
+        "useVideos": false,
+        "isSong": true,
+        "hasLoop": true,
+        "loopOff": false,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": false,
+        "pickVideo": false,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    },
+    {
+      "name": "not a song (a podcast episode): nothing",
+      "input": {
+        "canvasOn": true,
+        "useVideos": true,
+        "isSong": false,
+        "hasLoop": false,
+        "loopOff": false,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": false,
+        "pickVideo": false,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    },
+    {
+      "name": "a loop kept, another source showing (Use): no part or Not this video",
+      "input": {
+        "canvasOn": true,
+        "useVideos": true,
+        "isSong": true,
+        "hasLoop": true,
+        "loopOff": false,
+        "loopShows": false
+      },
+      "expect": {
+        "canvasSwitch": true,
+        "pickVideo": true,
+        "pickPart": false,
+        "notThisVideo": false
+      }
+    }
+  ],
+  "pickPart": [
+    {
+      "name": "a runner-up picked: the old part takes its place (Prism)",
+      "input": {
+        "startMs": 60000,
+        "others": [
+          20000,
+          90000,
+          120000
+        ],
+        "pickMs": 90000
+      },
+      "expect": {
+        "startMs": 90000,
+        "others": [
+          20000,
+          60000,
+          120000
+        ]
+      }
+    },
+    {
+      "name": "the part playing picked: nothing moves",
+      "input": {
+        "startMs": 60000,
+        "others": [
+          20000,
+          90000
+        ],
+        "pickMs": 60000
+      },
+      "expect": {
+        "startMs": 60000,
+        "others": [
+          20000,
+          90000
+        ]
+      }
+    },
+    {
+      "name": "a start not among the others: the old part goes first",
+      "input": {
+        "startMs": 60000,
+        "others": [
+          20000,
+          90000
+        ],
+        "pickMs": 150000
+      },
+      "expect": {
+        "startMs": 150000,
+        "others": [
+          60000,
+          20000,
+          90000
+        ]
+      }
+    },
+    {
+      "name": "no others",
+      "input": {
+        "startMs": 60000,
+        "others": [],
+        "pickMs": 30000
+      },
+      "expect": {
+        "startMs": 30000,
+        "others": [
+          60000
+        ]
+      }
+    }
+  ],
+  "videoChoices": [
+    {
+      "name": "the pairing first, then the search's order",
+      "input": {
+        "pairing": "b",
+        "found": [
+          "a",
+          "b",
+          "c"
+        ],
+        "rejected": []
+      },
+      "expect": [
+        "b",
+        "a",
+        "c"
+      ]
+    },
+    {
+      "name": "no pairing (signed out): the search's order",
+      "input": {
+        "pairing": null,
+        "found": [
+          "a",
+          "b",
+          "c"
+        ],
+        "rejected": []
+      },
+      "expect": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "name": "a pairing the search didn't find is not added (Prism)",
+      "input": {
+        "pairing": "z",
+        "found": [
+          "a",
+          "b"
+        ],
+        "rejected": []
+      },
+      "expect": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "turned-away videos are left out",
+      "input": {
+        "pairing": null,
+        "found": [
+          "a",
+          "b",
+          "c"
+        ],
+        "rejected": [
+          "b"
+        ]
+      },
+      "expect": [
+        "a",
+        "c"
+      ]
+    },
+    {
+      "name": "at most 10, before turned-away ones are left out (Prism)",
+      "input": {
+        "pairing": null,
+        "found": [
+          "v00",
+          "v01",
+          "v02",
+          "v03",
+          "v04",
+          "v05",
+          "v06",
+          "v07",
+          "v08",
+          "v09",
+          "v10",
+          "v11"
+        ],
+        "rejected": [
+          "v00"
+        ]
+      },
+      "expect": [
+        "v01",
+        "v02",
+        "v03",
+        "v04",
+        "v05",
+        "v06",
+        "v07",
+        "v08",
+        "v09"
+      ]
+    },
+    {
+      "name": "repeats once",
+      "input": {
+        "pairing": null,
+        "found": [
+          "a",
+          "b",
+          "a"
+        ],
+        "rejected": []
+      },
+      "expect": [
+        "a",
+        "b"
+      ]
+    }
+  ]
 }

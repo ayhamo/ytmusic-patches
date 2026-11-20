@@ -36,7 +36,9 @@ The lines change ahead of the voice, so the change has finished when the line is
 5. **[view]** The scroll to the next line starts ahead of it too: clamp(the next line's start − this line's end, 350, 500) ms, never more than 450 ms of animation. `LyricsRetiming.kt:15-17`, `ML/ui/components/lyrics/LyricsView.kt` (scroll), BitChord `BC/PlayerLyrics.kt:425-426, 470-484`.
 6. **[view, strip]** A setting "lyrics by real timing" turns all leads off (default off). `ML/settings/Settings.kt:469`, `LyricsRetiming.kt:330-331`.
 
-Cases: `currentLine`.
+7. **[view]** Which lines are active is a function of the position alone (`activeLines`): Metrolist's engine also remembers the lines active a moment ago (it keeps one through a short blank and keeps a duet line it already lit), which a port may add; the cases hold the stateless reading. `LyricsRetiming.kt:362-460`.
+
+Cases: `currentLine`, `activeLines`.
 
 ## 3. Offsets
 
@@ -114,17 +116,17 @@ Cases: `gaps`.
 
 ### PC against the original (as of 917f33f)
 
-- Early highlight: none; the line is active from its start to its end (`src/lyrics-ui.js:1381-1391`). The Fluid style scrolls 540 ms early (`:819, 1421-1427`).
-- One active line at a time (`break` at `src/lyrics-ui.js:1390`): duet lines don't run together.
-- Offset: per song and provider only (`vivi_lyrics_offset_` + artist, title, provider; `src/lyrics-ui.js:14, 228-254`), steps of 100 ms, a Save button. No global offset. Same sign as the rule.
-- Auto-scroll: every line change scrolls the line to the centre (`src/lyrics-ui.js:842-847, 1416`); a drag or wheel doesn't stop it, and there is no follow button.
-- Duets: `ttm:agent` isn't read; background vocals are (`src/lyrics.js:290, 306-307`).
-- Gaps: nothing is shown in an intro or a gap.
-- Music videos: lyrics are off for videos by default (`lyricsShowForVideos` false, `src/lyrics-ui.js:19, 95`).
-- Text size and spacing: fixed per style in CSS (`src/canvas.css:158-171, 342, 361`); no settings.
+- Early highlight: built 2026-11-20 (`src/plus/lyrics-rules.js` `activeLines`, through the hook in `src/lyrics-ui.js` tick, `src/plus/lyrics-ui-plus.js` `activeLine`), the stateless reading (§2.7); "lyrics by real timing" is storage.local `lyricsRealTiming`. The scroll still follows the active line (no clamp(350..500) look-ahead of §2.5); the Fluid style scrolls 540 ms early (`:819, 1421-1427`).
+- Duets: both voices are active together (§2.2), but only the first active line's words fill; the other is lit as a whole.
+- Offset: built 2026-11-20 (`src/plus/lyrics-ui-plus.js`: storage.local `viviLyricsOffsetGlobal` and `viviLyricsOffsetById`, 3000 songs; hooks in `src/lyrics-ui.js`; `lyrics-rules.js` `offsetOf`, checked by the `offset` cases): steps of 50, a slider over ±3000 per row ("This song", "All songs"), the field, Reset, no Save. The editor sits in the lyrics panel's "i" (both offsets there; no global one in the popup). A song with no offset under its video id still reads the older per-provider one (`vivi_lyrics_offset_` + artist, title, provider). Same sign as the rule.
+- Auto-scroll: built 2026-11-20 (`src/plus/lyrics-ui-plus.js` `followPaused`, a hook in `scrollToActive`; storage.local `lyricsAutoScroll`, a popup switch): a wheel or trackpad scroll, a touch drag or a scrollbar drag over the lyrics stops following; a mouse press-and-move on the text doesn't (it selects text on the PC). A "Follow lyrics" button at the panel's foot, a click on a line, or new lyrics bring it back. The Fluid style parks the line at 37% of the panel, not the centre.
+- Duets: built 2026-11-20: `ttm:agent` is read for TTML (`src/plus/lyrics-plus.js` `agentOf`, hooks in `src/lyrics.js` parseTTML), sides from `lyrics-rules.js` `sides` (checked by the `sides` cases), set on each line (`lyrics-ui-plus.js` `side`; setting storage.local `lyricsDuetSides`, a popup switch). Only TTML names singers; a song from an LRC source has none. Background vocals are read (`src/lyrics.js:290, 306-307`) but not drawn smaller or dimmer (§5.4).
+- Gaps: built 2026-11-20 (`lyrics-rules.js` `gaps`, checked by the `gaps` cases; `lyrics-ui-plus.js` `addGaps`, hook in the line render): BitChord's 3 dots, filling in thirds of the gap, before the line after it; aligned as the line after it. The mark takes its own small row in the list, shown or not.
+- Music videos: on since 2026-11-20 for everyone, once (`src/plus/bg-plus.js`, flag `vivi_video_lyrics_on_2026_11`); the PC keeps upstream's switch "Show lyrics for video songs" (the rule has none).
+- Text size and spacing: built 2026-11-20 as popup sliders (storage.local `lyricsTextSize` 10-40, `lyricsLineSpacing` 1.0-2.5, `src/plus/lyrics-ui-plus.js` `applySize`), but the default is the style's own sizes (22-36 px, `src/canvas.css:158-171, 342, 361`), not 36 and 1.3: a set size applies to every line, so the styles' larger active line is lost. The popup also has switches for §2.6 (real timing), §4.1 (auto-scroll) and §5.2 (sides).
 - Romanization: off / only / both (`lyricsRoman`), the romanized line under the original at 0.62 em (`src/canvas.css:1311`); a language picker.
-- Translation: none.
-- Sources: no SimpMusic, no YouTube captions. The PC races its providers (`src/lyrics.js:1050-1119`).
+- Translation: built 2026-11-20 (`src/plus/lyrics-ui-plus.js` `translate`, through the line-render hook; storage.local `lyricsTranslate`, a popup switch, not a lyrics-menu one), into the browser's language, fetched by the background (`src/plus/bg-plus.js` `VIVI_TRANSLATE`: a content script's own request didn't get through in Firefox). Kept in memory for the last 20 songs, not on disk. No Latin-script retry through Input Tools (BitChord's).
+- Sources: built 2026-11-20. SimpMusic (`src/plus/lyrics-plus.js` `fromSimpMusic`, fetched by `src/plus/bg-plus.js`) joins the race, not after it: the PC races its providers (`src/lyrics.js:1050-1119`). Its answer is `{ type: "success", data: [{ durationSeconds, … }] }`, not BitChord's `success` and `duration` (BitChord's fork reads none of it). YouTube captions (`fromYtCaptions`, read by the page in `src/plus/video-canvas-page.js` op `captions`) are asked only when nothing else answered; read from the track's own www.youtube.com URL (music.youtube.com's `/api/timedtext` answers with the app's page), ♪ marks taken out. Both are popup provider switches, on by default.
 
 ### Phone strip against the original
 

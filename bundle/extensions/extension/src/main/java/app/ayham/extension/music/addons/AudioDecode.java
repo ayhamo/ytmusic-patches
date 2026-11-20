@@ -55,23 +55,26 @@ public final class AudioDecode {
             long frames = 0;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             float[][] planar = null;
-            long lastOut = android.os.SystemClock.elapsedRealtime();
+            long lastOut = android.os.SystemClock.elapsedRealtime(), t0 = lastOut, inSink = 0;
+            short[] pcm16 = null;
+            float[] pcmF = null;
             while (true) {
-                if (!inputDone) {
-                    int in = codec.dequeueInputBuffer(10_000);
-                    if (in >= 0) {
-                        ByteBuffer b = codec.getInputBuffer(in);
-                        int n = b == null ? -1 : ex.readSampleData(b, 0);
-                        if (n < 0) {
-                            codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputDone = true;
-                        } else {
-                            codec.queueInputBuffer(in, 0, n, ex.getSampleTime(), 0);
-                            ex.advance();
-                        }
+                // every free input buffer filled before waiting on an output: one chunk at a time
+                // left the decoder idle between them (a 156 s FLAC took ~40 s a pass on the phone)
+                while (!inputDone) {
+                    int in = codec.dequeueInputBuffer(0);
+                    if (in < 0) break;
+                    ByteBuffer b = codec.getInputBuffer(in);
+                    int n = b == null ? -1 : ex.readSampleData(b, 0);
+                    if (n < 0) {
+                        codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                        inputDone = true;
+                    } else {
+                        codec.queueInputBuffer(in, 0, n, ex.getSampleTime(), 0);
+                        ex.advance();
                     }
                 }
-                int out = codec.dequeueOutputBuffer(info, 10_000);
+                int out = codec.dequeueOutputBuffer(info, 5_000);
                 if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     MediaFormat of = codec.getOutputFormat();
                     rate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE);
@@ -97,10 +100,26 @@ public final class AudioDecode {
                             : enc == AudioFormat.ENCODING_PCM_32BIT ? 4 : enc == AudioFormat.ENCODING_PCM_8BIT ? 1 : 2;
                     int n = info.size / (channels * bytes);
                     if (planar == null || planar.length != channels || planar[0].length < n) planar = new float[channels][Math.max(n, 4096)];
-                    for (int f = 0; f < n; f++) {
-                        for (int c = 0; c < channels; c++) planar[c][f] = sample(buf, enc);
+                    int all = n * channels;
+                    if (enc == AudioFormat.ENCODING_PCM_16BIT) {
+                        // in bulk: a call per sample was millions of calls a song
+                        if (pcm16 == null || pcm16.length < all) pcm16 = new short[all];
+                        buf.asShortBuffer().get(pcm16, 0, all);
+                        for (int f = 0, i = 0; f < n; f++)
+                            for (int c = 0; c < channels; c++) planar[c][f] = pcm16[i++] / 32768f;
+                    } else if (enc == AudioFormat.ENCODING_PCM_FLOAT) {
+                        if (pcmF == null || pcmF.length < all) pcmF = new float[all];
+                        buf.asFloatBuffer().get(pcmF, 0, all);
+                        for (int f = 0, i = 0; f < n; f++)
+                            for (int c = 0; c < channels; c++) planar[c][f] = pcmF[i++];
+                    } else {
+                        for (int f = 0; f < n; f++) {
+                            for (int c = 0; c < channels; c++) planar[c][f] = sample(buf, enc);
+                        }
                     }
+                    long s0 = android.os.SystemClock.elapsedRealtime();
                     sink.block(planar, n);
+                    inSink += android.os.SystemClock.elapsedRealtime() - s0;
                     frames += n;
                     if (frames > MAX_SEC * rate) throw new IOException("over " + (int) MAX_SEC + " s");
                 }
@@ -108,6 +127,9 @@ public final class AudioDecode {
                 if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
             }
             if (!told) throw new IOException("nothing decoded");
+            long took = android.os.SystemClock.elapsedRealtime() - t0;
+            android.util.Log.i("AyhamAddons", String.format(java.util.Locale.US, "decoded %s: %.1f s of audio in %d ms (%d ms of it in our own processing, %s)",
+                    file.getName(), frames / (double) rate, took, inSink, enc == AudioFormat.ENCODING_PCM_FLOAT ? "float" : enc == AudioFormat.ENCODING_PCM_16BIT ? "16-bit" : "enc " + enc));
         } finally {
             if (codec != null) {
                 try {

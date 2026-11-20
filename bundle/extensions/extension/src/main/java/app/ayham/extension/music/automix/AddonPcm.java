@@ -44,10 +44,13 @@ public final class AddonPcm {
 
     public static void delete(Context c, String id) {
         if (c == null || id == null) return;
-        //noinspection ResultOfMethodCallIgnored
-        headFile(c, id).delete();
-        //noinspection ResultOfMethodCallIgnored
-        tailFile(c, id).delete();
+        for (File f : new File[]{headFile(c, id), tailFile(c, id), part(headFile(c, id)), part(tailFile(c, id))})
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+    }
+
+    private static File part(File f) {
+        return new File(f.getPath() + ".part");
     }
 
     /** YouTube's copy of the song: the one the analysis downloads too (kept while addons are on). */
@@ -61,7 +64,8 @@ public final class AddonPcm {
     /** Decodes the prepared file again and writes its opening and end on YouTube's timeline. */
     public static void write(Context c, final AddonPrep.Prepared p) throws Exception {
         long t0 = System.currentTimeMillis();
-        final File hf = headFile(c, p.id), tf = tailFile(c, p.id);
+        // written beside them and moved in when whole: the song is ready (and may mix) before this is done
+        final File hf = part(headFile(c, p.id)), tf = part(tailFile(c, p.id));
         final Writer[] w = new Writer[2];
         try {
             AudioDecode.decode(p.file, new AudioDecode.Sink() {
@@ -119,7 +123,7 @@ public final class AddonPcm {
             delete(c, p.id);
             throw t;
         }
-        Analyzer.Pcm h = head(c, p.id), t = tail(c, p.id);
+        Analyzer.Pcm h = Analyzer.Pcm.open(hf), t = Analyzer.Pcm.open(tf);
         // the boost toward YouTube's loudness, as our player has it (LoudnessEnhancer): in the samples.
         // The fit's boost keeps the true peak at -1 dBTP, so the limiter is only a safety net
         String boost = "";
@@ -128,6 +132,10 @@ public final class AddonPcm {
             app.ayham.extension.music.addons.AtmosWav.Limited a = app.ayham.extension.music.addons.AtmosWav.limit(hf, 16, 2, h.rate, db, DECK_CEILING_DBFS);
             app.ayham.extension.music.addons.AtmosWav.Limited b = app.ayham.extension.music.addons.AtmosWav.limit(tf, 16, 2, t.rate, db, DECK_CEILING_DBFS);
             boost = String.format(Locale.US, ", boost: opening %s, end %s", a, b);
+        }
+        if (!hf.renameTo(headFile(c, p.id)) || !tf.renameTo(tailFile(c, p.id))) {
+            delete(c, p.id);
+            throw new IOException("deck audio of " + p.id + " could not be moved in");
         }
         Log.i(TAG, String.format(Locale.US, "%s: deck audio from %s written in %d ms (opening %.1f-%.1f s, end %.1f-%.1f s at %d Hz)%s", p.id, p.addon,
                 System.currentTimeMillis() - t0, h.start(), h.end(), t.start(), t.end(), h.rate, boost));

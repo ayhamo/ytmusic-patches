@@ -314,9 +314,13 @@ public final class AddonPrep {
             long t0 = SystemClock.elapsedRealtime();
             Prepared p = null;
             String why;
-            boolean dropped = false, limited = false;
+            boolean dropped = false, limited = false, decksDue = false;
             try {
-                p = AddonDownloads.has(ctx, id) ? AddonDownloads.load(ctx, id) : prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
+                if (AddonDownloads.has(ctx, id)) p = AddonDownloads.load(ctx, id);
+                else {
+                    p = prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
+                    decksDue = p != null;
+                }
                 why = p == null ? "no addon has a file that fits" : null;
                 if (p == null && stale()) throw new Stale();
                 if (p != null && p.atmos && !p.saved && !AddonSettings.atmos()) {
@@ -363,6 +367,15 @@ public final class AddonPrep {
                 }
             }
             Log.i(TAG, (p != null ? "ready: " + p : dropped ? "dropped " + id + ": " + why : "not from an addon: " + id + " (" + why + ")") + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
+            // after the badge flips (it was ~45 s of the wait): a mix before it is done takes
+            // YouTube's audio on its decks (Engine.build), as for any song without them
+            if (decksDue && p != null && get(id) == p) {
+                try {
+                    app.ayham.extension.music.automix.AddonPcm.write(ctx, p);
+                } catch (Throwable t) {
+                    Log.w(TAG, "deck audio of " + id + " not written (a mix takes YouTube's): " + Protocol.scrub(String.valueOf(t)));
+                }
+            }
         }
     }
 
@@ -396,7 +409,7 @@ public final class AddonPrep {
             File[] pcm = new File(c.getCacheDir(), "automix/pcm").listFiles();
             if (pcm != null) for (File f : pcm) {
                 String name = f.getName();
-                if ((name.endsWith(".ahead") || name.endsWith(".atail")) && f.delete()) n++;
+                if ((name.endsWith(".ahead") || name.endsWith(".atail") || name.endsWith(".ahead.part") || name.endsWith(".atail.part")) && f.delete()) n++;
             }
             if (n > 0) Log.i(TAG, "cleared " + n + " addon files from an earlier run");
         }, "addon-clear").start();
@@ -455,37 +468,112 @@ public final class AddonPrep {
     static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo, Download dl) throws Exception {
         // a queued song skipped before its turn: not even YouTube's copy is fetched
         if (stale()) throw new Stale();
-        // YouTube's side first: everything is fitted to it
-        long t0 = SystemClock.elapsedRealtime();
-        File yt = app.ayham.extension.music.automix.AddonPcm.youtubeFile(c, id);
+        // YouTube's side: everything is fitted to it. Decoded (12-15 s on the phone) while the addons
+        // are asked; a file is fitted only once it is whole. The search goes by the container's length
+        final long t0 = SystemClock.elapsedRealtime();
+        final File yt = app.ayham.extension.music.automix.AddonPcm.youtubeFile(c, id);
         final OffsetFit.Side ytSide = new OffsetFit.Side();
-        final AudioDecode.ToFit ytFit = new AudioDecode.ToFit(ytSide);
+        final YtDecode ytDecode = new YtDecode(id, yt, ytSide, t0);
+        double known = containerSec(yt);
+        if (Double.isNaN(known)) ytDecode.run();   // no length in the container: the decode gives it
+        else new Thread(ytDecode, "addon-prep-yt").start();
         try {
-            AudioDecode.decode(yt, new AudioDecode.Sink() {
-                @Override
-                public void format(int rate, int channels) {
-                    ytFit.format(rate);
-                }
-
-                @Override
-                public void block(float[][] planar, int frames) throws IOException {
-                    AddonPrep.waitWhileHeld();
-                    ytFit.add(planar, frames);
-                }
-            });
-            ytFit.finish();
+            return prepareFrom(c, id, title, artist, isVideo, dl, ytSide, ytDecode, Double.isNaN(known) ? ytSide.durationSec() : known);
         } finally {
-            // not kept (addons switched off during the download): nobody else needs it
-            if (yt.getParentFile() != null && "dl".equals(yt.getParentFile().getName())) //noinspection ResultOfMethodCallIgnored
-                yt.delete();
+            ytDecode.cancelled = true;
         }
-        final double ytDur = ytSide.durationSec(), ytLufs = ytSide.lufs();
-        Log.i(TAG, String.format(Locale.US, "%s: YouTube's copy decoded (%.1f s, %.2f LUFS) in %d ms", id, ytDur, ytLufs, SystemClock.elapsedRealtime() - t0));
+    }
 
+    /** YouTube's copy decoded into the fit's side, on its own thread; done() waits for it. */
+    private static final class YtDecode implements Runnable {
+        final String id;
+        final File yt;
+        final OffsetFit.Side side;
+        final long t0;
+        volatile boolean cancelled;
+        private boolean finished;
+        private Throwable failed;
+
+        YtDecode(String id, File yt, OffsetFit.Side side, long t0) {
+            this.id = id;
+            this.yt = yt;
+            this.side = side;
+            this.t0 = t0;
+        }
+
+        @Override
+        public void run() {
+            final AudioDecode.ToFit ytFit = new AudioDecode.ToFit(side);
+            Throwable err = null;
+            try {
+                AudioDecode.decode(yt, new AudioDecode.Sink() {
+                    @Override
+                    public void format(int rate, int channels) {
+                        ytFit.format(rate);
+                    }
+
+                    @Override
+                    public void block(float[][] planar, int frames) throws IOException {
+                        if (cancelled) throw new Stale();
+                        AddonPrep.waitWhileHeld();
+                        ytFit.add(planar, frames);
+                    }
+                });
+                ytFit.finish();
+                Log.i(TAG, String.format(Locale.US, "%s: YouTube's copy decoded (%.1f s, %.2f LUFS) in %d ms", id, side.durationSec(), side.lufs(), SystemClock.elapsedRealtime() - t0));
+            } catch (Throwable t) {
+                err = t;
+            } finally {
+                // not kept (addons switched off during the download): nobody else needs it
+                if (yt.getParentFile() != null && "dl".equals(yt.getParentFile().getName())) //noinspection ResultOfMethodCallIgnored
+                    yt.delete();
+            }
+            synchronized (this) {
+                failed = err;
+                finished = true;
+                notifyAll();
+            }
+        }
+
+        /** Waits for the decode (the worker's skip still ends the wait); its failure is thrown here. */
+        void done() throws Exception {
+            synchronized (this) {
+                while (!finished) {
+                    if (stale()) throw new Stale();
+                    wait(100);
+                }
+            }
+            if (failed instanceof Exception) throw (Exception) failed;
+            if (failed != null) throw new IOException(failed);
+        }
+    }
+
+    /** The audio track's length in the container, in seconds; NaN when it doesn't say. */
+    private static double containerSec(File f) {
+        android.media.MediaExtractor ex = new android.media.MediaExtractor();
+        try {
+            ex.setDataSource(f.getPath());
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                android.media.MediaFormat m = ex.getTrackFormat(i);
+                String mime = m.getString(android.media.MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/") && m.containsKey(android.media.MediaFormat.KEY_DURATION)) {
+                    long us = m.getLong(android.media.MediaFormat.KEY_DURATION);
+                    return us > 0 ? us / 1e6 : Double.NaN;
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            ex.release();
+        }
+        return Double.NaN;
+    }
+
+    private static Prepared prepareFrom(Context c, String id, String title, String artist, boolean isVideo, Download dl,
+                                        final OffsetFit.Side ytSide, final YtDecode ytDecode, double searchSec) throws Exception {
         TrackMatcher.Target t = new TrackMatcher.Target();
         t.title = title;
         t.artist = artist;
-        t.durationSec = ytDur;
+        t.durationSec = searchSec;
         t.isVideo = isVideo;
         List<AddonClient.Addon> addons = new ArrayList<>();
         for (String l : AddonSettings.links(c)) addons.add(new AddonClient.Addon(l));
@@ -513,7 +601,10 @@ public final class AddonPrep {
                 // one Atmos file waits at a time: a second would take the same names (id.atmos.*)
                 if (held != null && held[0] != null && o.stream != null && o.stream.atmos)
                     return "Atmos: another addon's Atmos file already waits for a stereo row";
-                Prepared p = fetchAndFit(c, id, o, ytSide, ytDur, ytLufs, opt.slackSec, dl, held);
+                // YouTube's decode is waited for only where the fit compares (fit): the fetch and the
+                // file's decode run beside it
+                Prepared p = fetchAndFit(c, id, o, ytDecode, opt.slackSec, dl, held);
+                ytDecode.done();
                 if (p.score < 0) {
                     if (p.file != null) //noinspection ResultOfMethodCallIgnored
                         p.file.delete();
@@ -521,7 +612,7 @@ public final class AddonPrep {
                     return p.codec;   // the refusal, carried in codec
                 }
                 if (held != null && held[0] != null && !p.atmos) {
-                    Prepared a = placeAtmos(id, held[0], p, ytSide, ytLufs, opt.slackSec);
+                    Prepared a = placeAtmos(id, held[0], p, ytSide, ytSide.lufs(), opt.slackSec);
                     held[0] = null;
                     if (a != null) {
                         deleteQuietly(p.file);
@@ -559,18 +650,12 @@ public final class AddonPrep {
             if (limit && dl == null) throw new Limited();
             return null;
         }
-        Prepared p = got[0];
-        if (dl != null) return p; // its deck PCM is written when it is played (AddonDownloads.load)
-        try {
-            app.ayham.extension.music.automix.AddonPcm.write(c, p);
-        } catch (Throwable e) {
-            deleteFiles(p);
-            throw e;
-        }
-        return p;
+        // its deck PCM: a download's when it is played (AddonDownloads.load), a prepared song's by
+        // the worker once the song is ready (the player doesn't need it, only a mix does)
+        return got[0];
     }
 
-    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Download dl,
+    private static Prepared fetchAndFit(Context c, String id, AddonClient.Opened o, YtDecode yt, double slack, Download dl,
                                         Held[] held) throws Exception {
         Protocol.Stream s = o.stream;
         String ext = s.atmos ? "m4a" : s.codec == null ? "audio" : s.codec.toLowerCase(Locale.ROOT).contains("flac") ? "flac"
@@ -586,18 +671,18 @@ public final class AddonPrep {
                 f = Fetch.download(o, new File(dl.dir, id + "." + ext));
             }
             try {
-                return checkAndFit(id, o, f, reuse, ext, ytSide, ytDur, ytLufs, slack, dl);
+                return checkAndFit(id, o, f, reuse, ext, yt, slack, dl);
             } catch (Throwable e) {
                 // a fetched file that failed its check or fit has no record: nothing else would delete it
                 if (f != reuse) deleteQuietly(f);
                 throw e;
             }
         }
-        return fetchAndFitPlayback(c, id, o, s, ext, ytSide, ytDur, ytLufs, slack, held);
+        return fetchAndFitPlayback(c, id, o, s, ext, yt, slack, held);
     }
 
-    private static Prepared checkAndFit(String id, AddonClient.Opened o, File f, File reuse, String ext, OffsetFit.Side ytSide,
-                                        double ytDur, double ytLufs, double slack, Download dl) throws Exception {
+    private static Prepared checkAndFit(String id, AddonClient.Opened o, File f, File reuse, String ext, YtDecode yt,
+                                        double slack, Download dl) throws Exception {
         Protocol.Stream s = o.stream;
         {
             String bad = Fetch.formatRefusal(f, ext, dl.tier, s);
@@ -609,7 +694,7 @@ public final class AddonPrep {
                 p.file = new File(dl.dir, id + ".none");
                 return p;
             }
-            Prepared p = fit(id, o, f, ytSide, ytDur, ytLufs, slack, null);
+            Prepared p = fit(id, o, f, yt, slack, null);
             if (p.score < 0 && f == reuse) p.file = new File(dl.dir, id + ".none"); // the shared file stays
             p.saved = true;
             p.tier = dl.tier;
@@ -618,8 +703,8 @@ public final class AddonPrep {
         }
     }
 
-    private static Prepared fetchAndFitPlayback(Context c, String id, AddonClient.Opened o, Protocol.Stream s, String ext, OffsetFit.Side ytSide,
-                                                double ytDur, double ytLufs, double slack, Held[] held) throws Exception {
+    private static Prepared fetchAndFitPlayback(Context c, String id, AddonClient.Opened o, Protocol.Stream s, String ext, YtDecode yt,
+                                                double slack, Held[] held) throws Exception {
         // an Atmos file can wait beside a stereo one of the same extension (placeAtmos)
         String name = s.atmos ? id + ".atmos." + ext : id + "." + ext;
         File f = new File(dir(c), name), part = new File(dir(c), name + ".part");
@@ -647,7 +732,7 @@ public final class AddonPrep {
         }
         if (!part.renameTo(f)) throw new IOException("could not keep the file");
         Log.i(TAG, String.format(Locale.US, "%s: %s's file fetched (%d KB) in %d ms", id, o.addon.name, f.length() / 1024, SystemClock.elapsedRealtime() - t0));
-        return fit(id, o, f, ytSide, ytDur, ytLufs, slack, held);
+        return fit(id, o, f, yt, slack, held);
     }
 
     /** An Atmos file decoded but not fitted: placed by the next stereo row that fits (placeAtmos). */
@@ -729,7 +814,7 @@ public final class AddonPrep {
     }
 
     /** Decodes the file and fits it to YouTube's audio: a score under 0 (with why in codec) when it doesn't fit. */
-    static Prepared fit(String id, AddonClient.Opened o, File f, OffsetFit.Side ytSide, double ytDur, double ytLufs, double slack, Held[] held) throws Exception {
+    static Prepared fit(String id, AddonClient.Opened o, File f, YtDecode yt, double slack, Held[] held) throws Exception {
         Protocol.Stream s = o.stream;
         long t1 = SystemClock.elapsedRealtime();
         final OffsetFit.Side side = new OffsetFit.Side();
@@ -766,6 +851,9 @@ public final class AddonPrep {
             throw t;
         }
         fit.finish();
+        yt.done();
+        final OffsetFit.Side ytSide = yt.side;
+        final double ytDur = ytSide.durationSec(), ytLufs = ytSide.lufs();
         OffsetFit.Result r = OffsetFit.fit(ytSide, side, slack);
         Prepared p = new Prepared();
         p.id = id;

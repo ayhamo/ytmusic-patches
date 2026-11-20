@@ -57,9 +57,11 @@ final class VideoCanvas {
     static synchronized File clip(String songId, String songTitle, String artist, long songMs, File dir, int artPx, boolean[] noVideo,
                                   int height, boolean full) throws Exception {
         long t0 = System.currentTimeMillis();
-        String[] video = findVideo(songTitle, artist, Math.round(songMs / 1000.0));
+        String[] why = new String[1];
+        String[] video = gatedVideo(songId, songTitle, artist, Math.round(songMs / 1000.0), why);
         if (video == null) {
-            noVideo[0] = true;
+            // a video that can't be played now may be another time; the rest are kept as "none"
+            if (!ClipGate.RESTRICTED.equals(why[0])) noVideo[0] = true;
             return null;
         }
         JSONObject player = visionPlayer(video[0]);
@@ -116,8 +118,12 @@ final class VideoCanvas {
             }
             double[] heat = heatmap(video[0]);
             peak = heat == null ? -1 : partStart(heat, length / 1000.0);
-            // no chorus from synced lyrics on the phone yet: null
-            loop = ClipJudge.judge(b.frames, b.interval, length, peak < 0 ? null : Math.round(peak * 1000), null);
+            // the chorus from the synced lyrics Morphe already has for the song (canvas.md §6 rule 11)
+            Long chorus = null;
+            Object[] lyr = LyricTiming.syncedFor(songId);
+            if (lyr != null) chorus = BestPart.chorusMs(songMs > 0 ? songMs : length, (long[]) lyr[0], (String[]) lyr[1]);
+            if (chorus != null) Log.i(TAG, "canvas video: chorus from the lyrics at " + chorus / 1000.0 + " s");
+            loop = ClipJudge.judge(b.frames, b.interval, length, peak < 0 ? null : Math.round(peak * 1000), chorus);
             if (loop == null) {
                 noVideo[0] = true;
                 Log.i(TAG, "canvas video: " + video[0] + " has no window that moves: a still picture");
@@ -299,6 +305,125 @@ final class VideoCanvas {
      * videos in `next`, so it is found as Prism does: a video search, then once more with "official video", and the
      * first result Prism's MusicVideoMatch takes ([pick]). [durationSec] 0: the song's length is unknown.
      */
+    /**
+     * canvas.md §5 rules 1-12: {videoId, title} of the song's video that passes the gate (ClipGate),
+     * or null with why in why[0]. Not a song (a podcast episode, an upload, a live stream) is never
+     * looked up.
+     */
+    static String[] gatedVideo(String songId, String title, String artist, long durationSec, String[] why) throws Exception {
+        String[] artists = artists(artist);
+        if (title == null || title.trim().isEmpty() || artists.length == 0) {
+            why[0] = ClipGate.NO_VIDEO;
+            return null;
+        }
+        boolean notASong = false;
+        try {
+            JSONObject d = musicPlayer(songId).optJSONObject("videoDetails");
+            String t = d == null ? "" : d.optString("musicVideoType");
+            notASong = d != null && ("MUSIC_VIDEO_TYPE_PODCAST_EPISODE".equals(t) || "MUSIC_VIDEO_TYPE_PRIVATELY_OWNED_TRACK".equals(t)
+                    || d.optBoolean("isLive"));
+        } catch (Throwable t) {
+            Log.w(TAG, "canvas video: the song's type not read: " + t);
+        }
+        final java.util.Map<String, String> titles = new java.util.HashMap<>();
+        final List<List<String[]>> searches = new ArrayList<>();
+        String[] qs = {title + " " + artists[0], title + " " + artists[0] + " official video"};
+        java.util.function.IntFunction<List<String[]>> search = i -> {
+            while (searches.size() <= i) {
+                List<String[]> found = new ArrayList<>();
+                try {
+                    JSONObject body = new JSONObject().put("query", qs[searches.size()]).put("params", VIDEOS).put("context", new JSONObject().put("client",
+                            new JSONObject().put("clientName", "WEB_REMIX").put("clientVersion", "1.20251101.01.00").put("hl", "en").put("gl", "US")));
+                    results(post(MUSIC_SEARCH, body, "Mozilla/5.0", "https://music.youtube.com"), found);
+                } catch (Throwable t) {
+                    Log.w(TAG, "canvas video: search failed: " + t);
+                }
+                for (String[] v : found) titles.put(v[0], v[1]);
+                searches.add(found);
+            }
+            return searches.get(i);
+        };
+        boolean own = false;
+        String[] first = null;
+        if (!notASong) {
+            // rule 1: the first search, then "official video"
+            first = pick(title, artists, durationSec, search.apply(0), false);
+            if (first == null) first = pick(title, artists, durationSec, search.apply(1), false);
+            // rule 12: nothing passes: the artist's lyric video, as the song's own
+            if (first == null) {
+                first = pick(title, artists, durationSec, search.apply(0), true);
+                if (first == null) first = pick(title, artists, durationSec, search.apply(1), true);
+                own = first != null;
+                if (own) Log.i(TAG, "canvas video: only a lyric video: '" + first[1] + "', taken as it is");
+            }
+        }
+        final java.util.Map<String, ClipGate.Video> seen = new java.util.HashMap<>();
+        ClipGate.Look look = new ClipGate.Look() {
+            @Override
+            public ClipGate.Video video(String id) {
+                if (seen.containsKey(id)) return seen.get(id);
+                ClipGate.Video v = null;
+                try {
+                    JSONObject d = musicPlayer(id).optJSONObject("videoDetails");
+                    final JSONObject vp = visionPlayer(id);
+                    v = new ClipGate.Video();
+                    v.type = d == null ? "" : d.optString("musicVideoType");
+                    v.title = d != null && !d.optString("title").isEmpty() ? d.optString("title") : titles.get(id);
+                    JSONObject ps = vp.optJSONObject("playabilityStatus");
+                    v.status = ps == null ? "" : ps.optString("status");
+                    v.still = () -> {
+                        try {
+                            JSONObject vd = vp.optJSONObject("videoDetails");
+                            long len = Math.round((vd == null ? 0 : vd.optDouble("lengthSeconds", 0)) * 1000);
+                            Board b = board(vp, len);
+                            return b != null && b.frames.size() >= MIN_FRAMES && ClipJudge.still(b.frames, ClipJudge.bars(b.frames));
+                        } catch (Throwable t) {
+                            return false;
+                        }
+                    };
+                } catch (Throwable t) {
+                    Log.w(TAG, "canvas video: " + id + " not read: " + t);
+                }
+                seen.put(id, v);
+                return v;
+            }
+
+            @Override
+            public List<String> others() {
+                List<String> out = new ArrayList<>();
+                List<String[]> left = new ArrayList<>(search.apply(1));
+                for (String[] v; (v = pick(title, artists, durationSec, left, false)) != null; ) {
+                    out.add(v[0]);
+                    left.remove(v);
+                }
+                return out;
+            }
+        };
+        ClipGate.Result r;
+        if (own) {
+            r = new ClipGate.Result();
+            String w = ClipGate.own(look.video(first[0]));
+            if (w == null) r.videoId = first[0];
+            else r.why = w;
+        } else {
+            r = ClipGate.find(title, notASong, first == null ? null : first[0], look);
+        }
+        Log.i(TAG, "canvas video: the gate: " + r + (first != null ? " (found first: " + first[0] + " '" + first[1] + "')" : ""));
+        why[0] = r.why;
+        if (r.videoId == null) return null;
+        String t = titles.get(r.videoId);
+        return new String[]{r.videoId, t == null ? "" : t};
+    }
+
+    /** YouTube Music's own player answer (WEB_REMIX): the video's type (musicVideoType) and title. */
+    private static JSONObject musicPlayer(String videoId) throws Exception {
+        JSONObject body = new JSONObject().put("videoId", videoId).put("context", new JSONObject().put("client",
+                new JSONObject().put("clientName", "WEB_REMIX").put("clientVersion", "1.20251101.01.00").put("hl", "en").put("gl", "US")));
+        return post(MUSIC_PLAYER, body, "Mozilla/5.0", "https://music.youtube.com");
+    }
+
+    private static final String MUSIC_PLAYER = "https://music.youtube.com/youtubei/v1/player?prettyPrint=false";
+
     static String[] findVideo(String title, String artist, long durationSec) throws Exception {
         String[] artists = artists(artist);
         if (title == null || title.trim().isEmpty() || artists.length == 0) return null;
@@ -387,6 +512,11 @@ final class VideoCanvas {
      * Lengths of 0 are unknown.
      */
     static String[] pick(String songTitle, String[] artistNames, long durationSec, List<String[]> videos) {
+        return pick(songTitle, artistNames, durationSec, videos, false);
+    }
+
+    /** [lyricsOk]: lyric videos are allowed (canvas.md §5 rule 12). */
+    static String[] pick(String songTitle, String[] artistNames, long durationSec, List<String[]> videos, boolean lyricsOk) {
         List<String> artists = new ArrayList<>();
         for (String a : artistNames) if (!norm(a).isEmpty()) artists.add(norm(a));
         if (norm(songTitle).isEmpty() || artists.isEmpty()) return null;
@@ -399,8 +529,8 @@ final class VideoCanvas {
                 if (w.length() > 2 && !GENERIC.contains(w) && !source.contains(w)) source.add(w);
         List<String[]> candidates = new ArrayList<>();
         for (String[] v : videos) {
-            if (sameTitle(songTitle, artistNames, v[1], v[2]) && !never(v[1].toLowerCase(Locale.ROOT), song)
-                    && (ownChannel(v[2], artists) || !never(v[2].toLowerCase(Locale.ROOT), song))) candidates.add(v);
+            if (sameTitle(songTitle, artistNames, v[1], v[2]) && !never(v[1].toLowerCase(Locale.ROOT), song, lyricsOk)
+                    && (ownChannel(v[2], artists) || !never(v[2].toLowerCase(Locale.ROOT), song, lyricsOk))) candidates.add(v);
         }
         // the artist's own upload first: their channel (VEVO and "Official" ones too), or their record label's
         for (String[] v : candidates)
@@ -447,7 +577,20 @@ final class VideoCanvas {
 
     /** A lyric video, a lesson, a re-tuned copy and the like (unless the song's own title says so). */
     private static boolean never(String text, String song) {
-        return has(NEVER, text, song) || HZ.matcher(text).find() && !HZ.matcher(song).find();
+        return never(text, song, false);
+    }
+
+    private static boolean never(String text, String song, boolean lyricsOk) {
+        return has(lyricsOk ? NEVER_BUT_LYRICS : NEVER, text, song) || HZ.matcher(text).find() && !HZ.matcher(song).find();
+    }
+
+    /** NEVER without the lyric words (rule 12). */
+    private static final String[] NEVER_BUT_LYRICS;
+
+    static {
+        List<String> l = new ArrayList<>(Arrays.asList(NEVER));
+        l.removeAll(Arrays.asList("lyric", "lyrics", "letra", "letras", "paroles", "testo"));
+        NEVER_BUT_LYRICS = l.toArray(new String[0]);
     }
 
     /** The video's title is the song's: the song's artists' and the channel's names (and their "official" forms) taken out. */

@@ -61,4 +61,51 @@ final class BestPart {
     private static void toast(Activity a, String s) {
         Toast.makeText(a, s, Toast.LENGTH_SHORT).show();
     }
+
+    /**
+     * The chorus from time-synced lyrics (canvas.md §6 rule 11, Prism's BestPart.chorusMs): the start
+     * of the first line holding the most repeated line (keys: lower case, letters and digits, 4 or
+     * more), from 5000 on and not in the last 30 000, pulled back over up to 4 lines before it that
+     * repeat at least twice and at least (most - 1) times. Null for a song under 60 s, fewer than 4
+     * timed lines, or nothing repeated.
+     */
+    static Long chorusMs(long durationMs, long[] startMs, String[] text) {
+        if (durationMs < 60_000 || startMs == null || text == null) return null;
+        java.util.List<Long> at = new java.util.ArrayList<>();
+        java.util.List<String> keys = new java.util.ArrayList<>();
+        for (int i = 0; i < startMs.length && i < text.length; i++) {
+            if (text[i] == null || text[i].trim().isEmpty()) continue;   // gaps and blank lines
+            at.add(startMs[i]);
+            keys.add(key(text[i]));
+        }
+        if (at.size() < 4) return null;
+        java.util.Map<String, Integer> count = new java.util.HashMap<>();
+        for (String k : keys) if (k.length() >= 4) count.merge(k, 1, Integer::sum);
+        int most = 0;
+        for (int c : count.values()) most = Math.max(most, c);
+        if (most < 2) return null;
+        int first = -1;
+        for (int i = 0; i < keys.size() && first < 0; i++) {
+            Integer c = count.get(keys.get(i));
+            if (c != null && c == most && at.get(i) >= 5000 && at.get(i) <= durationMs - 30_000) first = i;
+        }
+        if (first < 0) return null;
+        int start = first;
+        for (int j = first - 1; j >= Math.max(0, first - 4); j--) {
+            Integer c = count.get(keys.get(j));
+            if (c == null || c < 2 || c < most - 1 || at.get(j) < 5000) break;
+            start = j;
+        }
+        return at.get(start);
+    }
+
+    private static String key(String text) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < text.length(); ) {
+            int cp = text.codePointAt(i);
+            if (Character.isLetterOrDigit(cp)) b.appendCodePoint(Character.toLowerCase(cp));
+            i += Character.charCount(cp);
+        }
+        return b.toString();
+    }
 }

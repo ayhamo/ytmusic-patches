@@ -93,6 +93,30 @@ final class LyricTiming {
         ready = true;
     }
 
+    /**
+     * The time-synced lines Morphe already has for this video ({starts, texts}), or null: none yet,
+     * plain lyrics, or another song's (the canvas never fetches lyrics itself, canvas.md §6 rule 11).
+     */
+    static Object[] syncedFor(String videoId) {
+        try {
+            init();
+            Object m = getInstance.invoke(null);
+            Object lyr = current.get(m);
+            if (lyr == null || (Boolean) isEmpty.invoke(lyr) || !(Boolean) synced.invoke(lyr)) return null;
+            if (lyricsVideo != null && videoId != null && !videoId.equals(String.valueOf(lyricsVideo.get(m)))) return null;
+            List<?> ls = (List<?>) lines.invoke(lyr);
+            long[] st = new long[ls.size()];
+            String[] tx = new String[ls.size()];
+            for (int i = 0; i < ls.size(); i++) {
+                st[i] = (Long) lineStart.invoke(ls.get(i));
+                tx[i] = String.valueOf(lineText.invoke(ls.get(i)));
+            }
+            return new Object[]{st, tx};
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** Morphe's position when the play button was tapped to pause; -1 = none. */
     private static long frozenPos = -1;
 

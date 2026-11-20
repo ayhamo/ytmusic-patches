@@ -477,6 +477,55 @@ public class CanvasCasesTest {
                 check(g, c, Json.write(got).equals(Json.write(want)), Json.write(got));
                 return;
             }
+            case "chorus": {
+                Map<String, Object> in = map(c.get("input"));
+                List<Object> ls = list(in.get("lines"));
+                long[] st = new long[ls.size()];
+                String[] tx = new String[ls.size()];
+                for (int i = 0; i < st.length; i++) {
+                    st[i] = lng(map(ls.get(i)).get("timeMs"));
+                    tx[i] = str(map(ls.get(i)).get("text"));
+                }
+                Long got = BestPart.chorusMs(lng(in.get("durationMs")), st, tx);
+                check(g, c, want == null ? got == null : got != null && got == lng(want), got);
+                return;
+            }
+            case "titleGate": {
+                Map<String, Object> in = map(c.get("input"));
+                boolean got = ClipGate.titleSays(str(in.get("songTitle")), str(in.get("videoTitle")));
+                check(g, c, got == (Boolean) want, got);
+                return;
+            }
+            case "clipFind": {
+                Map<String, Object> in = map(c.get("input")), song = map(in.get("song")), vids = map(in.get("videos"));
+                final List<Object> others = list(in.get("others"));
+                ClipGate.Look look = new ClipGate.Look() {
+                    @Override
+                    public ClipGate.Video video(String id) {
+                        Map<String, Object> v = map(vids.get(id));
+                        if (v == null) return null;
+                        ClipGate.Video x = new ClipGate.Video();
+                        x.type = str(v.get("type"));
+                        x.title = str(v.get("title"));
+                        x.status = str(v.get("status"));
+                        boolean still = Boolean.TRUE.equals(v.get("still"));
+                        x.still = () -> still;
+                        return x;
+                    }
+
+                    @Override
+                    public List<String> others() {
+                        List<String> out = new ArrayList<>();
+                        for (Object o : others) out.add(str(o));
+                        return out;
+                    }
+                };
+                ClipGate.Result r = ClipGate.find(str(song.get("title")), Boolean.TRUE.equals(song.get("notASong")), str(in.get("first")), look);
+                Map<String, Object> ex = map(want);
+                boolean ok = Objects.equals(r.videoId, ex.get("videoId")) && Objects.equals(r.why, ex.get("why")) && r.otherSearches == lng(ex.get("otherSearches"));
+                check(g, c, ok, "{videoId " + r.videoId + ", why " + r.why + ", otherSearches " + r.otherSearches + "}");
+                return;
+            }
             default:
                 check(g, c, false, "unknown group");
         }

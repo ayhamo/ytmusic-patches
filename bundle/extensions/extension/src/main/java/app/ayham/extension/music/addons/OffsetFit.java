@@ -665,6 +665,11 @@ public final class OffsetFit {
      * envelopes: the gain that brings the file to YouTube's copy as it is heard. Windows where either
      * is under -60 dBFS are left out; NaN under 2 s of sound in both.
      */
+    /** The gain played for a {@link #windowGainDb} reading (offset-map.md, Level [phone only]): 0 when not known, a boost at most MAX_BOOST_DB, cuts unlimited. */
+    public static double windowLevelDb(double measuredDb) {
+        return Double.isNaN(measuredDb) ? 0 : Math.min(measuredDb, MAX_BOOST_DB);
+    }
+
     public static double windowGainDb(float[] ytRms, float[] fileRms, double offsetSec, double fromSec, double untilSec) {
         if (ytRms == null || fileRms == null) return Double.NaN;
         double yt = 0, file = 0;

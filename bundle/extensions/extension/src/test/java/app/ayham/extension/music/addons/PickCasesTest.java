@@ -166,7 +166,29 @@ public class PickCasesTest {
             out.add(new Object[]{"loudnessGain: " + c.get("name"),
                     (Check) () -> new Object[]{db + 0.0, ((Number) c.get("expectDb")).doubleValue() + 0.0}});
         }
+        for (Object o : (List<Object>) doc.get("windowLevel")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            if (c.get("name") == null) continue;   // its _about
+            Map<String, Object> in = (Map<String, Object>) c.get("input");
+            out.add(new Object[]{"windowLevel: " + c.get("name"), (Check) () -> {
+                double ytDb = num(in, "ytDb"), fileDb = num(in, "fileDb"), off = num(in, "offsetSec"), silent = num(in, "fileSilentSec");
+                // the envelopes as the group's _about builds them: 40 s of 10 ms frames
+                float[] yt = new float[4000], file = new float[4000];
+                for (int i = 0; i < yt.length; i++) yt[i] = (float) (Math.pow(10, ytDb / 20) * (0.05 + 0.04 * Math.sin(i / 37.0)));
+                double k = Math.pow(10, (fileDb - ytDb) / 20);
+                for (int i = 0; i < file.length; i++) {
+                    int j = (int) Math.round(i - off / 0.01);
+                    file[i] = j < 0 || j >= yt.length || i * 0.01 < silent ? 0 : (float) (yt[j] * k);
+                }
+                double db = OffsetFit.windowLevelDb(OffsetFit.windowGainDb(yt, file, off, num(in, "fromSec"), num(in, "untilSec")));
+                return new Object[]{Math.round(db * 1e4) / 1e4, ((Number) c.get("expectDb")).doubleValue() + 0.0};
+            }});
+        }
         return out;
+    }
+
+    private static double num(Map<String, Object> m, String k) {
+        return m.get(k) instanceof Number ? ((Number) m.get(k)).doubleValue() : 0;
     }
 
     private static Protocol.Stream stream(Object o) {

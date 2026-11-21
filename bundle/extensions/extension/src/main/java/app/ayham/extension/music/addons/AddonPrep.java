@@ -987,11 +987,8 @@ public final class AddonPrep {
         double measured = OffsetFit.windowGainDb(ytSide.rms(), side.rms(), r.offsetSec, win, win + len);
         p.gain = new OffsetFit.Gain();
         p.gain.wantDb = Double.isNaN(measured) ? 0 : measured;
-        double gain = p.gain.wantDb;
-        if (gain > OffsetFit.MAX_BOOST_DB) {
-            gain = OffsetFit.MAX_BOOST_DB;
-            p.gain.capped = "boost";
-        }
+        double gain = OffsetFit.windowLevelDb(measured);
+        if (gain < p.gain.wantDb) p.gain.capped = "boost";
         p.gainDb = p.gain.gainDb = gain;
         // the level envelope wants the whole song: YouTube's full decode fills it when done (the mix
         // reads none until then, as for a song not analysed); the file sits gainDb under YouTube's

@@ -611,7 +611,7 @@ public final class AddonClient {
                         none.tried = tried;
                         return none;
                     }
-                    Opened o = openRow(f, man, row, target, opt, tried, t0);
+                    Opened o = openRow(f, man, row, target, opt, tried, t0, null);
                     if (o == null) continue;
                     String refused = opt.check == null ? null : opt.check.refuse(o);
                     if (refused != null) {
@@ -638,7 +638,12 @@ public final class AddonClient {
     }
 
     /** One row: its /stream answer and the probe. The answer to check, or null (why in tried). */
-    private Opened openRow(Found f, Protocol.Manifest man, Pick.Row row, TrackMatcher.Target target, Options opt, List<Tried> tried, long t0) {
+    /** The race is won by another lane (protocol.md 8.1.4): a loser sends no /stream and no probe. */
+    private interface Lost {
+        boolean now();
+    }
+
+    private Opened openRow(Found f, Protocol.Manifest man, Pick.Row row, TrackMatcher.Target target, Options opt, List<Tried> tried, long t0, Lost lost) {
         Addon addon = f.addon;
         Protocol.Stream s;
         try {
@@ -671,6 +676,7 @@ public final class AddonClient {
             tried.add(new Tried(addon.host, row.id, "lossy at 256 kbps or under", null));
             return null;
         }
+        if (lost != null && lost.now()) return null;   // its /stream ran out; the race was won meanwhile
         Pick.Verdict p = probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
                 target.durationSec, opt.forDownload ? Pick.DOWNLOAD_SLACK_SEC : opt.slackSec, s.headers);
         if (!p.ok) {
@@ -802,7 +808,14 @@ public final class AddonClient {
                             if (over[0]) return;
                         }
                         if (cancelled(o)) return;
-                        Opened c = openRow(f, man, row, target, o, lane.tried, t0);
+                        Opened c = openRow(f, man, row, target, o, lane.tried, t0, () -> {
+                            synchronized (lock) {
+                                return over[0];
+                            }
+                        });
+                        synchronized (lock) {
+                            if (over[0]) return;
+                        }
                         if (c == null) continue;
                         synchronized (lock) {
                             lane.ready = c;

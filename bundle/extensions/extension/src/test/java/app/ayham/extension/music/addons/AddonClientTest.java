@@ -306,6 +306,46 @@ public class AddonClientTest {
         assertEquals("does not fit", got.tried.get(0).why);
     }
 
+    /** protocol.md 8.1.4: a lane still searching when another wins sends no /stream (each could add the song to a debrid account). */
+    @Test
+    public void aLoserStillSearchingSendsNoStream() throws InterruptedException {
+        String rows = tracks(row("fine", ""));
+        good("quick", rows);
+        good("slow", rows);
+        addon("slow", "search", (k, id, q) -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {
+            }
+            return json(200, rows);
+        });
+        AddonClient.Opened got = client().race(song(), list("slow", "quick"), null);
+        assertEquals("Mock quick", got.addon.name);
+        Thread.sleep(700);   // the loser's search lands after the win
+        assertEquals(1, hitsOf("slow", "search").size());
+        assertEquals(0, hitsOf("slow", "stream").size());
+    }
+
+    /** A /stream already sent runs out, but the race won meanwhile: no probe of its file. */
+    @Test
+    public void aLoserWhoseStreamRunsOutSendsNoProbe() throws InterruptedException {
+        String rows = tracks(row("fine", ""));
+        good("quick", rows);
+        addon("slow", "search", (k, id, q) -> json(200, rows));
+        addon("slow", "stream", (k, id, q) -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {
+            }
+            return json(200, "{\"url\":\"" + fileUrl("slow", id) + "\",\"format\":\"flac\",\"codec\":\"flac\"}");
+        });
+        AddonClient.Opened got = client().race(song(), list("slow", "quick"), null);
+        assertEquals("Mock quick", got.addon.name);
+        Thread.sleep(700);
+        assertEquals(1, hitsOf("slow", "stream").size());
+        assertEquals(0, hitsOf("slow", "file").size());
+    }
+
     /** No lane has it: every lane's misses, in rank order. */
     @Test
     public void raceWithNoAnswerListsEveryLane() {

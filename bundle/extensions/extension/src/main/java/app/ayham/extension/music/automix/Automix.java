@@ -301,6 +301,15 @@ public final class Automix {
         double pos = position(player) / 1000.0, dur = duration(player) / 1000.0;
         if (pos < 0 || !(dur > 0)) return;
         if (!id.equals(amx.id)) amx = new Song(id);
+        // a song whose mix began and ended (or was cut short by going back) is played again from well
+        // before its mix: planned again, or it stayed "done" and the overview said "Planning the mix…"
+        // (phone, 2026-11-21: back three times during Vaina Loca > Si No Es Contigo). Its length too,
+        // so YT's queue still naming it just after it moved on isn't taken for that.
+        if (amx.state.equals("done") && pos < amx.takeover - 5 && Math.abs(amx.dur - dur) < 0.5) {
+            Log.i(TAG, String.format(Locale.US, "%s is back at %.1f s, before its mix at %.1f s: planned again", id, pos, amx.takeover));
+            amx.state = "idle";
+            amx.shown = null;
+        }
         if (dur < 30 || repeatOne()) return;
 
         Analyzer.request(app, id, true);

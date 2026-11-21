@@ -766,8 +766,17 @@ final class Engine {
         String id = Automix.currentId();
         if (id == null || id.equals(inIdSeen)) return;
         // the queue is read every ~1.5 s: right after YT moves on it still names the outgoing song,
-        // which is not "another song" (that read once broke a loop mix into a plain crossfade)
-        if (id.equals(m.outId)) return;
+        // which is not "another song" (that read once broke a loop mix into a plain crossfade)...
+        if (id.equals(m.outId)) {
+            // ...but once it has named the incoming one, the outgoing one again is the listener going
+            // back: the mix ends there (phone, 2026-11-21: it carried on, and its forced hand-over
+            // seeked Vaina Loca 23 s off to the deck's place in Si No Es Contigo)
+            if (m.inId.equals(inIdSeen)) {
+                inIdSeen = id;
+                abort("the listener went back to the playing song during the mix", true);
+            }
+            return;
+        }
         inIdSeen = id;
         if (id.equals(m.inId)) return;
         Log.i(TAG, "the queue played " + id + " instead of " + m.inId + ": crossfading into it as it is");

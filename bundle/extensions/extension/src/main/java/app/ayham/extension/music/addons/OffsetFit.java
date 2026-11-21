@@ -660,6 +660,29 @@ public final class OffsetFit {
     }
 
     /**
+     * YouTube's level minus the file's over the same seconds of the song (the file's [fromSec,
+     * untilSec), YouTube's shifted by the offset: fileTime = youtubeTime + offsetSec), from both 10 ms
+     * envelopes: the gain that brings the file to YouTube's copy as it is heard. Windows where either
+     * is under -60 dBFS are left out; NaN under 2 s of sound in both.
+     */
+    public static double windowGainDb(float[] ytRms, float[] fileRms, double offsetSec, double fromSec, double untilSec) {
+        if (ytRms == null || fileRms == null) return Double.NaN;
+        double yt = 0, file = 0;
+        int n = 0;
+        int i0 = (int) Math.max(0, Math.ceil(fromSec / ENV_WIN_SEC)), i1 = (int) Math.min(fileRms.length, Math.floor(untilSec / ENV_WIN_SEC));
+        for (int i = i0; i < i1; i++) {
+            int j = (int) Math.round(i - offsetSec / ENV_WIN_SEC);
+            if (j < 0 || j >= ytRms.length) continue;
+            float a = ytRms[j], b = fileRms[i];
+            if (a < 1e-3f || b < 1e-3f) continue;
+            yt += (double) a * a;
+            file += (double) b * b;
+            n++;
+        }
+        return n * ENV_WIN_SEC < 2 ? Double.NaN : 10 * Math.log10(yt / file);
+    }
+
+    /**
      * The phone's level (offset-map.md, Level): YouTube's loudnessDb as its player normalises with
      * it, a cut of that many dB when positive and nothing otherwise; NaN (not known) is nothing.
      */

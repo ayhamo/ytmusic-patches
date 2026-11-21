@@ -979,21 +979,28 @@ public final class AddonPrep {
         p.offsetSec = r.offsetSec;
         p.score = r.score;
         p.addonDurationSec = Double.isNaN(range.durationSec) ? p.ytDurationSec + r.offsetSec : range.durationSec;
-        // level: YouTube's loudnessDb, as its player normalises its own copy (offset-map.md, Level,
-        // phone): a cut of that many dB when positive, nothing measured, no boost
+        // level: YouTube's copy as it is heard, measured on the window against the same seconds of it.
+        // Not YouTube's loudnessDb: YT Music's player plays its copy at volume 1, unnormalised (the
+        // S21 FE, 2026-11-21: Esse Nao E Meu Fim stepped down 7.3 dB, its loudnessDb 7.49, as the
+        // file took over), so a cut by it left every file that much under YouTube's copy
         double ldb = ytLoudnessDb(id);
+        double measured = OffsetFit.windowGainDb(ytSide.rms(), side.rms(), r.offsetSec, win, win + len);
         p.gain = new OffsetFit.Gain();
-        p.gain.wantDb = OffsetFit.loudnessGainDb(ldb);
-        p.gainDb = p.gain.gainDb = p.gain.wantDb;
-        // the same master: the file's level is YouTube's copy's
+        p.gain.wantDb = Double.isNaN(measured) ? 0 : measured;
+        double gain = p.gain.wantDb;
+        if (gain > OffsetFit.MAX_BOOST_DB) {
+            gain = OffsetFit.MAX_BOOST_DB;
+            p.gain.capped = "boost";
+        }
+        p.gainDb = p.gain.gainDb = gain;
         // the level envelope wants the whole song: YouTube's full decode fills it when done (the mix
-        // reads none until then, as for a song not analysed)
+        // reads none until then, as for a song not analysed); the file sits gainDb under YouTube's
         final Prepared ready = p;
-        final double offset = r.offsetSec;
+        final double offset = r.offsetSec, step = -gain;
         Thread envThread = new Thread(() -> {
             try {
                 yt.done();
-                ready.env = envFromYt(yt.side.rms(), offset, ready.addonDurationSec, 0);
+                ready.env = envFromYt(yt.side.rms(), offset, ready.addonDurationSec, step);
             } catch (Throwable t) {
                 Log.i(TAG, id + ": no level envelope (" + t + ")");
             }
@@ -1001,7 +1008,8 @@ public final class AddonPrep {
         envThread.setDaemon(true);
         envThread.start();
         p.codec = s.codec;
-        Log.i(TAG, String.format(Locale.US, "%s: level: YouTube's loudnessDb %.2f: %+.2f dB", id, ldb, p.gainDb));
+        Log.i(TAG, String.format(Locale.US, "%s: level: measured on the window %+.2f dB%s: %+.2f dB (YouTube's loudnessDb %.2f, not used)",
+                id, measured, p.gain.capped != null ? " (" + p.gain.capped + ")" : "", p.gainDb, ldb));
         return p;
     }
 

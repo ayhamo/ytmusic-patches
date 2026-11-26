@@ -465,3 +465,4 @@ All from `patcher/4_apis.md` unless noted.
     The descriptor must match the real Java package. Use our own unique extension package.
 16. **GitHub Packages auth** (`read:packages`) is needed even to build.
 17. **Don't hand-edit generated release files** or force-push release commits.
+18. **Keep Morphe's "Disable DRC audio" on**: addon levels are measured against the non-DRC stream, so with DRC the addon plays quieter than YouTube. Our extension switches it on once at first start (`Features.drcOffOnce`); a user who turns it off keeps it off.

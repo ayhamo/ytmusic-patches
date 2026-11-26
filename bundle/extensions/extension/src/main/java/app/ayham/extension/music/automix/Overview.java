@@ -20,8 +20,6 @@ public final class Overview {
     public double[] outGrid, inGrid;
     /** Each song's length (s), NaN unknown. */
     public double outDur = Double.NaN, inDur = Double.NaN;
-    /** Where A's music ends (the planner's musicEnd), NaN unknown: the window ends before it. */
-    public double outEnd = Double.NaN;
     /** The first song time the mix can start now (the planner's earliest). */
     public double earliest = Double.NaN;
     public Planner.Plan plan;

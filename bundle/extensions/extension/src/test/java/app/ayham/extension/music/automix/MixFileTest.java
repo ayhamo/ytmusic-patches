@@ -31,7 +31,7 @@ public class MixFileTest {
         for (File d = new File("").getAbsoluteFile(); d != null; d = d.getParentFile()) dirs.add(new File(d, "spec/automix/mixes"));
         List<File> files = new ArrayList<>();
         for (File d : dirs) {
-            File[] fs = d.listFiles((x, n) -> n.endsWith(".vivimix.json"));
+            File[] fs = d.listFiles((x, n) -> n.endsWith(".json"));
             if (fs != null) files.addAll(Arrays.asList(fs));
         }
         return files;
@@ -225,12 +225,12 @@ public class MixFileTest {
         List<MixFile.Mix> one = Collections.singletonList(new MixFile.Mix(new MixFile.Song(A, "Cinderella", "Future"),
                 new MixFile.Song(B, "Drowning (feat. Kodak Black)", null), MixOverride.fromJson(Json.parse("{\"bars\":8,\"engine\":2,\"savedAt\":9}"))));
         Map<String, Object> f = MixFile.write(one);
-        assertEquals("cinderella-drowningfeatkodakblack.vivimix.json", MixFile.fileName(f, "2026-11-25"));
+        assertEquals("cinderella-drowningfeatkodakblack.json", MixFile.fileName(f, "2026-11-25"));
         String t = MixFile.text(f);
         assertTrue(t, !t.contains("engine") && !t.contains("savedAt"));
         List<MixFile.Mix> two = new ArrayList<>(one);
         two.add(new MixFile.Mix(new MixFile.Song(B, null, null), new MixFile.Song(A, null, null), MixOverride.fromJson(Json.parse("{\"bars\":4}"))));
-        assertEquals("vivimusic-mixes-2026-11-25.vivimix.json", MixFile.fileName(MixFile.write(two), "2026-11-25"));
+        assertEquals("mixes-2026-11-25.json", MixFile.fileName(MixFile.write(two), "2026-11-25"));
     }
 
     private static MixFile.Mix pair(String a, String b) {

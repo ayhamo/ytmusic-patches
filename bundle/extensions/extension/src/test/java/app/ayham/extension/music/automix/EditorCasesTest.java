@@ -448,16 +448,23 @@ public class EditorCasesTest {
     }
 
     @Test
-    public void syncOutOfRangePlaysWithoutBeatMatchAndSaysWhy() {
+    public void syncAlwaysBeatMatchesHoweverFarApart() {
+        // editor.md §6, only Automix has rules: Sync and Glide always beat-match (folded, at most about 41%)
         Planner.Settings s = new Planner.Settings();
         s.version = 3;
         Analysis a = PlannerTest.song("a", 120, 200, 0.9), b = PlannerTest.song("b", 133.2, 180, 0.9);
         Planner.Plan p = plan(s, a, b, ov("{\"beatMatch\":\"sync\",\"bars\":8}"));
-        assertEquals("crossfade", p.style);
-        assertFalse(p.fallback);
-        assertEquals(16, p.durationSec, 1e-9); // 8 bars of the playing song
-        assertNotNull(p.warnings);
-        assertTrue(p.warnings.get(0), p.warnings.get(0).startsWith("tempos 11% apart: Sync stretches at most 8%"));
+        assertEquals("blend", p.style);
+        assertEquals(8, p.bars);
+        assertEquals(133.2 / 120, p.outRate, 1e-9);
+        if (p.warnings != null) for (String w : p.warnings) assertFalse(w, w.contains("stretches at most"));
+        Planner.Plan g = plan(s, a, PlannerTest.song("b", 160, 180, 0.9), ov("{\"beatMatch\":\"glide\",\"bars\":8}"));
+        assertEquals("blend", g.style);
+        assertNotNull("33% apart, Glide still glides", g.glide);
+        // Auto: Automix decides, so a pair outside its limits still plays without beat match
+        Planner.Plan auto = plan(s, a, b, ov("{\"bars\":8}"));
+        assertEquals("crossfade", auto.style);
+        assertEquals(16, auto.durationSec, 1e-9); // 8 bars of the playing song, as picked
     }
 
     @Test

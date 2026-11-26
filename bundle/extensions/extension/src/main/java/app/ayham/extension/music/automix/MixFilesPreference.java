@@ -25,7 +25,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The settings' "Mix files" (spec/automix/mix-file.md rule 9): Import… a .vivimix.json file (a saved
+ * The settings' "Mix files" (spec/automix/mix-file.md rule 9): Import… a mix file (.json) (a saved
  * edit is replaced only after a confirm that lists what changes), Export this pair, Export all. The
  * result of the last one is the row's summary (rule 7). After an import, Play these mixes queues the
  * file's songs after the playing one and plays them, also from the row for the last imported file. The file pickers answer
@@ -34,8 +34,13 @@ import java.util.Map;
 @SuppressWarnings("deprecation")
 public class MixFilesPreference extends Preference {
     private static final String TAG = "AyhamMixFiles";
-    private static final String DEFAULT = "Import a .vivimix.json file of mixes (from the PC extension, BitChord or this phone), or export your edited pairs to one.";
+    private static final String DEFAULT = "Import a mix file (.json, from the PC extension, BitChord, this phone, or a Spotify mix export), or export your edited pairs to one.";
     private static String last;
+    /**
+     * The dialogs' theme: the settings screen's own gave the menu a black sheet with dark items,
+     * so only the pressed row showed (the phone, 2026-11-26); DownloadChoice and the overview use it too.
+     */
+    private static final int THEME = android.R.style.Theme_DeviceDefault_Dialog_Alert;
     /** The last imported file's songs, in its order, for "Play these mixes" from the row. */
     private static List<String> lastImported;
 
@@ -101,7 +106,7 @@ public class MixFilesPreference extends Preference {
         String[] items = played != null
                 ? new String[]{"Import…", "Export this pair", "Export all", "Play these mixes (the last imported file)"}
                 : new String[]{"Import…", "Export this pair", "Export all"};
-        new AlertDialog.Builder(a)
+        new AlertDialog.Builder(a, THEME)
                 .setTitle("Mix files")
                 .setItems(items, (d, which) -> {
                     if (which == 0) Picker.open(a, this);
@@ -151,7 +156,7 @@ public class MixFilesPreference extends Preference {
         }
         if (!p.add.isEmpty()) b.append("\n\n(").append(p.add.size()).append(p.add.size() == 1 ? " new pair is" : " new pairs are").append(" added either way.)");
         if (gone(a)) return;
-        new AlertDialog.Builder(a)
+        new AlertDialog.Builder(a, THEME)
                 .setTitle("Replace saved mixes?")
                 .setMessage(b.toString())
                 .setPositiveButton("Replace", (d, w) -> save(a, r, p, true))
@@ -190,7 +195,7 @@ public class MixFilesPreference extends Preference {
         result(text);
         Log.i(TAG, text);
         if (gone(a)) return;
-        new AlertDialog.Builder(a)
+        new AlertDialog.Builder(a, THEME)
                 .setTitle("Mix files")
                 .setMessage(text)
                 .setPositiveButton("Play these mixes", (d, w) -> play(a, queue))

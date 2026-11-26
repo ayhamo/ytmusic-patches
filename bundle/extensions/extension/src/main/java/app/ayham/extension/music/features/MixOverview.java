@@ -537,7 +537,7 @@ final class MixOverview {
         TextView t = filesResult;
         if (t == null) return;
         String r = app.ayham.extension.music.automix.MixFilesPreference.lastResult();
-        t.setText(r != null ? r : "Import a .vivimix.json or a Spotify mix export, or export your edits.");
+        t.setText(r != null ? r : "Import a mix file (.json, or a Spotify mix export), or export your edits.");
     }
 
     private static TextView chip(Context a, String label) {
@@ -909,8 +909,8 @@ final class MixOverview {
 
     /** What each limit means: A's earliest and end, B's start and end (automix-overview.js LIMIT_WHY). */
     private static final String[][] LIMIT_WHY = {
-            {"A has already played up to there", "the window has to end before A's music does"},
-            {"that is B's start", "the window has to end 10 s before B's end"}};
+            {"A has already played up to there", "the window has to end before A does"},
+            {"that is B's start", "the window has to end before B does"}};
 
     private static Drag drag;
 
@@ -935,7 +935,7 @@ final class MixOverview {
 
     /** The limits a drag stops at, {lo, hi} in song seconds (the planner's windowLimits; no end while a length is unknown). */
     static double[] limitsOf(Overview s, boolean out) {
-        double[] l = Planner.windowLimits(s.plan, s.outDur, s.outEnd, s.inDur, s.earliest);
+        double[] l = Planner.windowLimits(s.plan, s.outDur, s.inDur, s.earliest);
         if (out) return new double[]{l[0], Double.isNaN(s.outDur) ? Double.POSITIVE_INFINITY : l[1]};
         return new double[]{l[2], Double.isNaN(s.inDur) ? Double.POSITIVE_INFINITY : l[3]};
     }

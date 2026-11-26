@@ -43,11 +43,12 @@ public class OverviewTest {
     }
 
     @Test
-    public void aFilterPickedIsAFilterMixOfAtMostEightBars() {
+    public void aFilterPickedKeepsItsLength() {
+        // the 8-bar cap is Automix's own: an old {filter, 16} pick keeps its 16 bars (editor.md §6)
         Planner.Plan p = plan(pick("filter", 16), 120);
         assertEquals("filter", p.style);
         assertEquals("picked in the overview", p.reason);
-        assertTrue(p.bars <= Planner.FILTER_MAX_BARS);
+        assertEquals(16, p.bars);
     }
 
     @Test

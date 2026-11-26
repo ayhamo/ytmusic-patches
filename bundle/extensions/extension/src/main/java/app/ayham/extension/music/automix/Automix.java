@@ -888,7 +888,6 @@ public final class Automix {
             if (o.override != null && o.outGrid != null) o.override = MixOverride.fold(o.override, o.outGrid[2]).ov;
             o.outDur = fa != null ? fa.durationSec : Double.NaN;
             o.inDur = ta != null ? ta.durationSec : Double.NaN;
-            o.outEnd = fa != null ? Planner.musicEnd(fa).durationSec : Double.NaN;
         }
         if (!live) {
             // editor.md §11: one row, this song before the next, then this song's addon copy (rule 6); hidden during a live mix

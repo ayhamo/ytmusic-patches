@@ -181,6 +181,7 @@ public final class Features {
             if (!started) {
                 started = true;
                 checkMorpheReachable();
+                drcOffOnce(appContext);
                 MusicVideoType.migrateAutoSong(appContext);
                 startLyricsPoll();
                 EqPresets.register(appContext);
@@ -276,6 +277,33 @@ public final class Features {
     }
 
     // ---- Item 6: calling Morphe classes ----
+
+    static final String DRC_DEFAULT_DONE = "ayham_drc_off_default";
+
+    /**
+     * Morphe's "Disable DRC audio" on, once (ruled 2026-11-26): YouTube's DRC stream plays louder
+     * than the copy an addon's level is matched to (offset-map.md, Level), so with DRC the addon
+     * sounded quieter. Set through Morphe's own setting, so its screen shows it; a user who turns it
+     * off again keeps it off (the marker).
+     */
+    static void drcOffOnce(Context c) {
+        android.content.SharedPreferences sp = c.getSharedPreferences("morphe_prefs", Context.MODE_PRIVATE);
+        if (sp.getBoolean(DRC_DEFAULT_DONE, false)) return;
+        try {
+            Object setting = Class.forName("app.morphe.extension.shared.settings.SharedYouTubeSettings")
+                    .getField("DISABLE_DRC_AUDIO").get(null);
+            Method save = null;
+            for (Method m : setting.getClass().getMethods()) {
+                if (m.getName().equals("save") && m.getParameterTypes().length == 1) save = m;
+            }
+            if (save == null) throw new NoSuchMethodException("save");
+            save.invoke(setting, Boolean.TRUE);
+            sp.edit().putBoolean(DRC_DEFAULT_DONE, true).apply();
+            Log.i(TAG, "Disable DRC audio switched on (once): addon levels are matched to the non-DRC stream");
+        } catch (Throwable t) {
+            Log.w(TAG, "Disable DRC audio not set", t);
+        }
+    }
 
     private static void checkMorpheReachable() {
         try {

@@ -269,14 +269,14 @@ public final class MixFile {
         return true;
     }
 
-    /** Rule 8: "<from>-<to>.vivimix.json" for one mix, "vivimusic-mixes-<date>.vivimix.json" for more. */
+    /** Rule 8 (plain .json, the user 2026-11-26): "<from>-<to>.json" for one mix, "mixes-<date>.json" for more. */
     public static String fileName(Map<String, Object> file, String isoDate) {
         List<?> mixes = (List<?>) file.get("mixes");
         if (mixes.size() == 1) {
             Map<?, ?> m = (Map<?, ?>) mixes.get(0);
-            return slug((Map<?, ?>) m.get("from")) + "-" + slug((Map<?, ?>) m.get("to")) + ".vivimix.json";
+            return slug((Map<?, ?>) m.get("from")) + "-" + slug((Map<?, ?>) m.get("to")) + ".json";
         }
-        return "vivimusic-mixes-" + isoDate + ".vivimix.json";
+        return "mixes-" + isoDate + ".json";
     }
 
     private static String slug(Map<?, ?> song) {

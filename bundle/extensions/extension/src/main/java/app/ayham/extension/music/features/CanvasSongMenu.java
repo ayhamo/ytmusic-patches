@@ -90,18 +90,18 @@ final class CanvasSongMenu {
             Toast.makeText(a, "No song's canvas yet", Toast.LENGTH_SHORT).show();
             return;
         }
-        List<String> labels = new ArrayList<>();
+        List<CharSequence> labels = new ArrayList<>();
         List<Runnable> acts = new ArrayList<>();
         if (n.rows[0]) {
-            labels.add(box(!n.ch.off.contains(CanvasSettings.VIDEO)) + "Canvas (the music video) for this song");
+            labels.add(perSong(box(!n.ch.off.contains(CanvasSettings.VIDEO)) + "Music video on this song", "Canvas"));
             acts.add(() -> toggle(a, n, CanvasSettings.VIDEO));
         }
         if (n.spotifySwitch) {
-            labels.add(box(!n.ch.off.contains(CanvasSettings.SPOTIFY) && !(n.hasLoop && CanvasSettings.VIDEO.equals(n.showingSrc))) + "Spotify canvas for this song");
+            labels.add(perSong(box(!n.ch.off.contains(CanvasSettings.SPOTIFY) && !(n.hasLoop && CanvasSettings.VIDEO.equals(n.showingSrc))) + "Spotify canvas on this song", "Canvas"));
             acts.add(() -> toggle(a, n, CanvasSettings.SPOTIFY));
         }
         if (n.appleSwitch) {
-            labels.add(box(!n.ch.off.contains(CanvasSettings.APPLE) && (n.showingSrc == null || CanvasSettings.APPLE.equals(n.showingSrc))) + "Animated cover for this song");
+            labels.add(perSong(box(!n.ch.off.contains(CanvasSettings.APPLE) && (n.showingSrc == null || CanvasSettings.APPLE.equals(n.showingSrc))) + "Animated cover on this song", "Animated covers"));
             acts.add(() -> toggle(a, n, CanvasSettings.APPLE));
         }
         // rule 7: Use, for a song with a loop and another clip, neither switched off
@@ -142,9 +142,26 @@ final class CanvasSongMenu {
             Toast.makeText(a, "Nothing to choose for this song's canvas", Toast.LENGTH_SHORT).show();
             return;
         }
-        new AlertDialog.Builder(a).setTitle("This song's canvas")
-                .setItems(labels.toArray(new String[0]), (d, i) -> acts.get(i).run())
+        new AlertDialog.Builder(a).setTitle("This song only")
+                .setItems(labels.toArray(new CharSequence[0]), (d, i) -> acts.get(i).run())
                 .show();
+    }
+
+    /**
+     * A per-song switch's row (canvas.md §15, the user 2026-11-26): its name, then a smaller line
+     * saying it touches this song only and which of the menu's switches is for all songs.
+     */
+    static CharSequence perSong(String label, String global) {
+        android.text.SpannableStringBuilder b = new android.text.SpannableStringBuilder(label).append("\n");
+        int at = b.length();
+        b.append(perSongNote(global));
+        b.setSpan(new android.text.style.RelativeSizeSpan(0.8f), at, b.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        b.setSpan(new android.text.style.ForegroundColorSpan(0xB3FFFFFF), at, b.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return b;
+    }
+
+    static String perSongNote(String global) {
+        return "Off hides it for this song only. " + global + " in the menu is for all songs.";
     }
 
     private static String box(boolean on) {

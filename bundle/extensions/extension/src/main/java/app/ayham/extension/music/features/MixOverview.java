@@ -245,10 +245,18 @@ final class MixOverview {
             t.setPadding(0, 0, dp(a, 7), 0);
             legend.addView(t);
         }
+        // the legend scrolls sideways rather than clipping at a large font size, and the clock has its own
+        // line: sharing the legend's row, a phone's font left it one letter wide, wrapping into a tall
+        // column that pushed the edit far below the drawing
+        android.widget.HorizontalScrollView legendScroll = new android.widget.HorizontalScrollView(a);
+        legendScroll.setHorizontalScrollBarEnabled(false);
+        legendScroll.addView(legend);
+        card.addView(legendScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         clock = text(a, "", 12, 0xE6FFFFFF, false);
         clock.setGravity(Gravity.END);
-        legend.addView(clock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        card.addView(legend);
+        clock.setSingleLine(true);
+        clock.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        card.addView(clock, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // the pair's edit (editor.md): preset, its lanes, beat match, length, window
         card.addView(chipRow(a, "Preset", PRESETS.length, i -> PRESET_NAMES[i], presetChips, MixOverview::pickPreset));
@@ -301,7 +309,8 @@ final class MixOverview {
         card.addView(chipRow(a, "Beat match", MATCH.length, i -> MATCH_NAMES[i], matchChips, i -> {
             MixOverride o = current();
             if (o == null) return;
-            o.beatMatch = i == 0 ? null : MATCH[i];
+            // Auto on an imported mix is saved as "auto": left out, it would beat-match as Sync (mix-file.md rule 6)
+            o.beatMatch = i != 0 ? MATCH[i] : o.imported() ? "auto" : null;
             save(o);
         }));
         card.addView(chipRow(a, "Length", BARS.length, i -> BAR_LABELS[i], barChips, i -> {
@@ -1129,7 +1138,7 @@ final class MixOverview {
         boolean pair = s.toId != null && s.pairKey != null;
         MixOverride ov = s.override;
         String preset = ov != null && ov.preset != null ? ov.preset : "auto";
-        String bm = ov != null ? ov.beatMatchOrAuto() : "auto";
+        String bm = ov != null ? ov.beatMatchOf() : "auto";
         boolean loopNone = s.loopNone != null;
         for (int i = 0; i < PRESETS.length; i++) {
             TextView b = presetChips[i];

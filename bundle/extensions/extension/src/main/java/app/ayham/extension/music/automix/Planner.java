@@ -338,6 +338,11 @@ public final class Planner {
             if (f.note != null) notes.add(f.note);
             ov = f.ov;
         }
+        // an imported mix beat-matches as Sync unless its file says otherwise (mix-file.md rule 6)
+        if (ov != null && ov.beatMatch == null && !"auto".equals(ov.beatMatchOf())) {
+            ov = ov.copy();
+            ov.beatMatch = ov.beatMatchOf();
+        }
         // a length the user picked is played as picked: only the songs' ends bound it (editor.md §6, only Automix has rules)
         int pinned = ov != null ? ov.pinnedBars() : 0;
         if (pinned > 0) {

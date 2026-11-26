@@ -157,6 +157,22 @@ public final class MixOverride {
         return beatMatch == null ? "auto" : beatMatch;
     }
 
+    /**
+     * The beat match this mix plays with (mix-file.md rule 6, automix.js beatMatchOf): its own when it
+     * has one; an imported mix (it carries gridBpm, which the editor never sets) beat-matches as Sync;
+     * else Auto. A loop mix: Auto (its decks do their own tempo ramp).
+     */
+    public String beatMatchOf() {
+        if (loop()) return "auto";
+        if (beatMatch != null) return beatMatch;
+        return gridBpm > 0 ? "sync" : "auto";
+    }
+
+    /** Carries gridBpm: the mix came from a file (mix-file.md rule 2), not the editor. */
+    public boolean imported() {
+        return gridBpm > 0;
+    }
+
     /** No transition (editor.md §2): no mix, no crossfade; A plays to its end, then B from its start. */
     public boolean noTransition() {
         return "none".equals(preset);
@@ -384,6 +400,9 @@ public final class MixOverride {
             n.in = clean(o.in, true);
             // (Loop: the loop decks do their own tempo ramp, editor.md §2)
             if ("sync".equals(o.beatMatch) || "glide".equals(o.beatMatch) || "off".equals(o.beatMatch)) n.beatMatch = o.beatMatch;
+            // Auto picked on an imported mix is kept: it gets Automix's limits back, where it would
+            // otherwise beat-match as Sync (mix-file.md rule 6); an editor mix's Auto is no edit
+            else if ("auto".equals(o.beatMatch) && o.gridBpm >= 20 && o.gridBpm <= 400) n.beatMatch = "auto";
         }
         // each song's speed in the playlist it came from (editor.md §1, spotify-mixes.md rule 10)
         n.speedOut = speed(o.speedOut);

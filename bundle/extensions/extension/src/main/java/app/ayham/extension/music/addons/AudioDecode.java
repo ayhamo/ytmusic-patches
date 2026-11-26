@@ -84,7 +84,7 @@ public final class AudioDecode {
             int rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE), channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
             int enc = AudioFormat.ENCODING_PCM_16BIT;
             boolean told = false, inputDone = false;
-            int toldChannels = 0;
+            int toldChannels = 0, toldRate = 0;
             long frames = 0;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             float[][] planar = null;
@@ -116,22 +116,29 @@ public final class AudioDecode {
                     enc = of.containsKey(MediaFormat.KEY_PCM_ENCODING) ? of.getInteger(MediaFormat.KEY_PCM_ENCODING) : AudioFormat.ENCODING_PCM_16BIT;
                     continue;
                 }
-                if (out < 0) {
+                // an empty buffer that doesn't end the stream is no progress either
+                boolean empty = out >= 0 && info.size <= 0 && (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0;
+                if (out < 0 || empty) {
                     // a decoder that never answers would hold the one prep (or download) worker for good
                     if (android.os.SystemClock.elapsedRealtime() - lastOut > 30_000) throw new IOException("the decoder stalled");
-                    continue;
-                }
-                lastOut = android.os.SystemClock.elapsedRealtime();
-                if (!told) {
-                    told = true;
-                    toldChannels = channels;
-                    sink.format(rate, channels);
-                } else if (channels != toldChannels) {
-                    // the sink sized its meters by the first channel count: more channels mid-stream overran them
-                    throw new IOException("the channel count changed mid-stream (" + toldChannels + " to " + channels + ")");
+                    if (out < 0) continue;
+                } else {
+                    lastOut = android.os.SystemClock.elapsedRealtime();
                 }
                 ByteBuffer buf = codec.getOutputBuffer(out);
                 if (buf != null && info.size > 0) {
+                    // the sink is told the format with the first audio (an empty buffer before a format change doesn't fix it)
+                    if (!told) {
+                        // an untrusted file's format: no channels would divide by zero below, no rate breaks the resampler
+                        if (rate <= 0 || channels <= 0) throw new IOException("a format of " + rate + " Hz, " + channels + " channels");
+                        told = true;
+                        toldRate = rate;
+                        toldChannels = channels;
+                        sink.format(rate, channels);
+                    } else if (channels != toldChannels || rate != toldRate) {
+                        // the sink sized its meters by the first channel count and timed everything by the first rate
+                        throw new IOException("the format changed mid-stream (" + toldRate + " Hz, " + toldChannels + " ch to " + rate + " Hz, " + channels + " ch)");
+                    }
                     if (range != null && Double.isNaN(range.firstSec)) range.firstSec = info.presentationTimeUs / 1e6;
                     // a ranged decode ends on the output's own time too: the extractor's sample times
                     // didn't stop a FLAC stream's input (the phone decoded 30 s of a 12 s window)

@@ -44,6 +44,8 @@ final class Engine {
     // ---- the volume gate (patched into ExoPlayer.setVolume) ----
     static volatile boolean holding;
     static volatile Object released;
+    /** The song the listener skipped to during a mix: silent, whoever sets its volume, until the deck's fade is heard (bringInSkipped). */
+    static volatile Object skipMuted;
 
     /** The volume YT (or Morphe) last asked each player for, not counting ours: its loudness level. */
     private static final java.util.Map<Object, Float> ytAsked = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
@@ -83,6 +85,7 @@ final class Engine {
         float v;
         // the stream deck plays this song: YT's player stays silent under it
         if (player != null && StreamDeck.mutes(player)) v = 0f;
+        else if (player != null && player == skipMuted) v = 0f;
         else if (!holding) v = volume;
         else v = player == released ? volume : 0f;
         // ExoPlayer clamps a volume to 0..1 (YT asks for more, e.g. 4.4): clamped here, so the addon's
@@ -326,6 +329,10 @@ final class Engine {
             @Override
             public void run() {
                 if (stop) return;
+                if (!Automix.enabled()) {
+                    finish(false, "automix was switched off before the mix");
+                    return;
+                }
                 // another song plays (opened, skipped to, picked from the queue): this mix is let go, or it
                 // waited for a takeover point that never comes and Automix planned nothing (phone, 2026-11-24)
                 String playing = Automix.currentId();
@@ -624,10 +631,19 @@ final class Engine {
         }
     }
 
+    /** A NaN or Inf sample made silence. */
+    static void finite(float[] b) {
+        for (int i = 0; i < b.length; i++)
+            if (!Float.isFinite(b[i])) b[i] = 0f;
+    }
+
     /** One block of the mix at frame [f] into [buf]. */
     private void render(long f, float[] buf, float[] bo, float[] bi) {
         LoopMixRenderer.nativeRender(hOut, f, bo, 0, BLOCK);
         LoopMixRenderer.nativeRender(hIn, f, bi, 0, BLOCK);
+        // before the filters and the echo: one NaN or Inf in their state would stay there for the mix
+        finite(bo);
+        finite(bi);
         // B's late entry (mix-file.md rule 2): nothing of the next song before its start, filters and
         // sends included; then up to the curve within LATE_RISE_SEC
         if (m.inStart > 0 && f < (m.inStart + LATE_RISE_SEC) * SR) {
@@ -1039,10 +1055,13 @@ final class Engine {
         if (!tookOver || inPlayer != null || stop) return false;
         if (!asked) {
             // the listener's Next: the song skipped to stays silent until the deck's fade has been
-            // heard, else both play at full at once and the sum clips (the phone, 2026-11-26)
+            // heard, else both play at full at once and the sum clips (the phone, 2026-11-26). Held by
+            // skipMuted, not holding: the abort lets holding go, and Morphe's crossfade ramp would
+            // bring it up early. The outgoing player gets its volume back then too, not on top of the deck.
+            skipMuted = player;
             setVolume(player, 0f);
             main.post(() -> {
-                abort("the song was skipped during the mix", true);
+                abort("the song was skipped during the mix", false);
                 bringInSkipped(player);
             });
             return false;
@@ -1125,7 +1144,7 @@ final class Engine {
         // a late entry (mix-file.md rule 2) called off before B came in: YT plays B from its mix-in,
         // not from where its silent player ran up to it
         double at = mixNow();
-        if (m.inStart > 0 && !Double.isNaN(at) && at < m.inStart && inPlayer instanceof SeekAccess && !handedOver && m.inId.equals(inIdSeen))
+        if (m.inStart > 0 && !Double.isNaN(at) && at < m.inStart && inPlayer instanceof SeekAccess && !handedOver && (inIdSeen == null || m.inId.equals(inIdSeen)))
             ((SeekAccess) inPlayer).ayham_seekTo(incomingSpotMs(m, at));
         if (track == null || offsetFrames == Long.MIN_VALUE) {
             finish(false, why);
@@ -1145,12 +1164,21 @@ final class Engine {
     private void bringInSkipped(Object player) {
         double heard = mixNow();
         if (finished || Double.isNaN(heard) || Double.isNaN(fadeFrom)) {
-            restoreVolume(player);
+            letSkippedIn(player, 0);
             return;
         }
         long ms = skipVolumeDelayMs(fadeFrom + fadeLen, heard, takeoverLatency);
         Log.i(TAG, "the song skipped to comes in after " + ms + " ms, once the deck's fade is heard");
-        main.postDelayed(() -> Automix.rampVolume(player, SKIP_RISE_SEC), ms);
+        main.postDelayed(() -> letSkippedIn(player, SKIP_RISE_SEC), ms);
+    }
+
+    /** The song skipped to rises over [sec] (0: at once); the outgoing player's volume back. */
+    private void letSkippedIn(Object player, double sec) {
+        if (skipMuted == player) skipMuted = null;
+        Object out = outPlayer;
+        if (out != null && out != player) restoreVolume(out);
+        if (sec > 0) Automix.rampVolume(player, sec);
+        else restoreVolume(player);
     }
 
     static final double SKIP_RISE_SEC = 0.03;
@@ -1188,7 +1216,7 @@ final class Engine {
         // where its held, silent player was (a seek doesn't start it)
         double at = mixNow();
         // (not a song the queue moved on to: that one is left where it is)
-        if (inPlayer instanceof SeekAccess && !Double.isNaN(at) && !handedOver && m.inId.equals(inIdSeen)) {
+        if (inPlayer instanceof SeekAccess && !Double.isNaN(at) && !handedOver && (inIdSeen == null || m.inId.equals(inIdSeen))) {
             long to = incomingSpotMs(m, at);
             ((SeekAccess) inPlayer).ayham_seekTo(to);
             Log.i(TAG, "the incoming song left paused at " + to + " ms, where the mix was (YT's player at " + Automix.position(inPlayer) + " ms)");

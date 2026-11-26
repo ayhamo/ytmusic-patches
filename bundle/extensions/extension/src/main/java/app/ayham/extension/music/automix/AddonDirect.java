@@ -161,6 +161,22 @@ public final class AddonDirect {
         return false;
     }
 
+    /**
+     * The take-over (editor.md §11 rule 6): our player has started on this song (not a mix's held
+     * one) and isn't what's heard yet. Main thread.
+     */
+    public static boolean switching(String id) {
+        boolean started = false;
+        synchronized (shadows) {
+            for (Shadow s : shadows.values()) {
+                if (s.done || !s.p.id.equals(id) || s.forMix) continue;
+                if (s.share >= 0.5f && s.heard()) return false;
+                if (s.mode == Mode.LOCKING) started = true;
+            }
+        }
+        return started;
+    }
+
     /** A player of ours (playing or armed) is on this song: its files must stay. */
     /** The playing song's id, as YT's queue names it (null when unknown). */
     public static String playingId() {
@@ -381,6 +397,9 @@ public final class AddonDirect {
         else n.startLocking(ytPos);
         return n;
     }
+
+    /** How long a stalled addon player may buffer (YT heard meanwhile) before the song is left to YT. */
+    static final long STALL_MS = 15_000;
 
     enum Mode {ARMED, LOCKING, ON, TAIL}
 
@@ -789,7 +808,9 @@ public final class AddonDirect {
                     seeks = 0;
                     if (was) Log.w(TAG, p.id + ": the addon player is buffering: YT's audio while it does");
                 }
-                if (now - stallFrom > (mode == Mode.LOCKING ? 15_000 : 1000)) end("the addon player stalled", true);
+                // locking here always (an ON stall was just made LOCKING): YT is heard while it lasts,
+                // so ours gets STALL_MS to recover before the song is YT's for good
+                if (now - stallFrom > STALL_MS) end("the addon player stalled", true);
                 return;
             }
             stallFrom = 0;
@@ -1029,8 +1050,9 @@ public final class AddonDirect {
 
     /**
      * adb shell am broadcast -p PKG -a app.ayham.ADDON_TEST [--ef speed 1.05] [--el seekMs 60000 | --el leftMs 45000]
-     * [--es fail release|truncate] [--es upgrade VIDEO_ID]: YT's speed or position, or a failure of our player (released as
-     * by a crash; its file cut short and read again).
+     * [--es fail release|truncate] [--es upgrade VIDEO_ID] [--es playNext ID,ID,...]: YT's speed or position, or a failure
+     * of our player (released as by a crash; its file cut short and read again); the menu's Upgrade quality; Mix files'
+     * "Play these mixes".
      */
     private static void registerTest() {
         BroadcastReceiver r = new BroadcastReceiver() {
@@ -1041,6 +1063,13 @@ public final class AddonDirect {
                         // the menu's "Upgrade quality" for this song
                         Log.i(TAG, "test: upgrade " + i.getStringExtra("upgrade"));
                         app.ayham.extension.music.addons.AddonPrep.upgrade(i.getStringExtra("upgrade"));
+                        return;
+                    }
+                    if (i.hasExtra("playNext")) {
+                        // Mix files' "Play these mixes" while a song plays: a fresh queue of these, in order
+                        java.util.List<String> ids = java.util.Arrays.asList(i.getStringExtra("playNext").split(","));
+                        Log.i(TAG, "test: play next " + ids);
+                        Automix.playNext(ids, why -> Log.i(TAG, "test: play next: " + (why == null ? "queued" : why)));
                         return;
                     }
                     Object host = PlayerTap.current();

@@ -27,6 +27,8 @@ final class AppleCanvas {
     private static final String AMP = "https://amp-api.music.apple.com/v1/catalog/";
     private static final String UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36";
     private static final int MIN_SCORE = 12;
+    /** Any answer read: the web player's script bundles are a few MB, catalog JSON and pages far less. */
+    private static final long MAX_ANSWER_BYTES = 32L * 1024 * 1024;
     private static final String[] EDITION = {"deluxe", "expanded", "remastered", "remix", "version", "edit", "mix", "bonus"};
     private static final String[] COMPILATION = {"playlist", "set list", "essentials", "dj mix", "mixed", "apple music", "today's hits", "session"};
 
@@ -46,6 +48,11 @@ final class AppleCanvas {
      * hit, and without a token or a hit the public album page is read instead.
      */
     static String[] find(String title, String artist, String album, boolean tall) throws Exception {
+        // the square art: Morphe's lookup (Morphe ships it: ours goes); the tall clip only ours has
+        if (!tall && MorpheApple.available()) {
+            String url = MorpheApple.find(title, artist, album);
+            return url == null ? null : trustedPair(url, null);
+        }
         String bearer = token();
         if (bearer == null) {
             String[] page = applePage(artist, title, tall);
@@ -148,13 +155,14 @@ final class AppleCanvas {
                 if (compilation(r.optString("collectionName")) || !(name.equals(want) || name.startsWith(want + " "))) continue;
                 if (!credited(artist, r.optString("artistName"))) continue;
                 String page = r.optString("collectionViewUrl").replaceAll("\\?.*", "");
-                if (page.isEmpty()) return null;
+                if (page.isEmpty() || !ArtistHeader.trusted(page, null)) return null;
                 String html = get(page, null).replace("\\u002F", "/").replace("\\/", "/");
                 String square = grab(html, "motionDetailSquare"), tallUrl = grab(html, "motionDetailTall");
                 if (square == null) square = grab(html, "motionSquareVideo1x1");
                 if (tallUrl == null) tallUrl = grab(html, "motionTallVideo3x4");
                 Log.i(TAG, "canvas: album page '" + r.optString("collectionName") + "': " + (square != null || tallUrl != null ? "motion art" : "none"));
-                return pair(square, tallUrl, tall);
+                String[] p = pair(square, tallUrl, tall);
+                return p == null ? null : trustedPair(p[0], p[1]);
             }
         } catch (Throwable t) {
             Log.w(TAG, "canvas: album page failed: " + t);
@@ -393,34 +401,33 @@ final class AppleCanvas {
 
     private static String get(String url, String bearer) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setConnectTimeout(10_000);
-        c.setReadTimeout(15_000);
-        c.setRequestProperty("User-Agent", UA);
-        if (bearer != null) {
-            c.setRequestProperty("Authorization", "Bearer " + bearer);
-            c.setRequestProperty("Origin", "https://music.apple.com");
-            c.setRequestProperty("Referer", "https://music.apple.com/");
-        }
-        int code = c.getResponseCode();
-        if (code == 401 && bearer != null) {
-            synchronized (AppleCanvas.class) {
-                rejected.add(bearer); // never picked again (BitChord's rejected set)
-                token = null;
-                retryAfter = 0;
-                CanvasCache.token(null, 0);
-                Log.i(TAG, "canvas: token refused (401), scraping again next time");
+        try {
+            c.setConnectTimeout(10_000);
+            c.setReadTimeout(15_000);
+            c.setRequestProperty("User-Agent", UA);
+            if (bearer != null) {
+                c.setRequestProperty("Authorization", "Bearer " + bearer);
+                c.setRequestProperty("Origin", "https://music.apple.com");
+                c.setRequestProperty("Referer", "https://music.apple.com/");
             }
-        }
-        if (code >= 400) {
+            int code = c.getResponseCode();
+            if (code == 401 && bearer != null) {
+                synchronized (AppleCanvas.class) {
+                    rejected.add(bearer); // never picked again (BitChord's rejected set)
+                    token = null;
+                    retryAfter = 0;
+                    CanvasCache.token(null, 0);
+                    Log.i(TAG, "canvas: token refused (401), scraping again next time");
+                }
+            }
+            if (code >= 400) throw new IllegalStateException("http " + code + " for " + url.replaceAll("\\?.*", ""));
+            try (InputStream in = c.getInputStream()) {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                HlsClip.capped(in, buf, MAX_ANSWER_BYTES);
+                return buf.toString("UTF-8");
+            }
+        } finally {
             c.disconnect();
-            throw new IllegalStateException("http " + code + " for " + url.replaceAll("\\?.*", ""));
-        }
-        try (InputStream in = c.getInputStream()) {
-            ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] b = new byte[16384];
-            int n;
-            while ((n = in.read(b)) > 0) buf.write(b, 0, n);
-            return buf.toString("UTF-8");
         }
     }
 }

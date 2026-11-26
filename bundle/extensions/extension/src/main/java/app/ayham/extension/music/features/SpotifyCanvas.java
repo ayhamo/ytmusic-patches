@@ -98,7 +98,11 @@ final class SpotifyCanvas {
             h.disconnect();
             if (!done && part.exists() && !part.delete()) Log.w(TAG, "canvas: could not delete " + part.getName());
         }
-        if (!part.renameTo(out)) throw new java.io.IOException("canvas: could not keep the file");
+        if (!part.renameTo(out)) {
+            // no .part left behind here either
+            if (part.exists() && !part.delete()) Log.w(TAG, "canvas: could not delete " + part.getName());
+            throw new java.io.IOException("canvas: could not keep the file");
+        }
         if (trim) HlsClip.trim(dir, out);
         Log.i(TAG, "canvas: spotify clip " + out.length() / 1024 + " KB in " + (System.currentTimeMillis() - start) + " ms");
         return out;
@@ -218,20 +222,30 @@ final class SpotifyCanvas {
                 }
                 int code = h.getResponseCode();
                 if (code == 401 && attempt == 0) {
-                    if (signed) userToken = null;
-                    else accessToken = null;
+                    if (signed) {
+                        synchronized (userLock) {
+                            userToken = null;
+                            userExpires = 0;
+                        }
+                    } else accessToken = null;
                     clientToken = null;
                     continue;
                 }
                 if (code >= 400) throw new java.io.IOException(operation + ": HTTP " + code);
                 JSONObject data = new JSONObject(read(h));
-                if (data.has("errors")) throw new java.io.IOException(operation + ": GraphQL errors");
+                if (graphqlErrors(data)) throw new java.io.IOException(operation + ": GraphQL errors");
                 return data;
             } finally {
                 h.disconnect();
             }
         }
         throw new java.io.IOException(operation + ": session expired");
+    }
+
+    /** canvas.md §4 rule 5: GraphQL errors fail the lookup only as a non-empty list ([] or null is none). */
+    static boolean graphqlErrors(JSONObject answer) {
+        JSONArray errs = answer.optJSONArray("errors");
+        return errs != null && errs.length() > 0;
     }
 
     /**

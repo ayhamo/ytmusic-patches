@@ -380,6 +380,7 @@ final class MixOverview {
             Overview s = Automix.overview();
             if (s.pairKey != null && v.isEnabled()) {
                 refusedNote = "";
+                pendingDrawPair = null;   // a Draw asked before Reset: Auto's next blend isn't drawn
                 Automix.setOverride(s.pairKey, null);
                 if (view != null) view.sig = "";
             }
@@ -644,7 +645,7 @@ final class MixOverview {
      */
     private static void confirmReplace(int drawings, String what, Runnable yes) {
         Activity a = owner;
-        if (a == null || a.isFinishing()) return;
+        if (a == null || a.isFinishing() || a.isDestroyed()) return;
         new android.app.AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(drawings > 1 ? "Replace the drawings?" : "Replace the drawing?")
                 .setMessage(what + (drawings > 1 ? " Undo brings them back." : " Undo brings it back."))
@@ -994,7 +995,7 @@ final class MixOverview {
         double[] lim = limitsOf(s, out);
         String[] why = LIMIT_WHY[out ? 0 : 1];
         if (dir < 0 && p.sec < lim[0] - 1e-6 || dir > 0 && p.sec > lim[1] + 1e-6) {
-            refusedNote = "held: " + (dir < 0 ? why[0] : why[1]);
+            refusedNote = "Held: " + (dir < 0 ? why[0] : why[1]);
             return;
         }
         windowWith(s, o, out, p);

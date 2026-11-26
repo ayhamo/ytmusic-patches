@@ -55,8 +55,9 @@ val offlineExtrasPatch = patch(
     // which exist only once Morphe's patches have executed (order between bundles is not known)
     finalize {
         mutableClassDefByOrNull(MORPHE_IN_APP_DOWNLOADS)?.methods?.firstOrNull {
+            // (Object) up to Morphe 2.3.0, (Object, boolean saveStoryboards) from 2.4.0: p0 is the response in both
             it.name == "replaceDeclinedOfflinePlayerResponse" &&
-                it.parameterTypes.map(CharSequence::toString) == listOf("Ljava/lang/Object;")
+                it.parameterTypes.firstOrNull()?.toString() == "Ljava/lang/Object;"
         }?.let { method ->
             method.addInstruction(0, "invoke-static/range { p0 .. p0 }, $OFFLINE_SAVE->onOfflinePlayerResponse(Ljava/lang/Object;)V")
             log.info("OfflineExtras: hooked Morphe replaceDeclinedOfflinePlayerResponse")
@@ -64,7 +65,9 @@ val offlineExtrasPatch = patch(
 
         // The popup: in the resolver, right after Morphe's rewrite (its block ends at a nop, where the
         // command is the save command Morphe made, or the app's own). Our hook returns true to wait.
-        ResolveCommandFingerprint.method.apply {
+        // OrNull: a resolver that no longer matches skips the popup instead of failing the build. v0 is
+        // free after the nop (Morphe's block used v0-v2 too), but only when it is not one of p0-p2.
+        ResolveCommandFingerprint.methodOrNull?.takeIf { (it.implementation?.registerCount ?: 0) > 3 }?.apply {
             val call = instructions.indexOfFirst {
                 it.opcode == Opcode.INVOKE_STATIC_RANGE &&
                     ((it as ReferenceInstruction).reference as MethodReference).let { r ->
@@ -88,7 +91,7 @@ val offlineExtrasPatch = patch(
                 )
                 log.info("OfflineExtras: download popup hooked in the resolver")
             }
-        }
+        } ?: log.warning("OfflineExtras: the command resolver was not found, no download popup")
 
         // A song removed from YT's downloads (Morphe's SponsorBlock hook of the removal): its things go too.
         mutableClassDefByOrNull(MORPHE_SPONSORBLOCK)?.methods?.firstOrNull {

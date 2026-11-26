@@ -103,6 +103,26 @@ public class EffectsTest {
         assertEquals(-18, 20 * Math.log10(rms(u, 4800) / rms(sine(1000, 9600), 4800)), 0.3);
     }
 
+    /** The noise follows its deck's level (YT's volume), as the decks and the sends do (extension audit M6). */
+    @Test
+    public void noiseFollowsTheDeckLevel() {
+        int block = 4800, control = 48;
+        float[] full = new float[2 * block], half = new float[2 * block], silent = new float[2 * block];
+        float[] in = new float[2 * block];
+        for (float[][] run : new float[][][]{{full, {1f}}, {half, {0.5f}}}) {
+            Mix m = new Mix();
+            m.noise = true;
+            m.out.noise.set(1, 0);
+            new FxBus(m, block, control).run(in, in, 0, run[1][0], 1f, run[0]);
+        }
+        assertEquals(0.5, rms(half, 0) / rms(full, 0), 1e-6);
+        Mix m = new Mix();
+        m.noise = true;
+        m.out.noise.set(1, 0);
+        new FxBus(m, block, control).run(in, in, 0, 0f, 1f, silent);
+        assertEquals(0, rms(silent, 0), 0);
+    }
+
     /** The tails ring on after the window: the next song's player waits for them. */
     @Test
     public void tails() {

@@ -68,7 +68,9 @@ final class FxBus {
             float[] n = ein; // (free again: the echo has read it)
             for (int at = 0; at < block; at += control) {
                 double t0 = (frame + at) / (double) SR, t1 = (frame + at + control) / (double) SR;
-                double a = (m.out.noise.at(t0) + m.in.noise.at(t0)) * NOISE_LEVEL, b = (m.out.noise.at(t1) + m.in.noise.at(t1)) * NOISE_LEVEL;
+                // each deck's noise at its deck's level (YT's volume), as the sends (extension audit M6)
+                double a = (m.out.noise.at(t0) * lo + m.in.noise.at(t0) * li) * NOISE_LEVEL,
+                        b = (m.out.noise.at(t1) * lo + m.in.noise.at(t1) * li) * NOISE_LEVEL;
                 for (int i = 0; i < control; i++) {
                     float g = (float) (a + (b - a) * i / control);
                     n[2 * (at + i)] = g * white();

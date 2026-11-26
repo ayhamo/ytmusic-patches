@@ -54,8 +54,9 @@ public final class EqPresets {
                 boolean open = AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION.equals(intent.getAction());
                 Log.i(TAG, (open ? "open" : "close") + " session " + session + " from " + from);
                 if (session <= 0) return;
-                // the broadcast is system-wide: another app's player is not ours to change
-                if (from != null && !from.equals(c.getPackageName())) return;
+                // the broadcast is system-wide: another app's player is not ours to change, nor one
+                // that doesn't say whose it is (EXTRA_PACKAGE_NAME is required with it)
+                if (!fromUs(from, c.getPackageName())) return;
                 // our decks' own announcements: their effects come with attachDeck
                 if (intent.getBooleanExtra(OURS, false)) return;
                 synchronized (EqPresets.class) {
@@ -74,6 +75,11 @@ public final class EqPresets {
         prefs = context.getSharedPreferences("morphe_prefs", Context.MODE_PRIVATE);
         prefs.registerOnSharedPreferenceChangeListener(prefsListener);
         Log.i(TAG, "listening for audio sessions");
+    }
+
+    /** An effect-session broadcast is ours only when it names our package; one naming none is not. */
+    static boolean fromUs(String from, String ourPackage) {
+        return from != null && from.equals(ourPackage);
     }
 
     private static android.content.SharedPreferences prefs;

@@ -12,6 +12,7 @@ import app.morphe.patcher.patch.mutableClassDefBy
 import app.morphe.patcher.patch.mutableClassDefByOrNull
 import app.morphe.patcher.patch.patch
 import app.morphe.patcher.patch.resourceXmlOrNull
+import app.morphe.patcher.util.addInstructionsAtControlFlowLabel
 import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod.Companion.toMutable
 import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
@@ -69,13 +70,17 @@ val playerFeaturesPatch = patch(
     finalize {
         // Item 2a: Morphe's crossfade reads its length here; the trigger point is length + buffer.
         mutableClassDefByOrNull(MORPHE_CROSSFADE)?.let { crossfade ->
-            crossfade.methods.firstOrNull { it.name == "getCrossfadeDurationMs" && it.returnType == "I" }
+            crossfade.methods.firstOrNull {
+                it.name == "getCrossfadeDurationMs" && it.returnType == "I" && it.parameterTypes.isEmpty() &&
+                        AccessFlags.STATIC.isSet(it.accessFlags)
+            }
                 ?.let { method ->
                     val returns = method.instructions.withIndex()
                         .filter { it.value.opcode == Opcode.RETURN }
                         .map { it.index to (it.value as OneRegisterInstruction).registerA }
+                    // at the label, so a branch that jumps straight to the return runs the hook too
                     returns.reversed().forEach { (index, register) ->
-                        method.addInstructions(
+                        method.addInstructionsAtControlFlowLabel(
                             index,
                             """
                                 invoke-static/range { v$register .. v$register }, $FEATURES->overrideCrossfadeDurationMs(I)I
@@ -87,14 +92,16 @@ val playerFeaturesPatch = patch(
                 } ?: log.warning("Features: getCrossfadeDurationMs not found")
 
             // Automix: a pause (or the first step of a skip) stops a running mix.
-            crossfade.methods.firstOrNull { it.name == "onPauseVideo" && it.parameterTypes.isEmpty() }?.let { method ->
+            crossfade.methods.firstOrNull {
+                it.name == "onPauseVideo" && it.parameterTypes.isEmpty() && AccessFlags.STATIC.isSet(it.accessFlags)
+            }?.let { method ->
                 method.addInstruction(0, "invoke-static {}, Lapp/ayham/extension/music/automix/Automix;->onPauseVideo()V")
                 log.info("Features: hooked onPauseVideo")
             } ?: log.warning("Features: onPauseVideo not found")
 
             // Item 2b: the incoming player, right when Morphe starts fading it in.
             crossfade.methods.firstOrNull {
-                it.name == "onPendingPlayerReady" &&
+                it.name == "onPendingPlayerReady" && AccessFlags.STATIC.isSet(it.accessFlags) &&
                         it.parameterTypes.map(CharSequence::toString) == listOf(MORPHE_EXO_ACCESS)
             }?.let { method ->
                 method.addInstruction(
@@ -311,7 +318,7 @@ val playerFeaturesPatch = patch(
             mutableClassDefBy(implType).methods.filter { it.name == "<init>" }.forEach { ctor ->
                 val returns = ctor.instructions.withIndex().filter { it.value.opcode == Opcode.RETURN_VOID }.map { it.index }
                 returns.reversed().forEach { index ->
-                    ctor.addInstruction(
+                    ctor.addInstructionsAtControlFlowLabel(
                         index,
                         "invoke-static/range { p0 .. p0 }, Lapp/ayham/extension/music/features/PlayerTap;->capturePlayer(Ljava/lang/Object;)V",
                     )

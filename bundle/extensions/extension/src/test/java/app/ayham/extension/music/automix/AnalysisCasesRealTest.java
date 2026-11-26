@@ -22,7 +22,7 @@ import ai.onnxruntime.OrtSession;
 /**
  * The synthetic analysis cases on the phone's real analyser, run on the PC (local only, skipped
  * without the natives): Analyzer.analyze's steps from the decode on, with its own code where it can be
- * called (Models.beats and Models.vocals, BeatGrid, KeyStrength, Analyzer's resampleMono /
+ * called (Models.beats and Models.vocals, BeatGrid, EssentiaKey, Analyzer's resampleMono /
  * Pcm), on BitChord's native analyser built for linux x86_64 from its source and ONNX Runtime's desktop
  * natives under the onnxruntime-android Java API. The models are the ones the "Automix libraries" patch
  * ships (bundle/patches/src/main/resources/automix).
@@ -142,7 +142,9 @@ public class AnalysisCasesRealTest {
             double ar = com.music.bitchord.playback.smart.TrackFeatures.nativeSampleRate();
             float[] whole = (float[]) call("resampleMono", new Class<?>[]{Analyzer.Decoded.class, double.class}, d, ar);
             String natText = com.music.bitchord.playback.smart.TrackFeatures.nativeAnalyze(whole, ar, dur);
-            KeyStrength.Key key = KeyStrength.detect(d.mono, d.monoLength, d.monoRate);
+            // the key as Analyzer finds it: Essentia's KeyExtractor on the whole song at 44.1 kHz
+            float[] m44 = (float[]) call("resampleMono", new Class<?>[]{Analyzer.Decoded.class, double.class}, d, (double) EssentiaKey.SR);
+            EssentiaKey.Key key = EssentiaKey.of(m44, m44.length);
             if (a.headBeats != null) {
                 Analysis.LocalGrid g = BeatGrid.localGrid(a.headBeats);
                 a.bpm = g.bpm;

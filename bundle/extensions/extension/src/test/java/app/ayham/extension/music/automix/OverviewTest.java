@@ -71,6 +71,22 @@ public class OverviewTest {
 
     // the overview's lanes on the mix's clock (automix-overview.js lanes)
 
+    /** mix-file.md rule 2: B silent and unstarted until its late entry, then from its mix-in; after the mix at its playlist speed. */
+    @Test
+    public void bStartsAtItsLateEntryAndRunsOnAtItsSpeed() {
+        Overview o = new Overview();
+        o.plan = plan(null, 126);
+        o.curves = o.plan.curves;
+        o.D = o.plan.durationSec;
+        Planner.Plan p = o.plan;
+        p.inDelaySec = 3;
+        p.speedIn = 1.03;
+        assertTrue(Double.isNaN(o.inTrack(2.9)));
+        assertEquals(p.mixInTrackTime, o.inTrack(3), 1e-9);
+        assertEquals(p.mixInTrackTime + 2 * p.rate, o.inTrack(5), 1e-9);
+        assertEquals(p.mixInTrackTime + (o.D - 3) * p.rate + 5 * 1.03, o.inTrack(o.D + 5), 1e-9);
+    }
+
     @Test
     public void blendLanesFollowThePlan() {
         Overview o = new Overview();

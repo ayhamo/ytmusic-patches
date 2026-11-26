@@ -38,6 +38,10 @@ final class VideoCanvas {
     private static final String VISION = "https://www.youtube.com/youtubei/v1/";
     private static final String VISION_VERSION = "1.02";
     private static volatile String visitor;
+    /** What is read into memory (a player answer, a storyboard sheet, the stream's index): far over any real one. */
+    private static final long READ_CAP = 16L * 1024 * 1024;
+    /** One cut's fragments, written to a file: a Full video's whole 1080p stream (a few hundred MB for a long one) fits. */
+    private static final long MAX_CUT_BYTES = 512L * 1024 * 1024;
 
     private VideoCanvas() {
     }
@@ -254,8 +258,10 @@ final class VideoCanvas {
         if (f.length < 8) return null;
         int w = Integer.parseInt(f[0]), h = Integer.parseInt(f[1]), count = Integer.parseInt(f[2]), cols = Integer.parseInt(f[3]), rows = Integer.parseInt(f[4]);
         long interval = Long.parseLong(f[5]);
+        // a damaged spec (no grid, no frames) is no storyboard, not a division by zero
+        if (w <= 0 || h <= 0 || count <= 0 || cols <= 0 || rows <= 0) return null;
         if (interval <= 0) interval = lengthMs > 0 ? lengthMs / count : 0;
-        if (w <= 0 || h <= 0 || count <= 0 || interval <= 0) return null;
+        if (interval <= 0) return null;
         int level = parts.length - 2, per = cols * rows, sheets = (count + per - 1) / per;
         Board b = new Board();
         b.interval = interval;
@@ -264,13 +270,15 @@ final class VideoCanvas {
             String url = parts[0].replace("$L", String.valueOf(level)).replace("$N", f[6].replace("$M", String.valueOf(n)))
                     + "&sigh=" + f[7].replace("$", "%24");
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(10_000);
-            c.setReadTimeout(15_000);
-            if (c.getResponseCode() >= 400) {
+            byte[] img;
+            try {
+                c.setConnectTimeout(10_000);
+                c.setReadTimeout(15_000);
+                if (c.getResponseCode() >= 400) break;
+                img = read(c.getInputStream());
+            } finally {
                 c.disconnect();
-                break;
             }
-            byte[] img = read(c.getInputStream());
             bytes += img.length;
             android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeByteArray(img, 0, img.length);
             if (bmp == null) break;
@@ -896,11 +904,20 @@ final class VideoCanvas {
         Sidx sidx = Sidx.parse(head, (int) indexStart);
         if (sidx == null) throw new Exception("no sidx");
         long[] range = sidx.range(start, len, initEnd + 1);
-        byte[] body = get(url, range[0], range[1]);
+        long initLen = Long.parseLong(ir.getString("end")) + 1;
+        if (initLen <= 0 || initLen > head.length) throw new Exception("bad initRange");
+        if (range[1] < range[0] || range[1] - range[0] + 1 > MAX_CUT_BYTES) throw new Exception("part too big: " + (range[1] - range[0] + 1) + " bytes");
         File raw = new File(dir, out.getName() + ".part");
-        try (FileOutputStream o = new FileOutputStream(raw)) {
-            o.write(head, 0, (int) Long.parseLong(ir.getString("end")) + 1);
-            o.write(body);
+        try {
+            // the fragments go straight to the file (a Full video is the whole stream: never held in memory)
+            try (FileOutputStream o = new FileOutputStream(raw)) {
+                o.write(head, 0, (int) initLen);
+                get(url, range[0], range[1], o, MAX_CUT_BYTES);
+            }
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            raw.delete();
+            throw e;
         }
         try {
             double base = range[2] / 1e6;
@@ -1046,16 +1063,26 @@ final class VideoCanvas {
     }
 
     private static byte[] get(String url, long from, long to) throws Exception {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        get(url, from, to, buf, READ_CAP);
+        return buf.toByteArray();
+    }
+
+    /** Bytes [from, to] of the stream into [o], at most [max] of them. */
+    private static void get(String url, long from, long to, OutputStream o, long max) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url + "&range=" + from + "-" + to).openConnection();
-        c.setConnectTimeout(10_000);
-        c.setReadTimeout(20_000);
-        c.setRequestProperty("User-Agent", userAgent());
-        int code = c.getResponseCode();
-        if (code >= 400) {
+        try {
+            c.setConnectTimeout(10_000);
+            c.setReadTimeout(20_000);
+            c.setRequestProperty("User-Agent", userAgent());
+            int code = c.getResponseCode();
+            if (code >= 400) throw new Exception("HTTP " + code + " for bytes " + from + "-" + to);
+            try (InputStream in = c.getInputStream()) {
+                HlsClip.capped(in, o, max);
+            }
+        } finally {
             c.disconnect();
-            throw new Exception("HTTP " + code + " for bytes " + from + "-" + to);
         }
-        return read(c.getInputStream());
     }
 
     private static String userAgent() {
@@ -1116,25 +1143,25 @@ final class VideoCanvas {
     }
 
     private static JSONObject send(HttpURLConnection c, JSONObject body) throws Exception {
-        try (OutputStream out = c.getOutputStream()) {
-            out.write(body.toString().getBytes(StandardCharsets.UTF_8));
-        }
-        int code = c.getResponseCode();
-        if (code >= 400) {
+        try {
+            try (OutputStream out = c.getOutputStream()) {
+                out.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode();
             // the error body is not read (it may be null): the code is the answer
+            if (code >= 400) throw new Exception("HTTP " + code);
+            byte[] b = read(c.getInputStream());
+            return new JSONObject(new String(b, StandardCharsets.UTF_8));
+        } finally {
             c.disconnect();
-            throw new Exception("HTTP " + code);
         }
-        byte[] b = read(c.getInputStream());
-        return new JSONObject(new String(b, StandardCharsets.UTF_8));
     }
 
+    /** All of [in] (a player answer, an index, a storyboard sheet), at most READ_CAP bytes. */
     private static byte[] read(InputStream in) throws Exception {
         try (InputStream i = in) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] b = new byte[32768];
-            int n;
-            while ((n = i.read(b)) > 0) buf.write(b, 0, n);
+            HlsClip.capped(i, buf, READ_CAP);
             return buf.toByteArray();
         }
     }

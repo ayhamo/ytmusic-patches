@@ -15,3 +15,15 @@ per platform: each platform sets how long its own players need. The phone's valu
   own media Next, 10-50 ms before it. So the phone ignores a pause for 3 s after our Next, then asks
   YT's media session 1.5 s later and stops the mix only if it still says paused (buffering is no
   pause). `Automix.onPauseVideo`, dc2e613.
+- **HLS and DASH rows** (protocol.md 8.1.5 says the phone plays them through its player's HLS and
+  DASH support): YT's player, as our addon player reaches it, builds only progressive sources. So
+  the phone reads the playlist or manifest itself, picks one audio stream, fetches its init and
+  segments into one local file and plays, fits and mixes that file like any whole file
+  (`StreamManifest`, `AddonPrep.streamFileAndFit`). Never through the audio cache (8.1.6.1).
+  The refusals and limits are the PC's (stream-assemble.js, 3dce391): encrypted (`EXT-X-KEY` or
+  `EXT-X-SESSION-KEY` other than NONE, SAMPLE-AES in the TS program map, `ContentProtection`),
+  live, more than one init segment or `Period`, Dolby only, and a link or redirect off https or to
+  this machine; 30 s per request, 4 segments at a time, 300 MB and 120 s for the whole stream.
+  One difference: the PC always passes Dolby over (a browser can't decode it); the phone does so
+  on stereo rows only. An Atmos row (the Dolby Atmos switch, protocol.md §3a) keeps Dolby audio.
+  Downloads keep their own 1 GB / 15 min budget.

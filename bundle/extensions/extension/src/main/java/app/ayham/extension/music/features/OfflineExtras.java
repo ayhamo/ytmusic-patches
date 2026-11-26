@@ -96,15 +96,26 @@ final class OfflineExtras {
             throw e;
         }
         try (InputStream in = h.getInputStream()) {
-            ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] b = new byte[16384];
-            int n;
-            while ((n = in.read(b)) > 0) buf.write(b, 0, n);
-            JSONObject d = new JSONObject(buf.toString("UTF-8")).optJSONObject("videoDetails");
+            JSONObject d = new JSONObject(readCapped(in, MAX_DETAILS_BYTES)).optJSONObject("videoDetails");
             return d == null ? new JSONObject() : d;
         } finally {
             h.disconnect();
         }
+    }
+
+    /** The player answer's size limit: it is a few hundred KB; anything far bigger is not read into memory. */
+    static final int MAX_DETAILS_BYTES = 4 * 1024 * 1024;
+
+    /** The stream as UTF-8 text; an IOException once it passes [max] bytes. */
+    static String readCapped(InputStream in, int max) throws java.io.IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] b = new byte[16384];
+        int n;
+        while ((n = in.read(b)) > 0) {
+            if (buf.size() + n > max) throw new java.io.IOException("response over " + max / 1024 + " KB");
+            buf.write(b, 0, n);
+        }
+        return buf.toString("UTF-8");
     }
 
     /**
@@ -200,7 +211,8 @@ final class OfflineExtras {
         for (String url : urls) {
             if (f != null || url == null || !url.contains(".m3u8")) continue;
             try {
-                f = HlsClip.fetch(url, new File(c.getFilesDir(), "ayham-offline"), 720, false);
+                // at the listener's Apple quality, as online (canvas.md §13 rule 5)
+                f = HlsClip.fetch(url, new File(c.getFilesDir(), "ayham-offline"), 720, false, CanvasSettings.appleCap(Features.props()));
             } catch (Exception e) {
                 last = e; // the other shape is still tried
             }

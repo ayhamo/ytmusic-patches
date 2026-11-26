@@ -70,10 +70,23 @@ final class Fetch {
                     Log.w(TAG, String.format(Locale.US, "%s: fetch dropped at %d KB, resuming: %s", out.getName(), total / 1024, Protocol.scrub(String.valueOf(e))));
                     continue;
                 }
+                if (!Protocol.redirectAllowed(s.url, h.getURL().toString())) {
+                    // a redirect onto this device: refused like the link itself (extension audit M8)
+                    h.disconnect();
+                    last = new IOException("audio: redirected off https or to this device");
+                    break;
+                }
                 if (total > 0 && code != 206 || code >= 400 && code < 500 && code != 408 && code != 429) {
                     // a refused resume, or a link the server refuses for good: no retry
                     h.disconnect();
                     last = new IOException(total > 0 && code != 206 ? "resume refused: HTTP " + code : "audio: HTTP " + code);
+                    break;
+                }
+                long[] cr = total > 0 ? StreamCache.contentRange(h.getHeaderField("Content-Range")) : null;
+                if (total > 0 && (cr == null || cr[0] != total)) {
+                    // a resume answered from elsewhere in the file would be written after what we have
+                    h.disconnect();
+                    last = new IOException("resume refused: another range was sent");
                     break;
                 }
                 try (InputStream in = h.getInputStream(); OutputStream w = new FileOutputStream(part, total > 0)) {
@@ -227,6 +240,22 @@ final class Fetch {
         return null;
     }
 
+    /**
+     * FLAC in MP4 (an HLS or DASH stream's init): its 'dfLa' box holds the STREAMINFO (after the
+     * version, flags and the block header); null when none.
+     */
+    static Info flacInMp4(byte[] b, int from, int n) {
+        for (int i = from; i + 12 + 14 <= n; i++) {
+            if (b[i] == 'd' && b[i + 1] == 'f' && b[i + 2] == 'L' && b[i + 3] == 'a') {
+                int d = i + 12;
+                int rate = (b[d + 10] & 0xff) << 12 | (b[d + 11] & 0xff) << 4 | (b[d + 12] & 0xff) >> 4;
+                int bits = ((b[d + 12] & 1) << 4 | (b[d + 13] & 0xff) >> 4) + 1;
+                return new Info("FLAC", rate, bits);
+            }
+        }
+        return null;
+    }
+
     /** An MP4 with a Dolby track: its 'ec-3' (E-AC-3, Atmos as JOC) or 'ac-4' sample entry; null for anything else. */
     static Info dolby(byte[] b, int n) {
         if (!(n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p')) return null;
@@ -252,7 +281,10 @@ final class Fetch {
             int bits = ((b[d + 12] & 1) << 4 | (b[d + 13] & 0xff) >> 4) + 1;
             return new Info("FLAC", rate, bits);
         }
-        if (n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') return alac(b, 4, n);
+        if (n > 8 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p') {
+            Info a = alac(b, 4, n);
+            return a != null ? a : flacInMp4(b, 4, n);
+        }
         if (n > 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' && b[9] == 'A' && b[10] == 'V' && b[11] == 'E') {
             for (int i = 12; i + 24 < n; i++) {
                 if (b[i] == 'f' && b[i + 1] == 'm' && b[i + 2] == 't' && b[i + 3] == ' ') {

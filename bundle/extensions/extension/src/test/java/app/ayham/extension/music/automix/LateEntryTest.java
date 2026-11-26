@@ -101,6 +101,47 @@ public class LateEntryTest {
         assertEquals(Math.round((p.mixInTrackTime + 1.8 * p.rate) * 1000), Engine.incomingSpotMs(m, m.t0 + 5));
     }
 
+    /**
+     * mix-file.md rule 2, "A while B is held": Automix's own blend keeps the two at equal power with
+     * a trim (1/sqrt(rise + fall)) worked out from B's heard gain. While B is held, A plays its own
+     * curve untrimmed (it dipped up to 3 dB: BitChord audit 1b #7); from B's entry the trim follows
+     * B's 10 ms rise, no step over 1 dB per 10 ms; after it, the mix is the one without a delay.
+     */
+    @Test
+    public void aDoesntDipWhileBIsHeld() {
+        Analysis a = PlannerTest.song("a", 120, 200, 0.9), b = PlannerTest.song("b", 120, 200, 0.9);
+        Planner.Settings s = new Planner.Settings();
+        s.version = 2;
+        Planner.Plan base = Planner.plan(s, "a", "b", a, b, 200, 20, 24.5, null, ov("{\"v\":1,\"window\":{\"out\":{\"sec\":150},\"in\":{\"sec\":0}}}"), 1, 1, false);
+        Planner.Plan p = Planner.plan(s, "a", "b", a, b, 200, 20, 24.5, null, ov("{\"v\":1,\"window\":{\"out\":{\"sec\":150},\"in\":{\"sec\":0,\"delaySec\":3.2}}}"), 1, 1, false);
+        // the kind of mix this rule is about: Automix's own blend, no preset curves, no ladder shape
+        assertTrue(p.toString(), p.v2 && "blend".equals(p.style) && p.shape == null && p.preset == null);
+        assertEquals(3.2, p.inDelaySec, 0);
+        Mix now = Mix.blend(base, "a", "b", 200), late = Mix.blend(p, "a", "b", 200);
+        double entry = late.inStart - late.t0;
+        // B never heard: the trim A has alone, which is none
+        float[][] alone = Mix.djShape(p.style, p.clash, late.D, p.bpm, p.swapAt, 8000, late.D + 1);
+        double dipped = 0;
+        for (double t = 0.05; t < entry - 0.01; t += 0.05) {
+            double heard = late.out.gain.at(late.t0 + t), own = alone[1][(int) Math.round(t / late.D * 7999)];
+            assertEquals("A at " + t + " s while B is held", own, heard, 0.01);
+            dipped = Math.max(dipped, heard - now.out.gain.at(now.t0 + t));
+        }
+        assertTrue("without the rule A dipped here (" + dipped + ")", dipped > 0.01);
+        // across B's entry: no step in the output (A and B as heard, by power) over 1 dB per 10 ms
+        java.util.function.DoubleUnaryOperator out = (t) -> {
+            double ga = late.out.gain.at(late.t0 + t), gb = late.in.gain.at(late.t0 + t) * Engine.lateGain(late.t0 + t, late.inStart);
+            return Math.sqrt(ga * ga + gb * gb);
+        };
+        for (double t = entry - 0.05; t < entry + 0.1; t += 0.001) {
+            double step = 20 * Math.log10(out.applyAsDouble(t + 0.01) / out.applyAsDouble(t));
+            assertTrue("the output at " + t + " s moves " + step + " dB", Math.abs(step) <= 1.0);
+        }
+        // once B is in, the same as the mix without a delay
+        for (double t = entry + 0.05; t < late.D; t += 0.25)
+            assertEquals("A at " + t + " s", now.out.gain.at(now.t0 + t), late.out.gain.at(late.t0 + t), 0.01);
+    }
+
     /** B's gain 0 until the delay ends, whatever the curve says, then up to the curve within 10 ms. */
     @Test
     public void bRisesToItsCurveWithin10Ms() {

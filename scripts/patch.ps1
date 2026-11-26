@@ -10,7 +10,7 @@
 # so every build installs over the previous one.
 param(
     [string]$Apk = "com.google.android.apps.youtube.music@9.30.53.xapk",
-    [string]$MorpheBundle = "patches-2.3.0.mpp",
+    [string]$MorpheBundle = "patches-2.4.0.mpp",
     [switch]$Install
 )
 $ErrorActionPreference = "Stop"
@@ -23,7 +23,7 @@ if (-not $ours) { throw "No ayham-patches-*.mpp in work\bundles; run scripts\bui
 $ErrorActionPreference = "Continue"
 docker run --rm -v "${work}:/w" -v "${work}\morphe-data:/opt/tools/morphe-data" ytm-patches-tools `
     morphe patch `
-    -p "/w/bundles/$MorpheBundle" -e "Network proxy" `
+    -p "/w/bundles/$MorpheBundle" -e "Network proxy" -d "Apple Music animated artwork" `
     -p "/w/bundles/$($ours.Name)" `
     -r /w/out/result.json -o /w/out/ytm-patched.apk "/w/apk/$Apk"
 if ($LASTEXITCODE -ne 0) { throw "Patching failed (see work\out\result.json)" }

@@ -271,6 +271,16 @@ public final class Mix {
 
     /** djShape with the bass swap at [swapAtIn] (0..1; else on the bar nearest the middle). */
     static float[][] djShape(String style, double clashIn, double D, double bpm, double swapAtIn, int n) {
+        return djShape(style, clashIn, D, bpm, swapAtIn, n, 0);
+    }
+
+    /**
+     * The same with B held [lateSec] into the mix (mix-file.md rule 2, "A while B is held"): the
+     * equal-power trim is worked out from B's heard gain (0 while held, its LATE_RISE_SEC rise, then
+     * its curve), so A plays its own curve alone and its trim follows B in. The curves as drawn or
+     * saved don't change (they call this without a delay).
+     */
+    static float[][] djShape(String style, double clashIn, double D, double bpm, double swapAtIn, int n, double lateSec) {
         double clash = clamp(clashIn, 0, 1);
         double beat = bpm > 0 ? 60 / bpm : 0;
         double grid = beat > 0 ? D / beat : 0;
@@ -306,7 +316,9 @@ public final class Mix {
             }
             r += (Math.sin(Math.pow(p, 1.65) * S) - r) * clash;
             f += (Math.cos(Math.pow(p, 0.65) * S) - f) * clash;
-            double trim = r + f <= 1 ? 1 : Math.max(0.5, 1 / Math.sqrt(r + f));
+            // B as heard: nothing while held, then its 10 ms rise into its curve
+            double heard = lateSec > 0 ? r * clamp((p * D - lateSec) / Engine.LATE_RISE_SEC, 0, 1) : r;
+            double trim = heard + f <= 1 ? 1 : Math.max(0.5, 1 / Math.sqrt(heard + f));
             gIn[i] = (float) (r * trim);
             gOut[i] = (float) (f * trim);
         }
@@ -468,7 +480,12 @@ public final class Mix {
     /** The planner's own fader, EQ and filters (scheduleDeckBlend, blendShape). */
     private static void planned(Mix m, Planner.Plan p) {
         // gains: AutoDJ's fader for a version 2 blend or filter mix, else equal power; Automix v2's loudness trim on either
-        float[][] dj = m.v2 ? djShape(p, m.D) : null;
+        // B held into the mix (a late entry): its trim from B's heard gain, sampled every 5 ms so A's
+        // trim follows B's 10 ms rise rather than a step between coarser points
+        double late = m.inStart > 0 ? m.inStart - m.t0 : 0;
+        float[][] dj = !m.v2 ? null : late > 0 && p.shape == null
+                ? djShape(p.style, p.clash, m.D, p.bpm, p.swapAt, (int) Math.max(EP, Math.min(8000, Math.ceil(m.D * 200))), late)
+                : djShape(p, m.D);
         float[][] g = Curves.trimmed(p, dj != null ? dj[0] : ep(true), dj != null ? dj[1] : ep(false));
         float[] gIn = g[0], gOut = g[1];
         m.out.gain.set(0, -H).lin(1, 0).set(1, m.t0).curve(gOut, m.t0, m.D).set(0, m.t0 + m.D);

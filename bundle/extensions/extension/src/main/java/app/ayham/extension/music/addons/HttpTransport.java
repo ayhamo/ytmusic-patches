@@ -40,6 +40,8 @@ public final class HttpTransport implements AddonClient.Transport {
             c.connect();
             c.setReadTimeout((int) Math.max(1, deadline - System.currentTimeMillis()));
             int status = c.getResponseCode();
+            // a redirect onto this device is refused like the link itself (extension audit M8)
+            if (!Protocol.redirectAllowed(r.url, c.getURL().toString())) throw new IOException("redirected off https or to this device");
             Map<String, String> headers = new HashMap<>();
             for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
                 if (e.getKey() == null || e.getValue() == null || e.getValue().isEmpty()) continue;

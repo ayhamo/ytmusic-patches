@@ -69,7 +69,10 @@ public final class Models {
     }
 
     private static OrtSession open(Context ctx, String name) throws Exception {
-        return OrtEnvironment.getEnvironment().createSession(file(ctx, name).getPath(), new OrtSession.SessionOptions());
+        // (the session keeps its own copy of the options: the native struct is freed here)
+        try (OrtSession.SessionOptions o = new OrtSession.SessionOptions()) {
+            return OrtEnvironment.getEnvironment().createSession(file(ctx, name).getPath(), o);
+        }
     }
 
     /** Beat This! over mono PCM (any rate); the grid in song seconds from [offsetSec], or null. */

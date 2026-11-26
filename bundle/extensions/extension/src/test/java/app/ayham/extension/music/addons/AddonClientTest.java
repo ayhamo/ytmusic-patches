@@ -308,6 +308,30 @@ public class AddonClientTest {
         assertEquals("does not fit", got.tried.get(0).why);
     }
 
+    /** protocol.md 8.1.4: a row refused for the song is not opened again (no second /stream; extension audit M13). */
+    @Test
+    public void aRowRefusedBeforeGetsNoSecondStream() {
+        // both mocks on one host with the same row id: refusing one's row doesn't pass over the other's
+        String rows = tracks(row("fine", ""));
+        good("one", rows);
+        good("two", rows);
+        final List<String> refused = Collections.synchronizedList(new ArrayList<String>());
+        AddonClient.Options opt = new AddonClient.Options();
+        opt.check = o -> {
+            if (!o.addon.name.equals("Mock one")) return null;
+            refused.add(o.addon.base + "\t" + o.row.id);
+            return "does not fit";
+        };
+        AddonClient.Opened first = client().race(song(), list("one"), opt);
+        assertEquals("does not fit", first.tried.get(0).why);
+        assertEquals(1, hitsOf("one", "stream").size());
+        // the pass: the refused row is passed over before its /stream, the other addon wins
+        opt.refusedBefore = refused::contains;
+        AddonClient.Opened again = client().race(song(), list("one", "two"), opt);
+        assertEquals("Mock two", again.addon.name);
+        assertEquals(1, hitsOf("one", "stream").size());
+    }
+
     /** protocol.md 8.1.4: a lane still searching when another wins sends no /stream (each could add the song to a debrid account). */
     @Test
     public void aLoserStillSearchingSendsNoStream() throws InterruptedException {
@@ -413,21 +437,33 @@ public class AddonClientTest {
         addon(name, "search", (k, id, q) -> json(200, rowsJson));
         addon(name, "stream", (k, id, q) -> {
             if (id.equals("hls")) return json(200, "{\"url\":\"https://cdn/x.m3u8\",\"format\":\"aac\"}");
+            if (id.equals("plain")) return json(200, "{\"url\":\"http://cdn/x.flac\",\"format\":\"flac\"}");
             if (id.equals("atmosstream")) return json(200, "{\"url\":\"" + fileUrl("good", id) + "\",\"codec\":\"eac3_joc\"}");
             return json(200, "{\"url\":\"" + fileUrl("good", id) + "\",\"format\":\"flac\",\"quality\":\"Hi-Res\",\"codec\":\"flac\"}");
         });
     }
 
+    /** protocol.md 8.1.5: an HLS row opens (no longer "not played yet"); its playlist link gets no byte probe. */
+    @Test
+    public void anHlsRowOpensWithoutAProbe() {
+        good("good", tracks(row("hls", "")));
+        AddonClient.Opened got = client().resolve(song(), list("good"), null);
+        assertNull(got.none);
+        assertEquals("hls", got.row.id);
+        assertEquals("hls", got.stream.transport);
+        for (Hit h : hits) assertFalse(h.kind, "bytes=0-0".equals(h.headers.get("Range")));
+    }
+
     @Test
     public void resolvePassesOverADownAddonAndRefusesBadRows() {
         addon("down", "manifest.json", (k, id, q) -> json(500, "{}"));
-        good("good", tracks(row("atmos", ",\"isAtmosOnly\":true"), row("cut", ""), row("hls", ""), row("atmosstream", ""), row("fine", "")));
+        good("good", tracks(row("atmos", ",\"isAtmosOnly\":true"), row("cut", ""), row("plain", ""), row("atmosstream", ""), row("fine", "")));
         fileBytes.put("cut", 700_000L);
         AddonClient.Opened got = client().resolve(song(), list("down", "good"), null);
         assertEquals("server error (500)", got.tried.get(0).why);
         List<String> rest = new ArrayList<>();
         for (AddonClient.Tried t : got.tried.subList(1, got.tried.size())) rest.add(t.row + ": " + t.why);
-        assertEquals(Arrays.asList("cut: file holds at most 28 s", "hls: hls (not played yet)", "atmosstream: atmos"), rest);
+        assertEquals(Arrays.asList("cut: file holds at most 28 s", "plain: not https", "atmosstream: atmos"), rest);
         assertEquals("no addon has it", got.none);
     }
 
@@ -452,6 +488,21 @@ public class AddonClientTest {
         assertEquals("identity", probe.headers.get("Accept-Encoding"));
         assertEquals(Protocol.USER_AGENT, probe.headers.get("User-Agent"));
         assertEquals(4000, probe.timeoutMs);
+    }
+
+    /** The opened row keeps what it was asked at: its kept file's key (StreamCache.rowKey) and a new link (streamAgain) use it. */
+    @Test
+    public void anOpenedRowKeepsTheTierAndQualityAsked() {
+        good("tq", tracks(row("fine", "")));
+        List<AddonClient.Addon> l = list("tq");
+        l.get(0).quality = "max";
+        AddonClient.Opened got = client().resolve(song(), l, null);
+        assertNull(got.none);
+        assertEquals(Pick.LOSSLESS, got.addon.tier);
+        assertEquals("max", got.addon.quality);
+        AddonClient.Options hiRes = new AddonClient.Options();
+        hiRes.tier = Pick.HIRES;
+        assertEquals(Pick.HIRES, client().resolve(song(), list("tq"), hiRes).addon.tier);
     }
 
     @Test

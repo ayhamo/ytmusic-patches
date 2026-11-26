@@ -84,6 +84,11 @@ public final class AddonClient {
          * fitted to YouTube's audio): a reason refuses it and the next row, then addon, is tried.
          */
         public Check check;
+        /**
+         * Rows ("base\trowId"; in memory only, the base holds the key) refused for this song before (protocol.md 8.1.4: "refused" is per row
+         * and per song): passed over before their /stream, so a pass doesn't open them again.
+         */
+        public java.util.function.Predicate<String> refusedBefore;
         /** True once the song is no longer wanted (skipped): the search and the opening stop there. */
         public java.util.function.BooleanSupplier cancelled;
         /**
@@ -223,6 +228,11 @@ public final class AddonClient {
     public AddonClient allowLocalHttp(boolean allow) {
         this.allowLocalHttp = allow;
         return this;
+    }
+
+    /** Whether plain http to the device is allowed (an HLS or DASH stream's segment links follow the same rule). */
+    public boolean allowsLocalHttp() {
+        return allowLocalHttp;
     }
 
     private long now() {
@@ -668,6 +678,11 @@ public final class AddonClient {
 
     private Opened openRow(Found f, Protocol.Manifest man, Pick.Row row, TrackMatcher.Target target, Options opt, List<Tried> tried, long t0, Lost lost) {
         Addon addon = f.addon;
+        // a row refused for this song before is not opened again: no second /stream (8.1.4)
+        if (opt.refusedBefore != null && row.id != null && opt.refusedBefore.test(addon.base + "\t" + row.id)) {
+            tried.add(new Tried(addon.host, row.id, "refused for this song before", null));
+            return null;
+        }
         Protocol.Stream s;
         try {
             s = stream(addon, row, man, f.atmos);
@@ -677,10 +692,6 @@ public final class AddonClient {
         }
         if (s.miss != null) {
             tried.add(new Tried(addon.host, row.id, Protocol.scrub(s.miss), null));
-            return null;
-        }
-        if (!"file".equals(s.transport)) {
-            tried.add(new Tried(addon.host, row.id, s.transport + " (not played yet)", null));
             return null;
         }
         if (!Protocol.allowed(s.url, allowLocalHttp)) {
@@ -700,7 +711,9 @@ public final class AddonClient {
             return null;
         }
         if (lost != null && lost.now()) return null;   // its /stream ran out; the race was won meanwhile
-        Pick.Verdict p = probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
+        // HLS and DASH (protocol.md 8.1.5): the link is a playlist or manifest, whose size says nothing
+        // of the song's length; the window check (the fit) still decides
+        Pick.Verdict p = !"file".equals(s.transport) ? new Pick.Verdict(true, null, null) : probe(s.url, s.tier != null ? s.tier : row.tier, s.bitrate != null ? s.bitrate : row.kbps,
                 target.durationSec, opt.forDownload ? Pick.DOWNLOAD_SLACK_SEC : opt.slackSec, s.headers);
         if (!p.ok) {
             tried.add(new Tried(addon.host, row.id, p.why, null));
@@ -717,6 +730,9 @@ public final class AddonClient {
         o.addon = new Addon(addon.base);
         o.addon.name = man.name;
         o.addon.host = addon.host;
+        // what this row was asked at: the kept file's key (StreamCache.rowKey) and a new link (streamAgain) ask the same
+        o.addon.tier = addon.tier;
+        o.addon.quality = addon.quality;
         o.row = row;
         o.stream = s;
         o.tried = tried;

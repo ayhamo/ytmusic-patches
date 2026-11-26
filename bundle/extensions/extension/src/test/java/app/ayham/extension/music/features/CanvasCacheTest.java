@@ -40,6 +40,43 @@ public class CanvasCacheTest {
         CanvasCache.init(dir);
     }
 
+    /** A downloaded song's saved clips follow the song's own canvas choices (canvas.md §15; extension M16). */
+    @Test
+    public void savedClipsFollowTheSongsChoices() throws Exception {
+        File spotify = new File(dir, "sp.mp4"), apple = new File(dir, "ap.mp4");
+        Files.write(spotify.toPath(), new byte[]{1});
+        Files.write(apple.toPath(), new byte[]{1});
+        spotify.deleteOnExit();
+        apple.deleteOnExit();
+        CanvasCache.put(CanvasCache.spotifyIdKey("vid1"), spotify.getAbsolutePath());
+        CanvasCache.put(CanvasCache.idKey("vid1"), apple.getAbsolutePath());
+        java.util.Properties p = new java.util.Properties();
+        p.setProperty("canvasApple", "1");
+        CanvasChoices.Song ch = new CanvasChoices.Song();
+        // the settings' order (music video first): the saved Spotify canvas, also offline
+        assertEquals(spotify.getAbsolutePath(), AnimatedCover.savedClip("vid1", p, ch));
+        // Spotify off for this song: the saved Apple clip
+        ch.off.add(CanvasSettings.SPOTIFY);
+        assertEquals(apple.getAbsolutePath(), AnimatedCover.savedClip("vid1", p, ch));
+        ch.off.add(CanvasSettings.APPLE);
+        assertNull(AnimatedCover.savedClip("vid1", p, ch));
+        // Use Apple: Apple's before Spotify's
+        ch = new CanvasChoices.Song();
+        ch.use = CanvasSettings.APPLE;
+        assertEquals(apple.getAbsolutePath(), AnimatedCover.savedClip("vid1", p, ch));
+        // the song's own video or Use of the music video: looked up online, no saved clip
+        ch.use = CanvasSettings.VIDEO;
+        assertNull(AnimatedCover.savedClip("vid1", p, ch));
+        ch = new CanvasChoices.Song();
+        ch.video = "abcdefghijk";
+        assertNull(AnimatedCover.savedClip("vid1", p, ch));
+        // Apple's master switch off: never Apple's
+        p.setProperty("canvasApple", "0");
+        ch = new CanvasChoices.Song();
+        ch.off.add(CanvasSettings.SPOTIFY);
+        assertNull(AnimatedCover.savedClip("vid1", p, ch));
+    }
+
     @Test
     public void damagedEntriesReadAsUnknownInsteadOfThrowing() {
         assertNull(CanvasCache.lookup("noBar"));

@@ -112,8 +112,12 @@ public final class Overview {
         if (t < 0) return Double.NaN;
         if (x != null) return t < x.releaseAt ? seg(x.inChanges, t) : loop.in.loopEnd + (t - x.releaseAt);
         if ("blend".equals(plan.style) && plan.glide != null) return clocks().in.applyAsDouble(t);
-        double rate = "blend".equals(plan.style) ? plan.rate : 1;
-        return t <= D ? plan.mixInTrackTime + t * rate : plan.mixInTrackTime + D * rate + (t - D);
+        // as the decks play it (Mix.blend): B silent until its late entry (mix-file.md rule 2), at the
+        // plan's rate (a playlist speed too, spotify-mixes.md rule 10), then on at its own speed
+        double late = plan.inDelaySec > 0 ? Math.min(plan.inDelaySec, D) : 0;
+        if (t < late) return Double.NaN;
+        double rate = plan.rate > 0 ? plan.rate : 1, home = !Double.isNaN(plan.speedIn) ? plan.speedIn : 1;
+        return t <= D ? plan.mixInTrackTime + (t - late) * rate : plan.mixInTrackTime + (D - late) * rate + (t - D) * home;
     }
 
     /** The glide's clocks, made once per plan: the waveform asks for them on every column. */

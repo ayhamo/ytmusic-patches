@@ -94,6 +94,28 @@ public class ProtocolTest {
         assertTrue(Protocol.allowed("http://127.0.0.1/x", true));
         assertFalse(Protocol.allowed("http://192.168.0.2/x", true));
         assertFalse(Protocol.allowed("ftp://h/x", true));
+        // https to this device: only for the debug mock (extension audit M8)
+        assertFalse(Protocol.allowed("https://localhost/x", false));
+        assertFalse(Protocol.allowed("https://127.0.0.1:8443/x", false));
+        assertFalse(Protocol.allowed("https://127.1.2.3/x", false));
+        assertFalse(Protocol.allowed("https://[::1]:443/x", false));
+        assertFalse(Protocol.allowed("https://a.localhost/x", false));
+        assertTrue(Protocol.allowed("https://localhost/x", true));
+        assertTrue(Protocol.allowed("https://localhost.example/x", false));
+        // the same device written other ways (extension step 2, 6a1acb0)
+        for (String h : new String[]{"127.0.0.2", "2130706433", "0x7f000001", "0177.0.0.1", "127.1", "0.0.0.0", "0",
+                "localhost.", "a.localhost.", "[::]", "[0:0:0:0:0:0:0:0]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]",
+                "[0:0:0:0:0:ffff:7f00:2]", "[::127.0.0.1]", "[::1%25lo]", "2130706433:8443"})
+            assertFalse(h, Protocol.allowed("https://" + h + "/x", false));
+        // and what isn't it
+        for (String h : new String[]{"128.0.0.1", "127.example.com", "1.2.3.4", "[::ffff:8.8.8.8]", "[2001:db8::1]",
+                "localhostx.com", "[::2]", "0x7f.example"})
+            assertTrue(h, Protocol.allowed("https://" + h + "/x", false));
+        // a redirect: off a remote link onto this device refused; the mock may stay on it
+        assertFalse(Protocol.redirectAllowed("https://h.example/s", "https://127.0.0.1/s"));
+        assertFalse(Protocol.redirectAllowed("https://h.example/s", "http://h.example/s"));
+        assertTrue(Protocol.redirectAllowed("https://h.example/s", "https://cdn.example/s"));
+        assertTrue(Protocol.redirectAllowed("http://localhost:8080/s", "http://127.0.0.1:8080/t"));
     }
 
     @Test

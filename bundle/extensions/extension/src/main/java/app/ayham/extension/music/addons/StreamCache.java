@@ -202,34 +202,43 @@ public final class StreamCache {
             h.setReadTimeout(20_000);
             try {
                 int code = h.getResponseCode();
+                // a redirect onto this device: refused like the link itself (extension audit M8)
+                if (!Protocol.redirectAllowed(u, h.getURL().toString())) throw new IOException("audio: redirected off https or to this device");
                 if (code != 206 && !(code == 200 && from == 0)) {
                     String m = "audio: HTTP " + code + " for chunk " + c + " (bytes " + from + "-" + to + " of " + length + ", "
                             + have.cardinality() + " chunks in, the link " + (android.os.SystemClock.elapsedRealtime() - sourcedAt) / 1000 + " s old)";
                     // the phone, 2026-11-20: NullBeat's links answered 400 once about a minute old
                     throw code >= 400 && code < 500 ? new Expired(m) : new IOException(m);
                 }
+                if (isManifest(null, h.getContentType())) {
+                    // protocol.md 8.1.6: any chunk (a seek, or a new link) answered by a manifest: nothing of it is written
+                    forget();
+                    throw new IOException("audio: an HLS or DASH manifest, not a file; not kept");
+                }
                 if (code == 206) {
                     String cr = h.getHeaderField("Content-Range");   // bytes a-b/total
-                    int slash = cr == null ? -1 : cr.lastIndexOf('/');
-                    if (slash > 0 && !cr.endsWith("*")) {
-                        long l;
-                        try {
-                            l = Long.parseLong(cr.substring(slash + 1).trim());
-                        } catch (NumberFormatException x) {
-                            throw new IOException("audio: an unreadable Content-Range");
+                    if (cr != null) {
+                        long[] r = contentRange(cr);
+                        if (r == null) throw new IOException("audio: an unreadable Content-Range");
+                        // the bytes must be the ones asked for, or they'd go into the wrong place of the file
+                        if (r[0] != from) throw new IOException("audio: chunk " + c + " answered from byte " + r[0] + ", not " + from);
+                        long l = r[1];
+                        if (l >= 0) {
+                            if (l <= from || l > MAX_LENGTH) throw new IOException("audio: a length of " + l + " bytes for chunk " + c);
+                            if (length >= 0 && l != length) throw changed(l); // another file now: the kept one is dropped
+                            length = l;
                         }
-                        if (l <= 0 || l > MAX_LENGTH) throw new IOException("audio: a length of " + l + " bytes");
-                        length = l;
                     }
                 } else {
                     // a server that ignores ranges sends it all: read just this chunk of it
                     long l = h.getContentLengthLong();
                     if (l > MAX_LENGTH) throw new IOException("audio: a length of " + l + " bytes");
+                    if (l > 0 && length >= 0 && l != length) throw changed(l);
                     if (l > 0) length = l;
                 }
-                String mime = h.getContentType();
                 byte[] buf = new byte[64 * 1024];
                 long want = length >= 0 ? Math.min(CHUNK, length - from) : CHUNK;
+                if (want <= 0) throw new IOException("audio: nothing to read for chunk " + c);
                 long got = 0, until = android.os.SystemClock.elapsedRealtime() + CHUNK_MS;
                 try (InputStream in = h.getInputStream(); RandomAccessFile f = new RandomAccessFile(data, "rw")) {
                     f.seek(from);
@@ -245,7 +254,7 @@ public final class StreamCache {
                     if (length < 0) length = from + got;   // the end came first
                     else throw new IOException("audio: the range ended early");
                 }
-                if (c == 0 && (isManifest(null, mime) || isManifest(head(data), null))) {
+                if (c == 0 && isManifest(head(data), null)) {
                     // protocol.md 8.1.6: a manifest is never kept (nor read as this row's audio)
                     forget();
                     throw new IOException("audio: an HLS or DASH manifest, not a file; not kept");
@@ -258,7 +267,17 @@ public final class StreamCache {
             }
         }
 
-        /** This entry's bytes and chunk list gone (a manifest found in it). */
+        /**
+         * The link now answers with another length than the kept file's: it is another file, so the
+         * kept bytes are dropped (never mixed with the new ones) and the next play fetches it fresh.
+         */
+        private IOException changed(long l) {
+            String m = "audio: the file's length changed from " + length + " to " + l + " bytes; the kept copy is dropped";
+            forget();
+            return new IOException(m);
+        }
+
+        /** This entry's bytes and chunk list gone (a manifest found in it, or another file). */
         private void forget() {
             //noinspection ResultOfMethodCallIgnored
             data.delete();
@@ -320,9 +339,24 @@ public final class StreamCache {
     }
 
     private static final java.util.regex.Pattern MANIFEST_MIME = java.util.regex.Pattern.compile("mpegurl|dash\\+xml", java.util.regex.Pattern.CASE_INSENSITIVE),
-            // any case, after an XML header and comments: <mpd>, <!-- x --><MPD ...>
-            MANIFEST_MPD = java.util.regex.Pattern.compile("(?:(?:<\\?xml[^>]*>|<!--.*?-->)\\s*)*<MPD[\\s>/]",
-                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL);
+            // any case, after an XML header, comments and a doctype: <mpd>, <!-- x --><!DOCTYPE MPD><MPD ...>
+            MANIFEST_MPD = java.util.regex.Pattern.compile("(?:(?:<\\?xml[^>]*>|<!--.*?-->|<!DOCTYPE[^>]*>)\\s*)*<MPD[\\s>/]",
+                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL),
+            CONTENT_RANGE = java.util.regex.Pattern.compile("bytes\\s+(\\d{1,18})-(\\d{1,18})/(\\d{1,18}|\\*)", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * A 206's Content-Range, "bytes start-end/total": {start, total} (total -1 when "*"), or null when
+     * it can't be read or doesn't add up (end before start, or past the total).
+     */
+    static long[] contentRange(String cr) {
+        if (cr == null) return null;
+        java.util.regex.Matcher m = CONTENT_RANGE.matcher(cr.trim());
+        if (!m.matches()) return null;
+        long start = Long.parseLong(m.group(1)), end = Long.parseLong(m.group(2));
+        long total = "*".equals(m.group(3)) ? -1 : Long.parseLong(m.group(3));
+        if (end < start || (total >= 0 && end >= total)) return null;
+        return new long[]{start, total};
+    }
 
     /** The first 512 bytes of a file (fewer when it is shorter; null when it can't be read). */
     private static byte[] head(File f) {
@@ -367,6 +401,19 @@ public final class StreamCache {
         open.remove(e.key);
         Log.i(TAG, "stream " + e.key + " closed: " + e.fetched / 1024 + " KB from the network while open, " + e.have.cardinality() + " of "
                 + (e.length < 0 ? "?" : String.valueOf((e.length + CHUNK - 1) / CHUNK)) + " chunks on disk");
+    }
+
+    /**
+     * A row the fit refused (protocol.md 8.1.4): its cached file goes with it, or the next play of
+     * the song would fit the same refused copy from the cache (extension audit M12). Only once no
+     * one else has it open.
+     */
+    public static synchronized boolean discard(Context c, Entry e) {
+        if (e == null || open.containsKey(e.key)) return false;
+        boolean gone = new File(dir(c), e.key + ".bin").delete();
+        //noinspection ResultOfMethodCallIgnored
+        new File(dir(c), e.key + ".meta").delete();
+        return gone;
     }
 
     /**

@@ -3,7 +3,7 @@
 A patch bundle for YouTube Music, applied next to the official Morphe bundle in Morphe Manager.
 It is not a fork of Morphe: it adds its own patches and calls into Morphe's where needed.
 
-**Not ready for use yet.** Targets YouTube Music 9.30.53 with Morphe 2.2.0.
+**Not ready for use yet.** Targets YouTube Music 9.30.53 with Morphe 2.4.0.
 
 Patches:
 - **BitChord player and automix**: the now-playing screen laid out like BitChord's, using YT Music's own views. It has:

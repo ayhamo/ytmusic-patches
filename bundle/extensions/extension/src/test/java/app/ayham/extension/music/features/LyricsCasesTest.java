@@ -90,11 +90,19 @@ public class LyricsCasesTest {
                         ok = got.equals(Json.write(want).replace(" ", ""));
                         break;
                     }
-                    default:
+                    // sides and activeLines: the full view's (the strip has one line, lyrics.md §2.7,
+                    // §5.5); parse and lrcOffset: Morphe's own, not ours (the strip reads lines from
+                    // Morphe's parser); offset: Morphe's own (the strip is on Morphe's offsets and its position)
+                    case "sides":
+                    case "activeLines":
+                    case "parse":
+                    case "lrcOffset":
+                    case "offset":
                         gs++;
-                        // sides: the full view's (the strip has one line, lyrics.md §5.5); parse and
-                        // lrcOffset: Morphe's own, not ours (the strip reads lines from Morphe's parser);
-                        // offset: Morphe's own (the strip is on Morphe's offsets and its position)
+                        continue;
+                    default:
+                        // a new group: decide whether it is the strip's before it can pass
+                        if (gs++ == 0) fails.add("unknown group '" + g.getKey() + "': run it here or name it as not ours");
                         continue;
                 }
                 if (ok) gp++;

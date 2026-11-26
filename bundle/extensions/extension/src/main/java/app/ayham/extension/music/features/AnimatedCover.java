@@ -384,12 +384,26 @@ final class AnimatedCover {
                         aheadAsked.remove(s[0]);
                         return;
                     }
-                    String mvKey = CanvasCache.videoKey(s[0]);
+                    // the settings and the song's choices as they are now, 15 s on (canvas.md §13 rules 1, 4,
+                    // 6-7; §15): the same quality, mode and choices, and cache key, the song's own lookup uses
+                    Properties p = Features.props();
+                    if (!CanvasSettings.on(p, CanvasSettings.VIDEO) || "0".equals(p.getProperty("canvasVideo"))
+                            || CanvasSettings.blockedByMobile(Features.appContext, p)) {
+                        aheadAsked.remove(s[0]);
+                        return;
+                    }
+                    CanvasChoices.Song ch = CanvasChoices.get(s[0]);
+                    if (ch.off.contains(CanvasSettings.VIDEO)) {
+                        aheadAsked.remove(s[0]);
+                        return;
+                    }
+                    String mvKey = CanvasCache.videoKey(s[0]) + CanvasSettings.videoKeySuffix(p) + ch.keySuffix();
                     boolean[] none = {false};
                     java.io.File f;
                     synchronized (VideoCanvas.class) {
                         if (CanvasCache.lookup(mvKey) != null) return;
-                        f = VideoCanvas.clip(s[0], s[1], s[2], 0, cacheDir, 1080, none);
+                        f = VideoCanvas.clip(s[0], s[1], s[2], 0, cacheDir, 1080, none,
+                                CanvasSettings.ytHeight(p), CanvasSettings.fullVideo(p), ch);
                     }
                     if (f != null || none[0]) CanvasCache.put(mvKey, f == null ? null : f.getAbsolutePath());
                     Log.i(TAG, "canvas ahead: '" + s[1] + "' " + (f != null ? "loop cached" : none[0] ? "has no video" : "not this time"));
@@ -448,11 +462,10 @@ final class AnimatedCover {
                     }
                 } catch (Throwable ignored) {
                 }
-                // its downloaded Spotify canvas first (Metrolist's order: Spotify before Apple), then its art clip
-                // each only while its source is on (canvas.md §13 rule 1), as for an online lookup
-                if (vid != null && CanvasSettings.on(p, CanvasSettings.SPOTIFY)) saved = CanvasCache.lookup(CanvasCache.spotifyIdKey(vid));
-                if (vid != null && (saved == null || saved.isEmpty()) && CanvasSettings.on(p, CanvasSettings.APPLE))
-                    saved = CanvasCache.lookup(CanvasCache.idKey(vid));
+                // its downloaded Spotify canvas and art clip, in the online lookup's order and under the same
+                // switches: the master switch (canvas.md §13 rule 1) and the song's own (§15: its video or Use
+                // first, a source off for the song skipped). A video or Use of the music video goes online.
+                if (vid != null) saved = savedClip(vid, p, CanvasChoices.get(vid));
             }
             if (saved != null && !saved.isEmpty()) {
                 // saved lookup: a miss for 24 h, or the clip file (also offline)
@@ -496,10 +509,7 @@ final class AnimatedCover {
             }
             // canvas.md §13: the sources strictly in the listener's order, each under its switches
             // §15: the listener's video (rule 6) or Use (rule 7) first; a source switched off for the song skipped
-            java.util.List<String> order = new java.util.ArrayList<>(CanvasSettings.order(p));
-            String first = l.ch.video != null ? CanvasSettings.VIDEO : l.ch.use;
-            if (first != null && order.remove(first)) order.add(0, first);
-            for (String src : order) {
+            for (String src : orderFor(p, l.ch)) {
                 if (!forKey.equals(key)) return;
                 if (!CanvasSettings.on(p, src) || l.ch.off.contains(src)) continue;
                 boolean stop = CanvasSettings.VIDEO.equals(src) ? lookVideo(l) : CanvasSettings.SPOTIFY.equals(src) ? lookSpotify(l) : lookApple(l);
@@ -507,6 +517,34 @@ final class AnimatedCover {
             }
             Log.i(TAG, "canvas: no source has a clip for '" + title + "' in " + (System.currentTimeMillis() - lookupStart) + " ms");
         }, "ayham-canvas").start();
+    }
+
+    /** The listener's source order for a song: its video or Use first (canvas.md §15 rules 6, 7). */
+    static java.util.List<String> orderFor(Properties p, CanvasChoices.Song ch) {
+        java.util.List<String> order = new java.util.ArrayList<>(CanvasSettings.order(p));
+        String first = ch.video != null ? CanvasSettings.VIDEO : ch.use;
+        if (first != null && order.remove(first)) order.add(0, first);
+        return order;
+    }
+
+    /**
+     * A downloaded song's saved clip (Spotify canvas or Apple art clip) by its video id, taken in the
+     * song's source order, each only while its source is on and not off for the song; null when the
+     * song's own video or Use names the music video (looked up online) or nothing is saved. (The
+     * settings' order putting the video first doesn't: a saved clip plays before it, also offline.)
+     */
+    static String savedClip(String vid, Properties p, CanvasChoices.Song ch) {
+        boolean videoChosen = ch.video != null || CanvasSettings.VIDEO.equals(ch.use);
+        for (String src : orderFor(p, ch)) {
+            if (!CanvasSettings.on(p, src) || ch.off.contains(src)) continue;
+            if (CanvasSettings.VIDEO.equals(src)) {
+                if (videoChosen) return null;
+                continue;
+            }
+            String s = CanvasCache.lookup(CanvasSettings.SPOTIFY.equals(src) ? CanvasCache.spotifyIdKey(vid) : CanvasCache.idKey(vid));
+            if (s != null && !s.isEmpty()) return s;
+        }
+        return null;
     }
 
     /** One song's lookup, as the sources share it. */

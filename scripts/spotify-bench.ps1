@@ -44,8 +44,17 @@ foreach ($id in $ids) {
 }
 Write-Host "decoded $decoded songs ($noAudio of the key's $($ids.Count) have no audio yet)"
 
-$token = gh auth token
-docker run --rm -e GITHUB_ACTOR=ayhamo -e GITHUB_TOKEN=$token `
+# The token goes to Docker through the environment (-e NAME with no value), never on a command
+# line where process listings would show it. A GITHUB_TOKEN already set is put back afterwards.
+$hadToken = Test-Path Env:GITHUB_TOKEN
+$oldToken = $env:GITHUB_TOKEN
+$env:GITHUB_TOKEN = (gh auth token)
+if ($LASTEXITCODE -ne 0 -or -not $env:GITHUB_TOKEN) {
+    if ($hadToken) { $env:GITHUB_TOKEN = $oldToken } else { Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue }
+    throw "gh auth token failed: log in with gh auth login (read:packages scope)"
+}
+try {
+docker run --rm -e GITHUB_ACTOR=ayhamo -e GITHUB_TOKEN `
     -e AUTOMIX_NATIVES=/natives -e SPOTIFY_BENCH=/bench -e BENCH_WAV=/wav -e SPOTIFY_EXPORTS=/exports `
     -e BENCH_THREADS=$Threads -e BENCH_OUT=$OutDir -e TEST_HEAP="$([Math]::Max(2, [Math]::Ceiling($Threads * 1.2)))g" `
     $(if ($Only) { "-e"; "BENCH_IDS=$Only" }) `
@@ -54,5 +63,8 @@ docker run --rm -e GITHUB_ACTOR=ayhamo -e GITHUB_TOKEN=$token `
     -v "${root}:/repo" -v "$root\work\gradle-home:/gradle" -w /repo/bundle ytm-patches-tools `
     sh -c "sh ./gradlew :extensions:extension:testDebugUnitTest --tests '*SpotifyBenchTest' --no-daemon --console=plain -i > /tmp/bench.log 2>&1; c=`$?; grep -E 'spotify bench|: [0-9.]+ s, |left out|failed|FAILED|SKIPPED|Exception' /tmp/bench.log; exit `$c"
 $code = $LASTEXITCODE
+} finally {
+    if ($hadToken) { $env:GITHUB_TOKEN = $oldToken } else { Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue }
+}
 if (-not $KeepWav) { Remove-Item -Recurse -Force $wav }
 if ($code -ne 0) { throw "SpotifyBenchTest failed" }

@@ -202,12 +202,17 @@ public class AddonLinksPreference extends Preference {
                 AddonClient cl = AddonClient.create(null);
                 AddonClient.Discovered d = cl.discover(link);
                 long t1 = android.os.SystemClock.elapsedRealtime();
-                TrackMatcher.Target tg = new TrackMatcher.Target();
-                tg.title = TEST_TITLE;
-                tg.artist = TEST_ARTIST;
-                java.util.List<Object> rows = cl.search(new AddonClient.Addon(d.base), tg, TEST_ARTIST + " " + TEST_TITLE, d.manifest);
-                long t2 = android.os.SystemClock.elapsedRealtime();
-                msg = testResult(d.manifest, rows.size(), t1 - t0, t2 - t1);
+                if (!d.manifest.usable) {
+                    // no search to ask: its /search would fail and hide why (testResult says it)
+                    msg = testResult(d.manifest, 0, t1 - t0, 0);
+                } else {
+                    TrackMatcher.Target tg = new TrackMatcher.Target();
+                    tg.title = TEST_TITLE;
+                    tg.artist = TEST_ARTIST;
+                    java.util.List<Object> rows = cl.search(new AddonClient.Addon(d.base), tg, TEST_ARTIST + " " + TEST_TITLE, d.manifest);
+                    long t2 = android.os.SystemClock.elapsedRealtime();
+                    msg = testResult(d.manifest, rows.size(), t1 - t0, t2 - t1);
+                }
             } catch (Throwable e) {
                 // a network error's message can hold the link, and so the token
                 msg = "Failed: " + (e.getMessage() != null ? Protocol.scrub(e.getMessage()) : e.getClass().getSimpleName());

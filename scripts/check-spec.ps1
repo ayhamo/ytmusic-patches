@@ -12,8 +12,9 @@ param(
 $ErrorActionPreference = "Stop"
 $copy = Join-Path $PSScriptRoot "..\spec"
 if (-not (Test-Path $Master)) { Write-Error "The extension's spec/ not found at $Master (pass -Master)" }
-$Master = (Resolve-Path $Master).Path
-$copy = (Resolve-Path $copy).Path
+# no trailing separator, or Get-Files would cut the first letter off every name
+$Master = (Resolve-Path $Master).Path.TrimEnd('\', '/')
+$copy = (Resolve-Path $copy).Path.TrimEnd('\', '/')
 
 function Get-Files($root) {
     Get-ChildItem -Path $root -Recurse -File | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') } | Sort-Object

@@ -3,7 +3,7 @@
 FROM eclipse-temurin:21-jdk
 
 ARG CMDLINE_TOOLS=commandlinetools-linux-13114758_latest.zip
-ARG MORPHE_DESKTOP=2.2.0
+ARG MORPHE_DESKTOP=2.3.0
 ARG APKEEP=1.1.0
 
 ENV ANDROID_HOME=/opt/android-sdk \

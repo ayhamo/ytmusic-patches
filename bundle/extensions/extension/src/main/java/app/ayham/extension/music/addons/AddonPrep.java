@@ -48,8 +48,10 @@ public final class AddonPrep {
         public String codec;
         /** A downloaded song (AddonDownloads): its file is kept when it leaves memory. */
         public boolean saved;
-        /** Downloads: the row's ISRC and the tier asked for. */
+        /** Downloads: the row's ISRC and the tier asked for (a streamed copy: playback's tier, for the upgrade pass). */
         public String isrc, tier;
+        /** Streamed from a file already in the persistent cache (protocol.md 8.1.6): its upgrade pass asks only the addons above it (8.2.1). */
+        public boolean cached;
         /** Dolby Atmos from the addon (the switch on, or an Atmos download): its decoder's 2-channel render plays. */
         public boolean atmos;
         /** The file's loudness (dBFS, mono RMS) every ENV_HOP seconds of its own time: where it is quiet. */
@@ -223,6 +225,55 @@ public final class AddonPrep {
         return id != null && id.equals(working);
     }
 
+    // editor.md §11 rule 6: the stage of the copy being prepared for playback (downloads aren't shown)
+    public static final String ASKING = "asking", FETCHING = "fetching", FITTING = "fitting";
+    private static volatile String stageId, stage;
+    private static volatile boolean stageLossless;
+
+    /** The last copy fetched for playback, and whether it is lossless: the take-over's wording. */
+    private static volatile String copyId;
+    private static volatile boolean copyLossless;
+
+    /** Whether the song's copy is lossless, as the row words it (editor.md §11 rule 6). */
+    public static boolean losslessCopy(String id) {
+        return id != null && id.equals(copyId) && copyLossless;
+    }
+
+    private static void stage(String id, String st, Protocol.Stream s) {
+        stageLossless = s != null && lossless(s);
+        if (s != null) {
+            copyLossless = stageLossless;
+            copyId = id;
+        }
+        stage = st;
+        stageId = id;
+    }
+
+    /** The copy is read: now lined up with YouTube's (only a playback copy has a stage). */
+    private static void fitting(String id) {
+        if (id.equals(stageId)) stage = FITTING;
+    }
+
+    private static void stageOver(String id) {
+        if (id.equals(stageId)) {
+            stageId = null;
+            stage = null;
+        }
+    }
+
+    /** A FLAC, ALAC, WAV or AIFF copy, or one with a stated bit depth (editor.md §11 rule 6). */
+    static boolean lossless(Protocol.Stream s) {
+        String c = s.codec == null ? "" : s.codec.toLowerCase(Locale.ROOT);
+        return c.startsWith("flac") || c.startsWith("alac") || c.startsWith("wav") || c.startsWith("aiff") || c.startsWith("pcm")
+                || (s.bitDepth != null && s.bitDepth > 0);
+    }
+
+    /** The song's copy being prepared now: {ASKING, FETCHING or FITTING, "lossless" or ""}, or null. */
+    public static String[] stageOf(String id) {
+        String st = stage;
+        return id != null && id.equals(stageId) && st != null ? new String[]{st, stageLossless ? "lossless" : ""} : null;
+    }
+
     /** Being prepared, or waiting its turn: the badge says "Upgrading Quality" from the start. */
     public static synchronized boolean waiting(String id) {
         return id != null && (id.equals(working) || queue.contains(id));
@@ -241,6 +292,7 @@ public final class AddonPrep {
         if (id == null) return;
         youtubeOnly.remove(id);
         failedAt.remove(id);
+        rowsRefused.remove(id);
         // protocol.md 8.1.7: its remembered answers and kept files go, so it is found and fetched afresh
         String[] info = asked.get(id);
         java.util.Set<String> rows = rowsTried.get(id);
@@ -274,11 +326,23 @@ public final class AddonPrep {
         final Prepared old;
         final int minRank;
         final boolean leaveOut;
+        /** 8.2.1, after a cached copy: only the addons ranked above the one it came from are asked. */
+        final boolean aboveOnly;
 
         Pass(Prepared old, int minRank, boolean leaveOut) {
+            this(old, minRank, leaveOut, false);
+        }
+
+        Pass(Prepared old, int minRank, boolean leaveOut, boolean aboveOnly) {
             this.old = old;
             this.minRank = minRank;
             this.leaveOut = leaveOut;
+            this.aboveOnly = aboveOnly;
+        }
+
+        /** The same pass for the copy playing now (an earlier pass replaced the one it was asked for). */
+        Pass on(Prepared now) {
+            return now == null || now == old ? this : new Pass(now, minRank, leaveOut, aboveOnly);
         }
 
         /** Why this answer can't replace the playing copy, or null. */
@@ -313,14 +377,18 @@ public final class AddonPrep {
     }
 
     /**
-     * Our player is on this copy (AddonDirect): a lossy one is followed by one pass for lossless or
-     * better, its row left out (protocol.md 8.2.1). Once per song.
+     * Our player is on this copy (AddonDirect): one pass when Pick.upgradeWanted asks for it
+     * (protocol.md 8.2.1): a lossy one, every addon again for lossless or better, its row left out;
+     * a cached one under the tier asked, only the addons ranked above it, for better. Once per song.
      */
     public static synchronized void playing(Prepared p) {
-        if (p == null || p.saved || p.atmos || p.rank != 0 || passes.containsKey(p.id) || !passDone.add(p.id)) return;
+        if (p == null || p.saved || p.atmos || p.rank < 0 || passes.containsKey(p.id) || p.id.equals(working)) return;
+        Pick.Upgrade u = Pick.upgradeWanted(p.rank, p.tier != null ? p.tier : Pick.LOSSLESS, p.cached);
+        if (u == null || !passDone.add(p.id)) return;
         if (passDone.size() > 200) passDone.clear();
-        Log.i(TAG, p.id + ": a lossy copy plays (" + p.addon + ", " + p.codec + "): one pass for lossless");
-        pass(p.id, new Pass(p, 1, true));
+        Log.i(TAG, p.id + ": " + (u.aboveOnly ? "a cached copy under the tier asked" : "a lossy copy") + " plays (" + p.addon + ", " + p.codec + "): one pass for "
+                + (u.aboveOnly ? "better, from the addons ranked above it" : "lossless"));
+        pass(p.id, new Pass(p, u.minRank, true, u.aboveOnly));
     }
 
     /** Our player left a copy a better one replaced: its stream and files go. */
@@ -334,6 +402,19 @@ public final class AddonPrep {
 
     /** The rows tried for a song (host, a tab, rowId), for "Upgrade quality". */
     private static final Map<String, java.util.Set<String>> rowsTried = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * The rows (the addon's base, a tab, rowId; in memory only, never logged: the base holds the
+     * key) the fit or the fetch refused for a song (protocol.md 8.1.4: per row and per song): not
+     * opened again for it, the lossless pass included; "Upgrade quality" clears them (extension
+     * audit M13).
+     */
+    private static final Map<String, java.util.Set<String>> rowsRefused = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static void refusedRow(String id, AddonClient.Opened o) {
+        if (o.row == null || o.row.id == null) return;
+        if (rowsRefused.size() > 200 && !rowsRefused.containsKey(id)) rowsRefused.clear();
+        rowsRefused.computeIfAbsent(id, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(o.addon.base + "\t" + o.row.id);
+    }
 
     public static boolean youtubeChosen(String id) {
         return id != null && youtubeOnly.contains(id);
@@ -446,6 +527,7 @@ public final class AddonPrep {
         while (true) {
             String id;
             String[] info;
+            Pass ps;
             synchronized (AddonPrep.class) {
                 while (queue.isEmpty()) {
                     try {
@@ -456,9 +538,15 @@ public final class AddonPrep {
                 }
                 id = queue.pollFirst();
                 info = asked.get(id);
-                if (info == null || (ready.containsKey(id) && !passes.containsKey(id)) || !AddonSettings.on()) continue;
+                // taken with its song: a pass asked while this one runs ("Upgrade quality" during the
+                // lossless pass) stays in passes for its own turn, and isn't the one handled below
+                ps = passes.remove(id);
+                if (info == null || (ready.containsKey(id) && ps == null) || !AddonSettings.on()) continue;
+                if (ps != null) ps = ps.on(ready.get(id));
                 working = id;
             }
+            // the start's sweep of an earlier run's files (clearCache) ends before this song writes any
+            awaitCleared();
             long t0 = SystemClock.elapsedRealtime();
             Prepared p = null;
             String why;
@@ -466,7 +554,7 @@ public final class AddonPrep {
             try {
                 if (AddonDownloads.has(ctx, id)) p = AddonDownloads.load(ctx, id);
                 else {
-                    p = prepare(ctx, id, info[0], info[1], "1".equals(info[2]));
+                    p = prepare(ctx, id, info[0], info[1], "1".equals(info[2]), null, ps);
                     // a streamed song has no file to write deck audio from: a mix takes YouTube's
                     decksDue = p != null && p.stream == null;
                 }
@@ -488,10 +576,6 @@ public final class AddonPrep {
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 Log.w(TAG, "prepare " + id + " failed: " + why);
-            }
-            Pass ps;
-            synchronized (AddonPrep.class) {
-                ps = passes.remove(id);
             }
             if (ps != null) {
                 synchronized (AddonPrep.class) {
@@ -572,7 +656,7 @@ public final class AddonPrep {
 
     /** At start: files prepared by an earlier run are no longer known (kept only in memory), so they go. */
     public static void clearCache(Context c) {
-        new Thread(() -> {
+        Thread t = new Thread(() -> {
             int n = 0;
             for (File d : new File[]{dir(c), new File(c.getCacheDir(), "addons/yt")}) {
                 File[] fs = d.listFiles();
@@ -584,7 +668,23 @@ public final class AddonPrep {
                 if ((name.endsWith(".ahead") || name.endsWith(".atail") || name.endsWith(".ahead.part") || name.endsWith(".atail.part")) && f.delete()) n++;
             }
             if (n > 0) Log.i(TAG, "cleared " + n + " addon files from an earlier run");
-        }, "addon-clear").start();
+        }, "addon-clear");
+        clearing = t;
+        t.start();
+    }
+
+    /** The start's sweep (clearCache) while it runs: no prep or download writes a file before it ends. */
+    private static volatile Thread clearing;
+
+    /** Waits (on the prep or download thread, never the main one) until the start's sweep is done. */
+    private static void awaitCleared() {
+        Thread t = clearing;
+        if (t == null || t == Thread.currentThread()) return;
+        try {
+            t.join(30_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();   // kept for the caller to see
+        }
     }
 
     static File dir(Context c) {
@@ -632,14 +732,20 @@ public final class AddonPrep {
     /** The song from the addons, fitted and levelled; null when none fits. */
     static final double DOWNLOAD_SLACK_SEC = 2.0;
 
-    static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo) throws Exception {
-        return prepare(c, id, title, artist, isVideo, null);
-    }
-
     /** dl set: a download (allowDownloads addons, ±2 s, lossless at the tier asked, kept in dl.dir). */
     static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo, Download dl) throws Exception {
+        return prepare(c, id, title, artist, isVideo, dl, null);
+    }
+
+    /** pass set (playback only): a second look for the playing copy (Pass), taken off the queue with its song. */
+    private static Prepared prepare(Context c, String id, String title, String artist, boolean isVideo, Download dl, Pass pass) throws Exception {
         // a queued song skipped before its turn: not even YouTube's copy is fetched
         if (stale()) throw new Stale();
+        // the start's sweep of an earlier run's files must not take this one's (a download's thread too)
+        awaitCleared();
+        List<AddonClient.Addon> addons = addonsFor(c, pass);
+        // 8.2.1: a cached copy from the first addon has none above it to ask
+        if (pass != null && pass.aboveOnly && addons.isEmpty()) return null;
         // YouTube's side: everything is fitted to it. Decoded (12-15 s on the phone) while the addons
         // are asked; a file is fitted only once it is whole. The search goes by the container's length
         final long t0 = SystemClock.elapsedRealtime();
@@ -651,10 +757,12 @@ public final class AddonPrep {
         if (Double.isNaN(known)) ytDecode.run();   // no length in the container: the decode gives it
         else new Thread(ytDecode, "addon-prep-yt").start();
         Prepared got = null;
+        if (dl == null) stage(id, ASKING, null);
         try {
-            got = prepareFrom(c, id, title, artist, isVideo, dl, ytSide, ytDecode, Double.isNaN(known) ? ytSide.durationSec() : known);
+            got = prepareFrom(c, id, title, artist, isVideo, dl, pass, addons, ytSide, ytDecode, Double.isNaN(known) ? ytSide.durationSec() : known);
             return got;
         } finally {
+            if (dl == null) stageOver(id);
             // a streamed song's level envelope still comes from it (streamWindow)
             if (got == null || got.stream == null) ytDecode.cancelled = true;
         }
@@ -746,15 +854,26 @@ public final class AddonPrep {
         return Double.NaN;
     }
 
-    private static Prepared prepareFrom(Context c, String id, String title, String artist, boolean isVideo, Download dl,
-                                        final OffsetFit.Side ytSide, final YtDecode ytDecode, double searchSec) throws Exception {
+    /**
+     * The addons to ask, in the user's order. A pass after a cached copy (8.2.1, aboveOnly): only
+     * those ranked above the addon it came from.
+     */
+    private static List<AddonClient.Addon> addonsFor(Context c, Pass pass) {
+        List<AddonClient.Addon> addons = new ArrayList<>();
+        for (String l : AddonSettings.links(c)) {
+            if (pass != null && pass.aboveOnly && pass.old.host != null && pass.old.host.equals(Protocol.redact(Protocol.baseOf(l)))) break;
+            addons.add(new AddonClient.Addon(l));
+        }
+        return addons;
+    }
+
+    private static Prepared prepareFrom(Context c, String id, String title, String artist, boolean isVideo, Download dl, final Pass pass,
+                                        List<AddonClient.Addon> addons, final OffsetFit.Side ytSide, final YtDecode ytDecode, double searchSec) throws Exception {
         TrackMatcher.Target t = new TrackMatcher.Target();
         t.title = title;
         t.artist = artist;
         t.durationSec = searchSec;
         t.isVideo = isVideo;
-        List<AddonClient.Addon> addons = new ArrayList<>();
-        for (String l : AddonSettings.links(c)) addons.add(new AddonClient.Addon(l));
         AddonClient.Options opt = new AddonClient.Options();
         opt.slackSec = AddonSettings.slackSec();
         if (dl != null) {
@@ -771,16 +890,16 @@ public final class AddonPrep {
         // playback: an Atmos file that didn't fit, waiting for a stereo row's offset
         final Held[] held = dl == null ? new Held[1] : null;
         if (dl == null) opt.cancelled = AddonPrep::stale;
+        if (dl == null) opt.refusedBefore = row -> {
+            java.util.Set<String> r = rowsRefused.get(id);
+            return r != null && r.contains(row);
+        };
         opt.check = o -> {
             if (dl == null && stale()) return "no longer playing or next";
             if (o.row != null && o.row.id != null)
                 rowsTried.computeIfAbsent(id, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(o.addon.host + "\t" + o.row.id);
             try {
-                Pass ps;
-                synchronized (AddonPrep.class) {
-                    ps = dl == null ? passes.get(id) : null;
-                }
-                String notBetter = ps == null ? null : ps.refuse(o);
+                String notBetter = dl != null || pass == null ? null : pass.refuse(o);
                 if (notBetter != null) return notBetter;
                 String early = dl == null ? null : Fetch.statedRefusal(o.stream, dl.tier);
                 if (early != null) return early;
@@ -795,11 +914,14 @@ public final class AddonPrep {
                     return "Atmos: another addon's Atmos file already waits for a stereo row";
                 // YouTube's decode is waited for only where the fit compares (fit): the fetch and the
                 // file's decode run beside it
+                if (dl == null) stage(id, FETCHING, o.stream);
                 Prepared p = fetchAndFit(c, id, o, ytDecode, opt.slackSec, dl, held);
+                if (dl == null) stage(id, ASKING, null);   // a refused copy: the next row or lane is asked
                 // a streamed song was fitted on a slice of YouTube's copy: its whole decode runs on
                 // for the level envelope only, not waited for
                 if (p.stream == null && p.score >= 0) ytDecode.done();
                 if (p.score < 0) {
+                    if (dl == null) refusedRow(id, o);
                     if (p.stream != null) StreamCache.release(p.stream);
                     if (p.file != null) //noinspection ResultOfMethodCallIgnored
                         p.file.delete();
@@ -818,6 +940,8 @@ public final class AddonPrep {
                 got[0] = p;
                 return null;
             } catch (Throwable e) {
+                // a fetch or decode that failed (not the song going): the row is refused for the song
+                if (dl == null && !(e instanceof Stale)) refusedRow(id, o);
                 if (dl == null && !app.ayham.extension.music.automix.AddonDirect.inUse(id)) {
                     Prepared keep = held != null && held[0] != null ? held[0].p : null;
                     File[] fs = dir(c).listFiles((d, n) -> n.startsWith(id + ".") && !n.endsWith(".part"));
@@ -864,6 +988,14 @@ public final class AddonPrep {
             if (reuse != null && reuse.length() > 0) {
                 f = reuse;
                 Log.i(TAG, id + ": the same recording (ISRC) is downloaded already: " + f.getName() + " reused");
+            } else if (!"file".equals(s.transport)) {
+                Fetch.pace(o.addon.host);
+                try {
+                    f = fetchStream(o, s, dl.dir, id, Fetch.MAX_BYTES, Fetch.MAX_MS, null);
+                } catch (StreamManifest.Refused e) {
+                    return refusal(s.transport, e);
+                }
+                ext = f.getName().substring(f.getName().lastIndexOf('.') + 1);
             } else {
                 f = Fetch.download(o, new File(dl.dir, id + "." + ext));
             }
@@ -875,10 +1007,59 @@ public final class AddonPrep {
                 throw e;
             }
         }
+        // HLS and DASH: never through the audio cache (protocol.md 8.1.6.1); fetched whole into a file
+        if (!"file".equals(s.transport)) return streamFileAndFit(c, id, o, s, yt, slack, held);
         // Dolby Atmos keeps the whole file: our own decode plays it (AtmosWav), and another mix
         // is placed by a stereo row's offset (placeAtmos)
         if (!s.atmos) return streamAndFit(c, id, o, s, yt);
         return fetchAndFitPlayback(c, id, o, s, ext, yt, slack, held);
+    }
+
+    /** Names of HLS and DASH files: a new copy never takes the name of one the player may still be on. */
+    private static final java.util.concurrent.atomic.AtomicInteger streamFiles = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * An HLS or DASH row (protocol.md 8.1.5): YT's player builds only progressive sources, so the
+     * stream's audio is fetched whole into one local file (StreamManifest) and fitted as a whole file
+     * is; the player plays it and the decks are written from it, as for an Atmos file.
+     */
+    private static Prepared streamFileAndFit(Context c, String id, AddonClient.Opened o, Protocol.Stream s, YtDecode yt,
+                                             double slack, Held[] held) throws Exception {
+        String name = (s.atmos ? id + ".atmos." : id + ".") + s.transport + streamFiles.incrementAndGet();
+        File f;
+        try {
+            f = fetchStream(o, s, dir(c), name, 300L << 20, 120_000, () -> {
+                if (stale()) throw new Stale();
+            });
+        } catch (StreamManifest.Refused e) {
+            return refusal(s.transport, e);
+        }
+        Prepared p = fit(id, o, f, yt, slack, held);
+        if (p.score >= 0 && !p.atmos) {
+            p.rank = Pick.qualityRank(s);
+            p.tier = o.addon.tier;
+        }
+        return p;
+    }
+
+    /** Resolves the row's playlist or manifest and fetches its audio into dir/name.ext. */
+    private static File fetchStream(AddonClient.Opened o, Protocol.Stream s, File dir, String name, long maxBytes, long maxMs,
+                                    StreamManifest.Cancel cancel) throws Exception {
+        boolean local = client().allowsLocalHttp();
+        StreamManifest.Plan plan = StreamManifest.resolve(s.url, StreamManifest.httpTexts(s.headers), local, s.atmos);
+        StreamManifest.Got g = StreamManifest.fetch(plan, StreamManifest.httpBytes(s.headers, local), dir, name, maxBytes, maxMs, cancel);
+        Log.i(TAG, String.format(Locale.US, "%s: %s's %s stream fetched (%d segments, %d KB) in %d ms", name, o.addon.name,
+                s.transport.toUpperCase(Locale.ROOT), g.segments, g.file.length() / 1024, g.ms));
+        return g.file;
+    }
+
+    /** A stream this phone doesn't play: refused like a bad fit, the next row opens (8.1.4). */
+    private static Prepared refusal(String transport, StreamManifest.Refused e) {
+        Prepared p = new Prepared();
+        p.score = -1;
+        String why = Protocol.scrub(e.getMessage());
+        p.codec = why.startsWith("HLS") || why.startsWith("DASH") ? why : transport.toUpperCase(Locale.ROOT) + ": " + why;
+        return p;
     }
 
     /** The audition window (BitChord): this many seconds of the addon's audio are read to fit it. */
@@ -894,7 +1075,9 @@ public final class AddonPrep {
     private static Prepared streamAndFit(Context c, String id, AddonClient.Opened o, Protocol.Stream s, YtDecode yt) throws Exception {
         long t0 = SystemClock.elapsedRealtime();
         StreamCache.Entry e = StreamCache.open(c, StreamCache.rowKey(o.addon.host, o.row == null ? id : o.row.id, o.addon.tier, o.addon.quality, s.codec));
-        boolean kept = false;
+        boolean kept = false, refused = false;
+        // its file was in the persistent cache already (a replay): 8.2.1's pass after a cached copy
+        boolean wasCached = e.has(0, 1);
         try {
             e.source(s.url, s.headers);
             final AddonClient.Addon addon = o.addon;
@@ -921,11 +1104,16 @@ public final class AddonPrep {
             if (p.score >= 0) {
                 p.stream = e;
                 p.rank = Pick.qualityRank(s);
+                p.cached = wasCached;
+                p.tier = o.addon.tier;
                 kept = true;
             }
+            refused = p.score < 0;
             return p;
         } finally {
             if (!kept) StreamCache.release(e);
+            // a refused row's cached file goes too (8.1.4; extension audit M12)
+            if (refused) StreamCache.discard(c, e);
         }
     }
 
@@ -957,6 +1145,7 @@ public final class AddonPrep {
             }
         }, range);
         fit.finish();
+        fitting(id);
         // YouTube's copy only where the window can land (offset-map.md, Window check: the template
         // [p + 1, p + 11) over +-15 s): its whole decode took 16-21 s on the phone, this slice ~2 s
         double ytFrom = Math.max(0, from - OffsetFit.COARSE_LAG_SEC - 1), ytUntil = from + WINDOW_SEC + OffsetFit.COARSE_LAG_SEC + 1;
@@ -1252,6 +1441,7 @@ public final class AddonPrep {
             throw t;
         }
         fit.finish();
+        fitting(id);
         yt.done();
         final OffsetFit.Side ytSide = yt.side;
         final double ytDur = ytSide.durationSec(), ytLufs = ytSide.lufs();

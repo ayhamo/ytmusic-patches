@@ -1,13 +1,16 @@
 name: Tests
 
-# On every push: the extension's JVM unit tests (the shared spec cases included), and spec/
+# On every push: the extension's JVM unit tests (the shared spec cases included), the Python
+# tests in tests/, and spec/
 # against the master copy in the YT Music Extension's public repo (scripts/check-spec.ps1).
 # A pull request runs them only from a fork: a branch of this repo is pushed here too, and its
 # push already ran them (pull_request would run them twice).
+# The release calls this workflow first (workflow_call) and builds only when all of it passes.
 on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -59,6 +62,20 @@ jobs:
           name: unit-test-report
           path: bundle/extensions/extension/build/reports/tests/testDebugUnitTest
           retention-days: 7
+
+  # tests/: the Apple token watcher and the emulator offline tool (stdlib only, network and adb faked)
+  python-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the Python tests
+        run: python -m unittest discover -s tests -v
 
   spec:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork

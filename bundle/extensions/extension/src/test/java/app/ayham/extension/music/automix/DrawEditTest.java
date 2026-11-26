@@ -60,6 +60,24 @@ public class DrawEditTest {
         assertTrue(DrawEdit.start(0, null, "beat").out.isEmpty());
     }
 
+    /** editor.md §12 rule 6: a drawing keeps the time it came with, through Draw… and every edit. */
+    @Test
+    public void anEffectsDrawingKeepsItsEchoAndDelayTime() {
+        MixOverride.Drawing fx = new MixOverride.Drawing("beat");
+        fx.out.put("echo", pts(0, 0, 8, 1));
+        fx.echoBeats = 0.5;
+        fx.delayBeats = 0.75;
+        MixOverride.Drawing c = DrawEdit.copy(fx);
+        assertEquals(0.5, c.echoBeats, 0);
+        assertEquals(0.75, c.delayBeats, 0);
+        MixOverride.Drawing started = DrawEdit.start(3, fx, "beat");
+        assertEquals(0.5, started.echoBeats, 0);
+        assertEquals(0.75, started.delayBeats, 0);
+        MixOverride.Drawing edited = DrawEdit.withPoints(started, "echoSend", true, pts(0, 0, 4, 1));
+        assertEquals(0.5, edited.echoBeats, 0);
+        assertEquals(0.75, edited.delayBeats, 0);
+    }
+
     @Test
     public void addingKeepsOrderStepsAndTheLimit() {
         DrawEdit.Edit e = DrawEdit.add(pts(0, 1, 8, 0), new double[]{4, 0.5});

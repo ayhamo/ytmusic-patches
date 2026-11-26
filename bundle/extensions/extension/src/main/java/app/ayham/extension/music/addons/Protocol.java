@@ -121,10 +121,126 @@ public final class Protocol {
     public static boolean allowed(String url, boolean allowLocalHttp) {
         Url u = parse(url);
         if (u == null) return false;
-        if (u.scheme.equals("https")) return true;
+        // https to the device itself too only for that mock (protocol.md §1; extension audit M8)
+        if (u.scheme.equals("https")) return allowLocalHttp || !loopback(u.host);
         if (!allowLocalHttp || !u.scheme.equals("http")) return false;
         String h = u.host.replaceFirst(":[0-9]+$", "");
         return h.equals("localhost") || h.equals("127.0.0.1");
+    }
+
+    /**
+     * A host (with or without its port) that is this device: localhost and *.localhost (a final dot
+     * too), 127.0.0.0/8 and 0.0.0.0 in any form an address parser takes (2130706433, 0x7f000001,
+     * 0177.0.0.1, 127.1), and IPv6 ::1, :: and the IPv4-mapped or -compatible forms of those
+     * (extension step 2, 6a1acb0). Read as numbers only: nothing is looked up.
+     */
+    static boolean loopback(String host) {
+        String h = host == null ? "" : host.toLowerCase(Locale.ROOT);
+        if (h.startsWith("[")) h = h.substring(1, Math.max(1, h.indexOf(']')));
+        else if (h.indexOf(':') == h.lastIndexOf(':')) h = h.replaceFirst(":[0-9]+$", "");
+        int zone = h.indexOf('%');
+        if (zone >= 0) h = h.substring(0, zone);
+        while (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+        if (h.equals("localhost") || h.endsWith(".localhost")) return true;
+        if (h.indexOf(':') >= 0) {
+            int[] g = ipv6(h);
+            if (g == null) return false;
+            for (int i = 0; i < 5; i++) if (g[i] != 0) return false;
+            if (g[5] == 0 && g[6] == 0 && (g[7] == 0 || g[7] == 1)) return true;   // :: and ::1
+            // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible)
+            return (g[5] == 0xffff || g[5] == 0) && thisDevice4((long) g[6] << 16 | g[7]);
+        }
+        long v = ipv4(h);
+        return v >= 0 && thisDevice4(v);
+    }
+
+    private static boolean thisDevice4(long v) {
+        return v >>> 24 == 127 || v == 0;
+    }
+
+    /** An IPv4 address as an address parser reads it (1 to 4 parts, each decimal, 0x hex or 0 octal); -1: not one. */
+    static long ipv4(String h) {
+        if (h.isEmpty()) return -1;
+        String[] p = h.split("\\.", -1);
+        if (p.length > 4) return -1;
+        long v = 0;
+        for (int i = 0; i < p.length; i++) {
+            long n = part(p[i]);
+            boolean last = i == p.length - 1;
+            long max = last ? (1L << (8 * (4 - i))) - 1 : 255;
+            if (n < 0 || n > max) return -1;
+            v = last ? v << (8 * (4 - i)) | n : v << 8 | n;
+        }
+        return v;
+    }
+
+    private static long part(String s) {
+        if (s.isEmpty() || s.length() > 12) return -1;
+        int radix = 10;
+        if (s.startsWith("0x")) {
+            s = s.substring(2);
+            radix = 16;
+            if (s.isEmpty()) return 0;
+        } else if (s.length() > 1 && s.startsWith("0")) {
+            s = s.substring(1);
+            radix = 8;
+        }
+        long n = 0;
+        for (char c : s.toCharArray()) {
+            int d = Character.digit(c, radix);
+            if (d < 0) return -1;
+            n = n * radix + d;
+        }
+        return n;
+    }
+
+    /** An IPv6 address's eight groups (:: and a final dotted IPv4 read); null: not one. */
+    static int[] ipv6(String h) {
+        int dbl = h.indexOf("::");
+        if (dbl >= 0 && h.indexOf("::", dbl + 1) >= 0) return null;
+        List<Integer> head = groups(dbl >= 0 ? h.substring(0, dbl) : h), tail = dbl >= 0 ? groups(h.substring(dbl + 2)) : new ArrayList<>();
+        if (head == null || tail == null) return null;
+        int n = head.size() + tail.size();
+        if (dbl < 0 ? n != 8 : n > 7) return null;
+        int[] g = new int[8];
+        for (int i = 0; i < head.size(); i++) g[i] = head.get(i);
+        for (int i = 0; i < tail.size(); i++) g[8 - tail.size() + i] = tail.get(i);
+        return g;
+    }
+
+    private static List<Integer> groups(String s) {
+        List<Integer> out = new ArrayList<>();
+        if (s.isEmpty()) return out;
+        String[] p = s.split(":", -1);
+        for (int i = 0; i < p.length; i++) {
+            if (i == p.length - 1 && p[i].indexOf('.') >= 0) {
+                // a final IPv4 part: dotted decimal only, four parts
+                if (p[i].split("\\.", -1).length != 4 || !p[i].matches("[0-9.]+")) return null;
+                long v = ipv4(p[i]);
+                if (v < 0) return null;
+                out.add((int) (v >>> 16));
+                out.add((int) (v & 0xffff));
+                continue;
+            }
+            if (p[i].isEmpty() || p[i].length() > 4) return null;
+            int x = 0;
+            for (char c : p[i].toCharArray()) {
+                int d = Character.digit(c, 16);
+                if (d < 0) return null;
+                x = x * 16 + d;
+            }
+            out.add(x);
+        }
+        return out;
+    }
+
+    /**
+     * Where a request ended up after redirects may be called too: [original] was checked before
+     * the call, so a link that was already to this device (the debug mock) may stay on it.
+     */
+    public static boolean redirectAllowed(String original, String landed) {
+        Url u = parse(original);
+        return allowed(landed, u != null && loopback(u.host));
     }
 
     // ---- manifest (§2) ----

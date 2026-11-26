@@ -174,7 +174,10 @@ final class BestPart {
             } catch (Throwable t) {
                 Log.w(TAG, "best part: " + id + " failed: " + t);
             } finally {
-                if (partMs < 0) main.postDelayed(() -> asking = false, 20_000);
+                // asked again in 20 s, this song only: the next song's own lookup keeps its flag
+                if (id.equals(forId) && partMs < 0) main.postDelayed(() -> {
+                    if (id.equals(forId)) asking = false;
+                }, 20_000);
             }
             String next = app.ayham.extension.music.automix.Automix.nextId();
             if (next != null && !next.equals(id)) curve(next);   // rule 7: the next song's ahead
@@ -185,7 +188,7 @@ final class BestPart {
     private static long auto(String id, long durMs) {
         double[] heat = curve(id);
         long target = -1;
-        if (heat != null) {
+        if (heat != null && heat.length >= 3) {
             int n = heat.length / 3;
             double dur = heat[(n - 1) * 3] + heat[(n - 1) * 3 + 1];
             double at = VideoCanvas.partStart(heat, dur);
@@ -221,7 +224,8 @@ final class BestPart {
                 if (!"nocurve".equals(p[0]) && !"none".equals(p[0]) && age < CURVE_DAYS * 86_400_000L) {
                     double[] h = new double[p.length];
                     for (int i = 0; i < p.length; i++) h[i] = Double.parseDouble(p[i]);
-                    return h;
+                    // a damaged file (not whole points) is fetched again below
+                    if (h.length >= 3 && h.length % 3 == 0) return h;
                 }
             }
         } catch (Throwable ignored) {
@@ -319,6 +323,7 @@ final class BestPart {
 
     /** Rule 5: Your best part: a bar, -5 s, +5 s, Now, Listen from here, Save; Forget when one is saved. */
     static void yours(Activity a) {
+        if (a == null || a.isFinishing() || a.isDestroyed()) return;
         final String id = app.ayham.extension.music.automix.Automix.currentId();
         if (id == null) return;
         final long dur = app.ayham.extension.music.automix.Automix.durationMs();

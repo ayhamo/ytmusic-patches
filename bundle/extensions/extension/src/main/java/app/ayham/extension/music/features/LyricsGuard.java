@@ -130,6 +130,8 @@ public final class LyricsGuard {
         if (!"NOT_FOUND".equals(state)) return;
         String video = currentVideo();
         if (video == null || video.isEmpty() || retried.contains(video)) return;
+        // lyrics.md §11.7: offline no provider is asked, and the one retry is kept for when it's back
+        if (Features.offline()) return;
         main.postDelayed(() -> retry(video), RETRY_DELAY_MS);
     }
 
@@ -140,6 +142,7 @@ public final class LyricsGuard {
             stateField.setAccessible(true);
             Object state = stateField.get(manager);
             if (state == null || !"NOT_FOUND".equals(state.toString())) return;
+            if (Features.offline()) return; // went offline in the 2 s: the retry isn't spent
             if (!video.equals(currentVideo()) || !retried.add(video)) return;
             bypassVideo = video;
             bypassUntil = System.currentTimeMillis() + BYPASS_MS;

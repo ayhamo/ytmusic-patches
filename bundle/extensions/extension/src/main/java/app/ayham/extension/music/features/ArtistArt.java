@@ -39,6 +39,8 @@ final class ArtistArt {
     private static final String TAG = "AyhamArtistArt";
     private static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     private static final Handler main = new Handler(Looper.getMainLooper());
+    /** Any answer read (the artist page, its hero image): both are a few MB at most. */
+    private static final long MAX_ANSWER_BYTES = 16L * 1024 * 1024;
     /**
      * Looked-up artists, the last few only (each hero image is several MB). Filled by one thread
      * per artist change, so it is synchronized.
@@ -202,7 +204,10 @@ final class ArtistArt {
             }
             if (hit == null && !exact && results.length() > 0) hit = results.getJSONObject(0);
             if (hit == null || hit.optString("artistLinkUrl").isEmpty()) return null;
-            String html = get(hit.getString("artistLinkUrl").split("\\?")[0]);
+            String page = hit.getString("artistLinkUrl").split("\\?")[0];
+            // only Apple's own pages, over https (canvas.md §4 rule 6's idea)
+            if (!ArtistHeader.trusted(page, null)) return null;
+            String html = get(page);
             int marker = html.indexOf("id=\"serialized-server-data\"");
             if (marker < 0) return null;
             int start = html.indexOf('>', marker) + 1;
@@ -218,9 +223,11 @@ final class ArtistArt {
             art.accent = color(heroArt.optString("textColor1"), 0xFFFA2D48);
             String template = heroArt.optString("url");
             int w = heroArt.optInt("width"), h = heroArt.optInt("height");
-            if (template.contains("{w}") && w > 0 && h > 0) {
-                art.heroUrl = template.replace("{w}", "1200").replace("{h}", String.valueOf(Math.round(1200f * h / w)))
-                        .replace("{c}", "bb").replace("{f}", "jpg");
+            String heroUrl = template.replace("{w}", "1200").replace("{h}", String.valueOf(w > 0 ? Math.round(1200f * h / w) : 0))
+                    .replace("{c}", "bb").replace("{f}", "jpg");
+            // an image off Apple's hosts is not fetched: the palette still applies
+            if (template.contains("{w}") && w > 0 && h > 0 && ArtistHeader.trusted(heroUrl, null)) {
+                art.heroUrl = heroUrl;
                 byte[] img = bytes(art.heroUrl);
                 art.bitmap = BitmapFactory.decodeByteArray(img, 0, img.length);
             }
@@ -270,8 +277,7 @@ final class ArtistArt {
         c.setReadTimeout(8000);
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[16384];
-            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+            HlsClip.capped(in, out, MAX_ANSWER_BYTES);
             return out.toByteArray();
         } finally {
             c.disconnect();

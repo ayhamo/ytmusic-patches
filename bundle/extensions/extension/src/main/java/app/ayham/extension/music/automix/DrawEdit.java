@@ -107,6 +107,9 @@ public final class DrawEdit {
         MixOverride.Drawing c = new MixOverride.Drawing(d.unit);
         for (Map.Entry<String, double[][]> e : d.out.entrySet()) c.out.put(e.getKey(), deepCopy(e.getValue()));
         for (Map.Entry<String, double[][]> e : d.in.entrySet()) c.in.put(e.getKey(), deepCopy(e.getValue()));
+        // editor.md §12 rule 6: a drawing keeps the time it came with
+        c.echoBeats = d.echoBeats;
+        c.delayBeats = d.delayBeats;
         return c;
     }
 

@@ -63,14 +63,15 @@ public final class PlayerTap {
 
     /** Injection point: end of every constructor of YT's ExoPlayer class. */
     public static void capturePlayer(Object player) {
+        boolean first;
         synchronized (players) {
             players.add(new WeakReference<>(player));
+            // one poll loop, even when two players are built at once on different threads
+            first = !started;
+            started = true;
         }
         Log.i(TAG, "stats: player captured " + player.getClass().getName() + "@" + System.identityHashCode(player));
-        if (!started) {
-            started = true;
-            main.postDelayed(PlayerTap::poll, 2000);
-        }
+        if (first) main.postDelayed(PlayerTap::poll, 2000);
     }
 
     private static void poll() {

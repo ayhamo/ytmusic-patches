@@ -5,6 +5,7 @@ import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -24,6 +25,12 @@ final class HlsClip {
     private static final double MAX_SECONDS = 40;
     private static final int MAX_HEIGHT = 1080;
     private static final long CACHE_BYTES = 80L * 1024 * 1024;
+    /** A master or media playlist is a few KB; past this it is not one. */
+    static final long MAX_PLAYLIST_BYTES = 2L * 1024 * 1024;
+    /** One clip's download (init and segments): 40 s even at 4K is well under this; it stops an endless stream. */
+    static final long MAX_CLIP_BYTES = 256L * 1024 * 1024;
+    /** Segments in one clip: Apple's are seconds long, so 40 s is a few dozen. */
+    static final int MAX_SEGMENTS = 500;
 
     private HlsClip() {
     }
@@ -41,6 +48,11 @@ final class HlsClip {
     /** Apple's animated cover at the listener's quality (canvas.md §13 rule 5): cap null is Original. */
     static File fetch(String masterUrl, File cacheDir, int artPx, Integer cap) throws Exception {
         return fetch(masterUrl, cacheDir, artPx, true, cap, true);
+    }
+
+    /** As above; trim false for the downloaded songs' clips (kept in the app's files, no size cap). */
+    static File fetch(String masterUrl, File cacheDir, int artPx, boolean trim, Integer cap) throws Exception {
+        return fetch(masterUrl, cacheDir, artPx, trim, cap, true);
     }
 
     private static File fetch(String masterUrl, File cacheDir, int artPx, boolean trim, Integer cap, boolean byCap) throws Exception {
@@ -71,7 +83,7 @@ final class HlsClip {
         boolean whole = false;
         try (OutputStream o = new FileOutputStream(tmp)) {
             Matcher map = Pattern.compile("#EXT-X-MAP:URI=\"([^\"]+)\"(?:,BYTERANGE=\"(\\d+)@(\\d+)\")?").matcher(playlist);
-            if (map.find()) bytes += copy(resolve(media, map.group(1)), map.group(2), map.group(3), o);
+            if (map.find()) bytes += copy(resolve(media, map.group(1)), map.group(2), map.group(3), o, MAX_CLIP_BYTES);
             String range = null;
             double duration = 0;
             long nextOffset = 0;
@@ -79,6 +91,8 @@ final class HlsClip {
                 line = line.trim();
                 if (line.startsWith("#EXTINF:")) {
                     duration = Double.parseDouble(line.substring(8).split(",")[0]);
+                    // a duration that never adds up would never reach MAX_SECONDS
+                    if (!(duration > 0) || Double.isInfinite(duration)) throw new IOException("bad segment duration");
                 } else if (line.startsWith("#EXT-X-BYTERANGE:")) {
                     range = line.substring(17);
                 } else if (!line.isEmpty() && !line.startsWith("#")) {
@@ -89,7 +103,8 @@ final class HlsClip {
                         off = r.length > 1 ? r[1] : String.valueOf(nextOffset);
                         nextOffset = Long.parseLong(off) + Long.parseLong(len);
                     }
-                    bytes += copy(resolve(media, line), len, off, o);
+                    if (segments >= MAX_SEGMENTS) throw new IOException("over " + MAX_SEGMENTS + " segments");
+                    bytes += copy(resolve(media, line), len, off, o, MAX_CLIP_BYTES - bytes);
                     range = null;
                     segments++;
                     seconds += duration;
@@ -144,7 +159,7 @@ final class HlsClip {
     }
 
     /** The H.264 variant with the fewest pixels at or above `want` lines (else the largest under it); any variant if none says avc1. */
-    private static String pickVariant(String base, String master, int want) {
+    static String pickVariant(String base, String master, int want) {
         String[] lines = master.split("\n");
         String best = null, fallback = null;
         long bestPixels = -1, fallbackBw = Long.MAX_VALUE;
@@ -153,6 +168,8 @@ final class HlsClip {
             if (!lines[i].startsWith("#EXT-X-STREAM-INF:")) continue;
             String attrs = lines[i];
             String uri = lines[i + 1].trim();
+            // a variant off Apple's media hosts (or not https) is never fetched
+            if (!ArtistHeader.trusted(resolve(base, uri), null)) continue;
             long bw = longAttr(attrs, "BANDWIDTH");
             Matcher res = Pattern.compile("RESOLUTION=(\\d+)x(\\d+)").matcher(attrs);
             long w = 0, h = 0;
@@ -187,14 +204,14 @@ final class HlsClip {
      * canvas.md §13 rule 5: the H.264 variant with the most pixels whose shorter side is at most the
      * cap (ties: the higher bandwidth), else the fewest pixels; only .m3u8 variants count.
      */
-    private static String pickByCap(String base, String master, Integer cap) {
+    static String pickByCap(String base, String master, Integer cap) {
         String[] lines = master.split("\n");
         java.util.List<long[]> vs = new java.util.ArrayList<>();
         java.util.List<String> uris = new java.util.ArrayList<>();
         for (int i = 0; i < lines.length - 1; i++) {
             if (!lines[i].startsWith("#EXT-X-STREAM-INF:")) continue;
             String attrs = lines[i], uri = lines[i + 1].trim();
-            if (!attrs.toLowerCase(Locale.ROOT).contains("avc1") || !uri.contains(".m3u8")) continue;
+            if (!attrs.toLowerCase(Locale.ROOT).contains("avc1") || !ArtistHeader.trusted(resolve(base, uri), ".m3u8")) continue;
             Matcher res = Pattern.compile("RESOLUTION=(\\d+)x(\\d+)").matcher(attrs);
             if (!res.find()) continue;
             vs.add(new long[]{Long.parseLong(res.group(1)), Long.parseLong(res.group(2)), longAttr(attrs, "BANDWIDTH")});
@@ -220,6 +237,8 @@ final class HlsClip {
     }
 
     private static HttpURLConnection open(String url, String len, String off) throws Exception {
+        // master, variant, init and segments alike: https on 443, Apple's media hosts only
+        if (!ArtistHeader.trusted(url, null)) throw new IOException("untrusted clip link");
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(10_000);
         c.setReadTimeout(15_000);
@@ -235,22 +254,31 @@ final class HlsClip {
         return c;
     }
 
-    private static long copy(String url, String len, String off, OutputStream o) throws Exception {
+    private static long copy(String url, String len, String off, OutputStream o, long max) throws Exception {
+        HttpURLConnection c = open(url, len, off);
+        try (InputStream in = c.getInputStream()) {
+            return capped(in, o, max);
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    /** Copies [in] to [o]; more than [max] bytes is an error (an answer that size is not the one asked for). */
+    static long capped(InputStream in, OutputStream o, long max) throws IOException {
         long n = 0;
-        try (InputStream in = open(url, len, off).getInputStream()) {
-            byte[] b = new byte[32768];
-            int r;
-            while ((r = in.read(b)) > 0) {
-                o.write(b, 0, r);
-                n += r;
-            }
+        byte[] b = new byte[32768];
+        int r;
+        while ((r = in.read(b)) > 0) {
+            n += r;
+            if (n > max) throw new IOException("answer over " + max + " bytes");
+            o.write(b, 0, r);
         }
         return n;
     }
 
     private static String text(String url) throws Exception {
         ByteArrayOutputStream buf = new ByteArrayOutputStream();
-        copy(url, null, null, buf);
+        copy(url, null, null, buf, MAX_PLAYLIST_BYTES);
         return buf.toString("UTF-8");
     }
 }

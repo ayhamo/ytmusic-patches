@@ -157,6 +157,14 @@ public class PickCasesTest {
                 }
                 return new Object[]{got, want};
             }});
+            // AddonPrep.playing asks by the copy's kept rank: the same answer
+            out.add(new Object[]{"upgradeWanted by rank: " + c.get("name"), (Check) () -> {
+                Protocol.Stream st = stream(c.get("stream"));
+                String tier = (String) c.get("tier");
+                boolean cached = Boolean.TRUE.equals(c.get("cached"));
+                Pick.Upgrade a = Pick.upgradeWanted(st, tier, cached), b = Pick.upgradeWanted(Pick.qualityRank(st), tier, cached);
+                return new Object[]{b == null ? null : b.aboveOnly + "/" + b.minRank, a == null ? null : a.aboveOnly + "/" + a.minRank};
+            }});
         }
         for (Object o : (List<Object>) doc.get("loudnessGain")) {
             Map<String, Object> c = (Map<String, Object>) o;

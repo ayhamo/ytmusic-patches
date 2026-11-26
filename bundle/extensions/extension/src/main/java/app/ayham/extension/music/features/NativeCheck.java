@@ -1,15 +1,10 @@
 package app.ayham.extension.music.features;
 
-import android.content.ComponentName;
 import android.content.Context;
 import android.media.AudioFormat;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
-import android.media.browse.MediaBrowser;
-import android.media.session.MediaController;
-import android.media.session.MediaSession;
-import android.media.session.PlaybackState;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -17,13 +12,15 @@ import android.util.Log;
 import com.music.bitchord.playback.smart.MelSpectrogram;
 import com.music.bitchord.playback.smart.TrackFeatures;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 
 import ai.onnxruntime.NodeInfo;
@@ -35,20 +32,16 @@ import ai.onnxruntime.OrtSession;
  * Developer check of the native libraries (PLAN.md items 4 and 5). Runs once per process when spike.properties
  * has batchB=1:
  * <ol>
- * <li>next track id from YT's media session queue (through its MediaBrowserService)</li>
+ * <li>next track id from YT's queue (through Morphe's Jam bridge)</li>
  * <li>download it with Morphe's stream resolver and range requests</li>
  * <li>decode to mono float PCM with MediaCodec</li>
  * <li>BitChord's native analyser on it</li>
- * <li>both ONNX models load; Beat This! runs on one chunk of the track</li>
+ * <li>both ONNX models (the APK's assets/automix) load; Beat This! runs on one chunk of the track</li>
  * </ol>
  */
 final class NativeCheck {
     private static final String TAG = "AyhamNativeCheck";
-    private static final String BROWSER_SERVICE =
-            "com.google.android.apps.youtube.music.mediabrowser.MusicBrowserService";
-
     private static boolean started;
-    private static MediaBrowser browser;
 
     private NativeCheck() {
     }
@@ -85,15 +78,16 @@ final class NativeCheck {
             long t1 = System.nanoTime();
             OrtEnvironment env = OrtEnvironment.getEnvironment();
             Log.i(TAG, "ONNX Runtime ready in " + ms(t1) + " ms, version=" + env.getVersion());
-            File models = new File(ctx.getExternalFilesDir(null), "spike/models");
             for (String name : new String[]{"beat_this_final0_q8.onnx", "vocals_umxhq_int8.onnx"}) {
-                File f = new File(models, name);
-                if (!f.exists()) {
-                    Log.w(TAG, "model missing: " + f);
+                byte[] bytes;
+                try {
+                    bytes = model(ctx, name);
+                } catch (IOException e) {
+                    Log.w(TAG, "model missing: assets/automix/" + name, e);
                     continue;
                 }
                 long t2 = System.nanoTime();
-                try (OrtSession session = env.createSession(f.getPath(), new OrtSession.SessionOptions())) {
+                try (OrtSession session = env.createSession(bytes, new OrtSession.SessionOptions())) {
                     StringBuilder sb = new StringBuilder();
                     for (Map.Entry<String, NodeInfo> e : session.getInputInfo().entrySet()) {
                         sb.append(" in ").append(e.getKey()).append('=').append(e.getValue().getInfo());
@@ -109,7 +103,18 @@ final class NativeCheck {
         }
     }
 
-    // ---- Item 5a: next track from the media session queue ----
+    /** A model as NativeLibrariesPatch bundles it (assets/automix), read whole. */
+    private static byte[] model(Context ctx, String name) throws IOException {
+        try (InputStream in = ctx.getAssets().open("automix/" + name)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toByteArray();
+        }
+    }
+
+    // ---- Item 5a: next track from YT's queue ----
 
     /**
      * YT's own queue, through the accessor Morphe's audio/video switch patch adds to it.
@@ -169,53 +174,6 @@ final class NativeCheck {
             });
         } catch (Throwable t) {
             Log.e(TAG, "Morphe queue read failed", t);
-        }
-    }
-
-    private static void findNextTrackViaSession(Context ctx) {
-        try {
-            ComponentName component = new ComponentName(ctx.getPackageName(), BROWSER_SERVICE);
-            browser = new MediaBrowser(ctx, component, new MediaBrowser.ConnectionCallback() {
-                @Override
-                public void onConnected() {
-                    try {
-                        MediaController controller = new MediaController(ctx, browser.getSessionToken());
-                        List<MediaSession.QueueItem> queue = controller.getQueue();
-                        PlaybackState state = controller.getPlaybackState();
-                        long active = state == null ? -1 : state.getActiveQueueItemId();
-                        Log.i(TAG, "session connected: queue=" + (queue == null ? null : queue.size())
-                                + " activeId=" + active + " title="
-                                + (controller.getMetadata() == null ? null
-                                : controller.getMetadata().getDescription().getTitle()));
-                        if (queue == null) return;
-                        String next = null;
-                        for (int i = 0; i < queue.size(); i++) {
-                            MediaSession.QueueItem item = queue.get(i);
-                            if (i < 4) {
-                                Log.i(TAG, "queue[" + i + "] id=" + item.getQueueId() + " mediaId="
-                                        + item.getDescription().getMediaId() + " title="
-                                        + item.getDescription().getTitle());
-                            }
-                            if (item.getQueueId() == active && i + 1 < queue.size()) {
-                                next = queue.get(i + 1).getDescription().getMediaId();
-                            }
-                        }
-                        Log.i(TAG, "session: next track mediaId=" + next);
-                    } catch (Throwable t) {
-                        Log.e(TAG, "queue read failed", t);
-                    } finally {
-                        browser.disconnect();
-                    }
-                }
-
-                @Override
-                public void onConnectionFailed() {
-                    Log.e(TAG, "MediaBrowser connection failed");
-                }
-            }, null);
-            browser.connect();
-        } catch (Throwable t) {
-            Log.e(TAG, "findNextTrack failed", t);
         }
     }
 
@@ -356,123 +314,8 @@ private static float[] decodeMono(File file, int[] rateOut, MediaExtractor extra
         return result;
     }
 
-    /** A decoded stereo stretch of a song. */
-    static final class Region {
-        float[] left, right;
-        int rate;
-        /** Track seconds of sample 0, and the whole song's length. */
-        double start, duration;
-
-        double end() {
-            return start + left.length / (double) rate;
-        }
-    }
-
-    /**
-     * Decodes track seconds [from, to) as planar stereo at the codec's rate. A negative [from]
-     * counts from the song's end (-70 = its last 70 s); only the region is kept in memory.
-     */
-    static Region decodeRegion(File file, double from, double to) throws Exception {
-        MediaExtractor extractor = new MediaExtractor();
-        MediaCodec[] held = new MediaCodec[1];
-        try {
-            return decodeRegion(file, from, to, extractor, held);
-        } finally {
-            release(extractor, held[0]);
-        }
-    }
-
-private static Region decodeRegion(File file, double from, double to, MediaExtractor extractor, MediaCodec[] held) throws Exception {
-        extractor.setDataSource(file.getPath());
-        int track = -1;
-        MediaFormat format = null;
-        for (int i = 0; i < extractor.getTrackCount(); i++) {
-            MediaFormat f = extractor.getTrackFormat(i);
-            if (f.getString(MediaFormat.KEY_MIME).startsWith("audio/")) {
-                track = i;
-                format = f;
-                break;
-            }
-        }
-        if (track < 0) throw new IllegalStateException("no audio track");
-        extractor.selectTrack(track);
-        double duration = format.containsKey(MediaFormat.KEY_DURATION) ? format.getLong(MediaFormat.KEY_DURATION) / 1e6 : -1;
-        if (from < 0) {
-            if (duration <= 0) throw new IllegalStateException("song length unknown");
-            from = Math.max(0, duration + from);
-            to = duration + 1;
-        }
-        MediaCodec codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
-        held[0] = codec;
-        codec.configure(format, null, null, 0);
-        codec.start();
-        int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-        int rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-        boolean floatPcm = false;
-        long first = Math.round(from * rate), last = Math.round(to * rate);
-        float[] l = new float[1 << 18], r = new float[1 << 18];
-        int size = 0;
-        long frame = 0;
-        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        boolean inputDone = false;
-        while (true) {
-            if (!inputDone) {
-                int in = codec.dequeueInputBuffer(10_000);
-                if (in >= 0) {
-                    ByteBuffer buf = codec.getInputBuffer(in);
-                    int n = extractor.readSampleData(buf, 0);
-                    if (n < 0) {
-                        codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                        inputDone = true;
-                    } else {
-                        codec.queueInputBuffer(in, 0, n, extractor.getSampleTime(), 0);
-                        extractor.advance();
-                    }
-                }
-            }
-            int outIndex = codec.dequeueOutputBuffer(info, 10_000);
-            if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                MediaFormat of = codec.getOutputFormat();
-                channels = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-                rate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE);
-                first = Math.round(from * rate);
-                last = Math.round(to * rate);
-                floatPcm = of.containsKey(MediaFormat.KEY_PCM_ENCODING)
-                        && of.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT;
-            } else if (outIndex >= 0) {
-                ByteBuffer buf = codec.getOutputBuffer(outIndex).order(ByteOrder.nativeOrder());
-                buf.position(info.offset).limit(info.offset + info.size);
-                int frames = info.size / (channels * (floatPcm ? 4 : 2));
-                for (int f = 0; f < frames; f++, frame++) {
-                    float a = floatPcm ? buf.getFloat() : buf.getShort() / 32768f;
-                    float b = channels > 1 ? (floatPcm ? buf.getFloat() : buf.getShort() / 32768f) : a;
-                    for (int ch = 2; ch < channels; ch++) {
-                        if (floatPcm) buf.getFloat(); else buf.getShort();
-                    }
-                    if (frame < first || frame >= last) continue;
-                    if (size == l.length) {
-                        l = java.util.Arrays.copyOf(l, size * 2);
-                        r = java.util.Arrays.copyOf(r, size * 2);
-                    }
-                    l[size] = a;
-                    r[size++] = b;
-                }
-                codec.releaseOutputBuffer(outIndex, false);
-                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0 || frame >= last) break;
-            }
-        }
-        Region region = new Region();
-        region.left = java.util.Arrays.copyOf(l, size);
-        region.right = java.util.Arrays.copyOf(r, size);
-        region.rate = rate;
-        region.start = from;
-        region.duration = duration > 0 ? duration : frame / (double) rate;
-        return region;
-    }
-
     private static void runBeatModel(Context ctx, float[] pcm, int rate) {
         try {
-            File model = new File(ctx.getExternalFilesDir(null), "spike/models/beat_this_final0_q8.onnx");
             long t0 = System.nanoTime();
             double melRate = MelSpectrogram.nativeSampleRate();
             int mels = MelSpectrogram.nativeMelCount();
@@ -486,7 +329,8 @@ private static Region decodeRegion(File file, double from, double to, MediaExtra
             System.arraycopy(spectrogram, 0, chunk, 0, chunk.length);
             OrtEnvironment env = OrtEnvironment.getEnvironment();
             long t1 = System.nanoTime();
-            try (OrtSession session = env.createSession(model.getPath(), new OrtSession.SessionOptions());
+            byte[] model = model(ctx, "beat_this_final0_q8.onnx");
+            try (OrtSession session = env.createSession(model, new OrtSession.SessionOptions());
                  OnnxTensor tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(chunk),
                          new long[]{1, length, mels})) {
                 String input = session.getInputNames().iterator().next();

@@ -187,8 +187,9 @@ final class StreamDeck {
         File[] all = d.listFiles();
         if (all == null) return;
         Arrays.sort(all, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+        StreamDeck cur = current;
         for (int i = KEEP_FILES; i < all.length; i++)
-            if (current == null || !all[i].equals(current.file)) //noinspection ResultOfMethodCallIgnored
+            if (cur == null || !all[i].equals(cur.file)) //noinspection ResultOfMethodCallIgnored
                 all[i].delete();
     }
 
@@ -433,6 +434,14 @@ final class StreamDeck {
      * (its rate too). The one that jumps by the 120-180 ms step is the one that moved.
      */
     private void logClocks(double heard, long p, long now) {
+        try {
+            logClocksNow(heard, p, now);
+        } catch (IllegalStateException ignored) {
+            // the deck's thread freed the track meanwhile
+        }
+    }
+
+    private void logClocksNow(double heard, long p, long now) {
         AudioTrack t = track;
         AudioTimestamp ts = new AudioTimestamp();
         boolean got = t != null && t.getTimestamp(ts);
@@ -458,8 +467,13 @@ final class StreamDeck {
         if (t == null || rate == 0) return Double.NaN;
         AudioTimestamp ts = new AudioTimestamp();
         double frame;
-        if (t.getTimestamp(ts)) frame = ts.framePosition + (System.nanoTime() - ts.nanoTime) * rate / 1e9;
-        else frame = t.getPlaybackHeadPosition();
+        try {
+            // the deck's thread may free the track meanwhile (StreamDeck.run)
+            if (t.getTimestamp(ts)) frame = ts.framePosition + (System.nanoTime() - ts.nanoTime) * rate / 1e9;
+            else frame = t.getPlaybackHeadPosition();
+        } catch (IllegalStateException e) {
+            return Double.NaN;
+        }
         synchronized (markLock) {
             if (marks == 0) return Double.NaN;
             int n = Math.min(marks, markFrame.length);
@@ -602,8 +616,8 @@ final class StreamDeck {
                     float l = floatPcm ? fb.get(i * ch) : sb.get(i * ch) / 32768f;
                     float r = ch < 2 ? l : floatPcm ? fb.get(i * ch + 1) : sb.get(i * ch + 1) / 32768f;
                     // held to ±1 before its level, as YT holds a song (a lossy file's overs)
-                    l = Math.max(-1f, Math.min(1f, l));
-                    r = Math.max(-1f, Math.min(1f, r));
+                    l = Float.isFinite(l) ? Math.max(-1f, Math.min(1f, l)) : 0f;
+                    r = Float.isFinite(r) ? Math.max(-1f, Math.min(1f, r)) : 0f;
                     // heard from takeAt, faded out from releaseAt, both in song seconds
                     double g = Double.isNaN(tk) || t < tk ? 0 : Math.min(1, (t - tk) / FADE);
                     if (!Double.isNaN(rl)) g *= Math.max(0, 1 - (t - rl) / FADE);
@@ -634,17 +648,6 @@ final class StreamDeck {
             Log.w(TAG, "stream deck failed", t);
             main.post(() -> handBack("the deck could not play the audio (" + t.getMessage() + ")"));
         } finally {
-            // closed already (or before the track was built): the track is freed here, on its own
-            // thread, never under a write; not closed yet: close() frees it once it comes
-            AudioTrack t = null;
-            synchronized (trackLock) {
-                runEnded = true;
-                if ("closed".equals(state)) {
-                    t = track;
-                    track = null;
-                }
-            }
-            releaseTrack(t);
             ex.release();
             if (codec != null) {
                 try {
@@ -653,8 +656,29 @@ final class StreamDeck {
                 }
                 codec.release();
             }
+            // the track is always freed here, on the deck's own thread, never under a write: once
+            // close() has come (what it holds has played out by then), or after CLOSE_WAIT_MS
+            AudioTrack t;
+            synchronized (trackLock) {
+                runEnded = true;
+                long until = SystemClock.elapsedRealtime() + CLOSE_WAIT_MS;
+                long left;
+                while (!"closed".equals(state) && (left = until - SystemClock.elapsedRealtime()) > 0) {
+                    try {
+                        trackLock.wait(left);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+                t = track;
+                track = null;
+            }
+            releaseTrack(t);
         }
     }
+
+    /** How long a deck whose decoding has ended waits for close() before it frees its track itself. */
+    private static final long CLOSE_WAIT_MS = 5000;
 
     /** Stops and frees a deck's track, and the preset's equalizer on its session. */
     private static void releaseTrack(AudioTrack t) {
@@ -670,17 +694,11 @@ final class StreamDeck {
 
     private void close() {
         String was = state;
-        AudioTrack t = null;
         synchronized (trackLock) {
             state = "closed";
-            // the writer may be in track.write() now: it sees "closed", leaves its loop and frees the
-            // track itself; only a writer already gone leaves it to us
-            if (runEnded) {
-                t = track;
-                track = null;
-            }
+            // the writer leaves its loop on "closed" and frees the track itself, on its thread
+            trackLock.notifyAll();
         }
-        releaseTrack(t);
         if (!"released".equals(was) && !"handed-back".equals(was) && current == this) current = null;
     }
 }

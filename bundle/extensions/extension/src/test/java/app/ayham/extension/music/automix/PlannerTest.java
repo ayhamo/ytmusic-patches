@@ -35,6 +35,37 @@ public class PlannerTest {
         return Planner.plan(s, "a", "b", from, to, from == null ? 200 : from.durationSec, pos, pos + EARLIEST_LEAD, null);
     }
 
+    /**
+     * spotify-mixes.md rule 10: B stays at speedIn through the mix, so tempos too far apart at
+     * playlist speeds get no echo out (a blend at x1); BitChord audit 1a #1.
+     */
+    @Test
+    public void noEchoOutAtPlaylistSpeeds() {
+        Planner.Settings s = new Planner.Settings();
+        s.version = 3;
+        // a filter mix the last two times: the echo out is next in line
+        Planner.forgetMoves();
+        Planner.heard("filter");
+        Planner.heard("filter");
+        int echoes = 0;
+        try {
+            for (double bpm = 60; bpm <= 200; bpm += 3) {
+                Analysis a = song("a", 124, 200, 0.9), b = song("b", bpm, 180, 0.9);
+                Planner.Plan x1 = Planner.plan(s, "a", "b", a, b, 200, 60, 60 + EARLIEST_LEAD, null, null, 1, 1);
+                if (!"echo".equals(x1.shape)) continue;
+                echoes++;
+                Planner.Plan sp = Planner.plan(s, "a", "b", a, b, 200, 60, 60 + EARLIEST_LEAD, null, null, 0.97, 1.03);
+                assertFalse(bpm + " bpm: " + sp.reason, "echo".equals(sp.shape));
+                if (!"blend".equals(sp.style)) assertEquals(1.03, sp.rate, 1e-9);
+                // the hand-over says why (spotify-mixes.md rule 10's wording, as automix.js)
+                if (sp.handoff) assertTrue(sp.reason, sp.reason.contains("and no filter mix (no echo out at a playlist speed) fits"));
+            }
+        } finally {
+            Planner.forgetMoves();
+        }
+        assertTrue("an echo out to test against", echoes > 0);
+    }
+
     @Test
     public void sameTempoBlendEndsOnTheBarGridBeforeTheEnd() {
         Planner.Plan p = plan(new Planner.Settings(), song("a", 120, 200, 0.9), song("b", 120, 180, 0.9), 60);
@@ -207,6 +238,20 @@ public class PlannerTest {
         }
         for (String t : new String[]{"Ey, ey", "Si no e' contigo, amor", "Yo no quiero a nadie má' (Má')", "Music is my life",
                 "Written in the stars", "Producer of my dreams", "Letra de amor", "曲终人散"}) {
+            assertFalse(t, Planner.creditLine(t, title, artist));
+        }
+    }
+
+    /** versions.md "The loop mix's baseline" rule 6: every credit word, "prod. " alone, titles without accents. */
+    @Test
+    public void creditLinesFollowTheBaselineWords() {
+        String title = "Música Ligera", artist = "Soda Stéreo";
+        for (String t : new String[]{"母帶: x", "和聲：y", "錄音: z", "出品: a", "发行: b", "發行: c", "Música: d", "Compositores: e",
+                "Autor: f", "Autores - g", "Lyric: h", "Writers: i", "Composition: j", "Arranger: k", "Mixing: l",
+                "Engineered by m", "Prod. Metro Boomin", "PROD. Tainy", "Musica ligera", "soda stereo", "Soda Stereo - Musica Ligera"}) {
+            assertTrue(t, Planner.creditLine(t, title, artist));
+        }
+        for (String t : new String[]{"Prod Metro", "Mixing it up tonight", "Autoridad: total", "Productor de sueños", "Música en la piel"}) {
             assertFalse(t, Planner.creditLine(t, title, artist));
         }
     }

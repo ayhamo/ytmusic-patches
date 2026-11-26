@@ -145,7 +145,7 @@ public class BeatGridTest {
         assertTrue(BeatGrid.camelot("A minor", a));
         assertEquals(8, a.camelotNum);
         assertEquals('A', a.camelotLetter);
-        // KeyStrength spells keys with the real sharp and flat signs
+        // keys spelled with the real sharp and flat signs (the native analyser, older saved analyses)
         assertTrue(BeatGrid.camelot("E♭ minor", a));
         assertEquals(2, a.camelotNum);
         assertTrue(BeatGrid.camelot("F♯ major", a));

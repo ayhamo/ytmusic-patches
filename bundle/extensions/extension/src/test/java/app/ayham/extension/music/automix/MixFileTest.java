@@ -45,7 +45,8 @@ public class MixFileTest {
     @SuppressWarnings("unchecked")
     public void theReadyMadeMixesRoundTrip() throws Exception {
         List<File> files = readyMade();
-        Assume.assumeFalse("no ready-made mixes found", files.isEmpty());
+        // spec/automix/mixes/ is in the repo: none found is a wrong folder, not a skip
+        assertTrue("no ready-made mixes found", !files.isEmpty());
         for (File f : files) {
             String text = read(f);
             MixFile.Read r = MixFile.read(text);
@@ -309,13 +310,15 @@ public class MixFileTest {
     /**
      * Spotify mix exports (spotify-mixes.md) read as the PC reads them: every override, skip, queue
      * entry and note the same as automix.js readMixFile's, written by a node run of it beside each
-     * export (AYHAM_SPOTIFY_DIR: the exports; AYHAM_SPOTIFY_PC_DIR: the PC's reading of each).
+     * export. AYHAM_SPOTIFY_DIR: the exports (D:\Programs\Projects\YT Clients\research\spotify-mixes);
+     * AYHAM_SPOTIFY_PC_DIR: the PC's reading of each, by default its pc-readmixfile folder.
      */
     @Test
     @SuppressWarnings("unchecked")
     public void spotifyExportsReadAsThePcReadsThem() throws Exception {
         String dir = System.getenv("AYHAM_SPOTIFY_DIR"), pc = System.getenv("AYHAM_SPOTIFY_PC_DIR");
-        Assume.assumeTrue("no Spotify exports here", dir != null && pc != null && new File(dir).isDirectory());
+        Assume.assumeTrue("no Spotify exports here", dir != null && new File(dir).isDirectory());
+        if (pc == null) pc = new File(dir, "pc-readmixfile").getPath();
         // mixes, queue, mixes with a Looping lane, mixes with a speed
         Map<String, int[]> want = new HashMap<>();
         want.put("budget-dj-mix.json", new int[]{133, 134, 7, 7});

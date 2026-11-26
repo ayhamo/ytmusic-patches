@@ -205,8 +205,8 @@ final class ArtistHeader {
         c.setReadTimeout(15_000);
         try (InputStream in = c.getInputStream()) {
             java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
-            byte[] buf = new byte[16384];
-            for (int n; (n = in.read(buf)) > 0; ) b.write(buf, 0, n);
+            // the iTunes search answer (200 artists at most): a few hundred KB
+            HlsClip.capped(in, b, 8L * 1024 * 1024);
             return b.toString("UTF-8");
         } finally {
             c.disconnect();

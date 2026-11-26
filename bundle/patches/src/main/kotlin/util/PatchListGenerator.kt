@@ -14,25 +14,27 @@ import java.net.URLClassLoader
 import java.util.jar.Manifest
 
 fun main() {
+    // the newest bundle: an older .mpp left in build/libs/ by an earlier build is not the one just built
     val patchFiles = setOf(
         File("build/libs/").listFiles { file ->
             val fileName = file.name
             !fileName.contains("javadoc") &&
                     !fileName.contains("sources") &&
                     fileName.endsWith(".mpp")
-        }!!.first()
+        }?.maxByOrNull { it.lastModified() } ?: error("no .mpp in build/libs/")
     )
     val loadedPatches = loadPatchesFromJar(patchFiles)
-    val patchClassLoader = URLClassLoader(patchFiles.map { it.toURI().toURL() }.toTypedArray())
-    val manifest = patchClassLoader.getResources("META-INF/MANIFEST.MF")
+    URLClassLoader(patchFiles.map { it.toURI().toURL() }.toTypedArray()).use { patchClassLoader ->
+        val manifest = patchClassLoader.getResources("META-INF/MANIFEST.MF")
 
-    while (manifest.hasMoreElements()) {
-        Manifest(manifest.nextElement().openStream())
-            .mainAttributes
-            .getValue("Version")
-            ?.let {
-                generatePatchList(it, loadedPatches)
-            }
+        while (manifest.hasMoreElements()) {
+            manifest.nextElement().openStream().use { Manifest(it) }
+                .mainAttributes
+                .getValue("Version")
+                ?.let {
+                    generatePatchList(it, loadedPatches)
+                }
+        }
     }
 }
 

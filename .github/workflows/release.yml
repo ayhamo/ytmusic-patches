@@ -25,7 +25,12 @@ permissions:
 concurrency: release
 
 jobs:
+  # the same tests as every push (unit, Python, spec/), on this commit: no release from a failing one
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   release:
+    needs: tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

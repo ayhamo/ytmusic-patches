@@ -84,7 +84,9 @@ final class SpotifyMixes {
                 continue;
             }
             // (a mix of a millisecond with no start: Spotify's straight cut, its No transition, rule 3)
-            if (!(num(m.get("durationMs")) >= 100) && !Double.isFinite(num(m.get("fromStartMs")))) {
+            // (no durationMs at all is no valid timing, rule 7)
+            double dur = num(m.get("durationMs"));
+            if (Double.isFinite(dur) && dur < 100 && !Double.isFinite(num(m.get("fromStartMs")))) {
                 Map<String, Object> none = new LinkedHashMap<>();
                 none.put("v", 1);
                 none.put("preset", "none");
@@ -186,13 +188,17 @@ final class SpotifyMixes {
                 Map<String, Object> s = (Map<String, Object>) so;
                 List<double[]> P = new ArrayList<>();
                 if (s.get("points") instanceof List) {
+                    // a point that isn't two numbers is left out (a malformed file never throws)
                     for (Object p : (List<Object>) s.get("points")) {
-                        List<Object> q = (List<Object>) p;
-                        P.add(new double[]{num(q.get(0)), num(q.get(1))});
+                        if (!(p instanceof List) || ((List<?>) p).size() < 2) continue;
+                        List<?> q = (List<?>) p;
+                        double px = num(q.get(0)), py = num(q.get(1));
+                        if (Double.isFinite(px) && Double.isFinite(py)) P.add(new double[]{px, py});
                     }
                 }
                 if (P.size() < 2) continue;
                 double start = num(s.get("start")), end = num(s.get("end"));
+                if (!Double.isFinite(start) || !Double.isFinite(end)) continue;
                 java.util.function.DoubleUnaryOperator at = px -> (start + px * (end - start)) * N;
                 if (P.size() == 4) {
                     for (int k = 0; k <= 8; k++) {
@@ -366,6 +372,8 @@ final class SpotifyMixes {
             Map<String, Object> ff = sub(cf, "from"), ft = sub(cf, "to");
             if (ff != null && truthy(ff.get("resonance")) || ft != null && truthy(ft.get("resonance"))) lost.notCarried.add("filter resonance");
         }
+        // rule 6: no jogwheel lane here (a style or a curve), named in the summary
+        if (truthy(st.get("jogwheel")) || truthy(c.get("jogwheel"))) lost.notCarried.add("jogwheel");
         Map<String, Object> cx = sub(c, "fx");
         if (cx != null) {
             Map<String, Object> base = shape("fx", (String) lanes.get("fx"), D, N, unit);

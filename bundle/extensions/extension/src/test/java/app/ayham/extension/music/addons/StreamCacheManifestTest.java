@@ -1,6 +1,8 @@
 package app.ayham.extension.music.addons;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -42,6 +44,33 @@ public class StreamCacheManifestTest {
         assertTrue(StreamCache.isManifest(null, "application/dash+xml"));
         assertFalse(StreamCache.isManifest(b("<!-- a comment --><html>"), null));
         assertFalse(StreamCache.isManifest(b("<mpdx>"), null));
+    }
+
+    @Test
+    public void anMpdAfterADoctypeIsAManifest() {
+        assertTrue(StreamCache.isManifest(b("<!DOCTYPE MPD>\n<MPD>"), null));
+        assertTrue(StreamCache.isManifest(b("<?xml version=\"1.0\"?>\n<!doctype mpd SYSTEM \"x.dtd\"><!-- c --><mpd xmlns=\"urn:mpeg:dash:schema:mpd:2011\">"), null));
+        assertFalse(StreamCache.isManifest(b("<!DOCTYPE html><html>"), null));
+    }
+
+    @Test
+    public void aContentRangeIsReadWhole() {
+        assertArrayEquals(new long[]{0, 5_000_000}, StreamCache.contentRange("bytes 0-1048575/5000000"));
+        assertArrayEquals(new long[]{1_048_576, 5_000_000}, StreamCache.contentRange(" bytes 1048576-2097151/5000000 "));
+        assertArrayEquals(new long[]{1_048_576, -1}, StreamCache.contentRange("bytes 1048576-2097151/*"));
+        assertArrayEquals(new long[]{1_048_576, 1_048_600}, StreamCache.contentRange("bytes 1048576-1048599/1048600"));
+    }
+
+    @Test
+    public void aContentRangeThatDoesntAddUpIsUnreadable() {
+        assertNull(StreamCache.contentRange(null));
+        assertNull(StreamCache.contentRange(""));
+        assertNull(StreamCache.contentRange("bytes */100"));            // a 416's form
+        assertNull(StreamCache.contentRange("bytes 0-100/100"));        // the end past the total
+        assertNull(StreamCache.contentRange("bytes 200-100/1000"));     // the end before the start
+        assertNull(StreamCache.contentRange("bytes 0-100"));
+        assertNull(StreamCache.contentRange("bytes 0-1/99999999999999999999"));
+        assertNull(StreamCache.contentRange("items 0-1/2"));
     }
 
     @Test

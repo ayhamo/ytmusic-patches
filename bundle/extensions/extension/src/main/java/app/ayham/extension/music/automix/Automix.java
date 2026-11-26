@@ -1,5 +1,7 @@
 package app.ayham.extension.music.automix;
 
+import app.ayham.extension.music.addons.AddonPrep;
+import app.ayham.extension.music.addons.AddonSettings;
 import app.ayham.extension.music.features.Features;
 import app.ayham.extension.music.features.MusicVideoType;
 import android.app.Activity;
@@ -445,6 +447,8 @@ public final class Automix {
         String noLoopWhy;
         /** The loop mix chosen for this song, or null (a blend or crossfade). */
         Planner.LoopPlan loop;
+        /** A mix that couldn't be built: not tried again before this (elapsedRealtime ms). */
+        long buildRetryAt;
 
         Song(String id) {
             this.id = id;
@@ -584,6 +588,8 @@ public final class Automix {
         if (!loop && (p.fallback || next == null)) return;   // Morphe's crossfade, as the extension's plain one
         if (!loop && !(p.durationSec >= 1)) return;
         if (pos < takeover - TAIL_LEAD || (loopPending && pos < takeover - 8)) return;
+        // a mix that couldn't be built (decoded audio not there yet): tried again after a pause
+        if (SystemClock.elapsedRealtime() < amx.buildRetryAt) return;
 
         amx.state = "building";
         Song me = amx;
@@ -599,8 +605,13 @@ public final class Automix {
                 }
                 long at = position(outPlayer);
                 if (built == null) {
-                    me.state = "done";
-                    Log.w(TAG, "no mix for this pair; Morphe's crossfade instead");
+                    // not "done": that read as going back before the mix, and it was planned and
+                    // built again every tick (phone, 2026-11-26: 25 times in 6 s after a restart,
+                    // while YT's decoded audio was being restored)
+                    me.state = "idle";
+                    boolean offline = Features.offline();
+                    me.buildRetryAt = SystemClock.elapsedRealtime() + (offline ? 30_000 : 5000);
+                    Log.w(TAG, "no mix for this pair yet; Morphe's crossfade unless it builds in time (trying again in " + (offline ? "30 s" : "5 s") + ")");
                 } else if (at >= 0 && at < Math.round((mix.takeoverSong - 0.8) * 1000)) {
                     me.state = "armed";
                     engine = built;
@@ -666,6 +677,8 @@ public final class Automix {
         if (e == null || !e.running() || !e.askedNext() || e.handedOver()) return -1;
         double t = e.mixNow();
         if (Double.isNaN(t)) return -1;
+        // a late entry (mix-file.md rule 2): B is silent and not started until its entry
+        if (e.m.inStart > 0 && t < e.m.inStart) return -1;
         double s = e.m.in.trackAt(t);
         return s >= 0 ? Math.round(s * 1000) : -1;
     }
@@ -878,7 +891,7 @@ public final class Automix {
             o.outEnd = fa != null ? Planner.musicEnd(fa).durationSec : Double.NaN;
         }
         if (!live) {
-            // editor.md §11: one row, this song before the next; analysis only, hidden during a live mix
+            // editor.md §11: one row, this song before the next, then this song's addon copy (rule 6); hidden during a live mix
             String[] ids = {o.fromId, o.toId}, names = {"this song", "the next song"};
             for (int k = 0; k < 2 && o.waiting == null; k++) {
                 Object[] pr = Analyzer.progress(ids[k]);
@@ -894,6 +907,12 @@ public final class Automix {
                     o.waitNoBar = true;
                 } else continue;
                 o.waitingFor = ids[k];
+            }
+            // rule 6: this song's addon copy, after the analysis lines; never the next song's
+            if (o.waiting == null && o.fromId.equals(id) && AddonSettings.on()) {
+                o.waiting = addonStage(AddonPrep.stageOf(id), AddonDirect.switching(id),
+                        AddonPrep.losslessCopy(id));
+                if (o.waiting != null) o.waitDone = -1;
             }
             if (o.waiting == null && o.fromId.equals(id) && amx.loopPending) {
                 o.waiting = "Looking for a loop mix";
@@ -1257,22 +1276,47 @@ public final class Automix {
      */
     private static String hold() {
         try {
-            java.lang.reflect.Field f = Class.forName("app.morphe.extension.music.patches.CrossfadePatch").getDeclaredField("sleepTimerEndOfTrack");
+            java.lang.reflect.Field f = Class.forName(MORPHE_CROSSFADE).getDeclaredField("sleepTimerEndOfTrack");
             f.setAccessible(true);
             if (f.getBoolean(null)) return "the sleep timer stops at the end of this song";
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            missing("CrossfadePatch.sleepTimerEndOfTrack", t);
         }
-        try {
-            Object setting = Class.forName("app.morphe.extension.music.settings.Settings").getField("PLAYBACK_SPEED").get(null);
-            int pct = ((Number) setting.getClass().getMethod("get").invoke(setting)).intValue();
-            if (pct != 100) return String.format(Locale.US, "playback speed x%.2f (mixes are planned at x1)", pct / 100f);
-        } catch (Throwable ignored) {
-        }
+        int pct = morpheSpeedPct();
+        if (pct != 100) return String.format(Locale.US, "playback speed x%.2f (mixes are planned at x1)", pct / 100f);
         return null;
+    }
+
+    /** Morphe targets read by reflection that this Morphe lacks: each logged once. */
+    private static final java.util.Set<String> missingLogged = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /** A Morphe class or field automix reads is missing (renamed in a new Morphe): logged once, its fallback used. */
+    private static void missing(String what, Throwable t) {
+        if (missingLogged.add(what)) Log.w(TAG, "Morphe's " + what + " can't be read (" + t + "): automix goes on without it");
     }
 
     // ---------------------------------------------------------------------------------------------
     // each song's playlist speed (spotify-mixes.md rule 10)
+
+    /**
+     * The progress row's addon line (editor.md §11 rule 6), without its ellipsis (the row adds it to
+     * an indeterminate bar), or null. [prep]: AddonPrep.stageOf; [switching]: our player started and
+     * not heard yet; [lossless]: the copy it switches to.
+     */
+    static String addonStage(String[] prep, boolean switching, boolean lossless) {
+        if (prep != null) {
+            String copy = "lossless".equals(prep[1]) ? "the lossless copy" : "the addon's copy";
+            switch (prep[0]) {
+                case AddonPrep.FETCHING:
+                    return "Getting " + copy;
+                case AddonPrep.FITTING:
+                    return "Lining up " + copy + " with YouTube's";
+                default:
+                    return "Asking your addons";
+            }
+        }
+        return switching ? "Switching to " + (lossless ? "the lossless copy" : "the addon's copy") : null;
+    }
 
     /** The song the last mix brought in, and the one it came from. */
     private static volatile String cameId = "", cameFrom = "";
@@ -1310,6 +1354,7 @@ public final class Automix {
             Object setting = Class.forName("app.morphe.extension.music.settings.Settings").getField("PLAYBACK_SPEED").get(null);
             return ((Number) setting.getClass().getMethod("get").invoke(setting)).intValue();
         } catch (Throwable t) {
+            missing("Settings.PLAYBACK_SPEED", t);
             return 100;
         }
     }
@@ -1320,6 +1365,7 @@ public final class Automix {
             f.setAccessible(true);
             return f.getBoolean(null);
         } catch (Throwable t) {
+            missing("CrossfadePatch.repeatSingleActive", t);
             return false;
         }
     }
@@ -1336,12 +1382,14 @@ public final class Automix {
     /** YT's player from silent to full over [sec] (through the gate, which lets it pass). */
     static void rampVolume(Object player, double sec) {
         long t0 = SystemClock.elapsedRealtime();
+        // about 6 steps for a short rise (30 ms: 5 ms apart), never under 5 ms or over 30 ms apart
+        long tick = Math.max(5L, Math.min(30L, Math.round(sec * 1000 / 6)));
         main.post(new Runnable() {
             @Override
             public void run() {
                 double f = Math.min(1, (SystemClock.elapsedRealtime() - t0) / (sec * 1000));
                 Engine.setVolume(player, (float) Math.sin(f * Math.PI / 2) * Engine.ytVolume(player));
-                if (f < 1) main.postDelayed(this, 30);
+                if (f < 1) main.postDelayed(this, tick);
             }
         });
     }

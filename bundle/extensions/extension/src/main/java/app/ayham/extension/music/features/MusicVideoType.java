@@ -88,9 +88,8 @@ public final class MusicVideoType {
     private static String readType(HttpURLConnection c) throws Exception {
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] b = new byte[16384];
-            int n;
-            while ((n = in.read(b)) > 0) buf.write(b, 0, n);
+            // a player answer is a few hundred KB
+            HlsClip.capped(in, buf, 16L * 1024 * 1024);
             JSONObject details = new JSONObject(buf.toString("UTF-8")).optJSONObject("videoDetails");
             return details == null ? "" : details.optString("musicVideoType", "");
         }

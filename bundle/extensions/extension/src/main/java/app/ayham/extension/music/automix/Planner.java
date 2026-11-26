@@ -1,5 +1,6 @@
 package app.ayham.extension.music.automix;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -345,7 +346,8 @@ public final class Planner {
             p.speedOut = sp[0];
             p.speedIn = sp[1];
             // (a filter mix or fade: B at its speed, and A on at its own on our deck)
-            if (!"blend".equals(p.style)) {
+            // (an echo out is a blend in name only: no beat match, each song at its own speed)
+            if (!"blend".equals(p.style) || "echo".equals(p.shape)) {
                 p.rate = sp[1];
                 p.outRate = sp[0];
             }
@@ -551,7 +553,7 @@ public final class Planner {
         // is the user's choice: the style gates warn instead)
         if (v3 && stretchOf(played) > V2_MAX_STRETCH) {
             String why = "tempos " + Math.round(stretchOf(played) * 100) + "% apart (v2 stretches at most " + Math.round(V2_MAX_STRETCH * 100) + "%)";
-            if (!forced && (pick == null || pick.bars == 0)) return unmatchedMix(s, cur, next, fromGrid, toGrid, pos, earliest, why, sung);
+            if (!forced && (pick == null || pick.bars == 0)) return unmatchedMix(s, cur, next, fromGrid, toGrid, pos, earliest, why, sung, spOut != 1 || spIn != 1);
             // the user's preset, length or window: played as asked without beat match (editor.md §6)
             warnings.add(why + ": plays without beat match");
             return overlap(cur, next, fromGrid, pick, earliest, why, warnings);
@@ -1217,10 +1219,19 @@ public final class Planner {
         return -0.691 + 10 * Math.log10(x + 1e-30);
     }
 
+    /** The whole song's loudness (regionLoudness over it), once per curve and length: the trim reads it every tick. */
+    static double wholeLoudness(Analysis a) {
+        if (a == null || a.loudnessCurve == null) return regionLoudness(a, 0, a == null ? 0 : a.durationSec);
+        List<Object> key = Arrays.asList(a.loudnessCurve, a.durationSec);
+        Double hit = WHOLE_LOUDNESS.get(key);
+        if (hit == null) WHOLE_LOUDNESS.put(key, hit = regionLoudness(a, 0, a.durationSec));
+        return hit;
+    }
+
     /** Each region against its whole song; more than 1 dB apart, the louder side is trimmed (at most 6 dB). */
     static Trim loudnessTrim(Analysis cur, double outFrom, double outDur, Analysis next, double inFrom, double inDur) {
         double o = regionLoudness(cur, outFrom, outDur), i = regionLoudness(next, inFrom, inDur);
-        double ow = regionLoudness(cur, 0, cur.durationSec), iw = regionLoudness(next, 0, next.durationSec);
+        double ow = wholeLoudness(cur), iw = wholeLoudness(next);
         if (Double.isNaN(o) || Double.isNaN(i) || Double.isNaN(ow) || Double.isNaN(iw)) return null;
         double diff = (o - ow) - (i - iw);
         if (Math.abs(diff) <= TRIM_TOLERANCE_DB) return new Trim(r1(diff), 0, 0);
@@ -1275,6 +1286,8 @@ public final class Planner {
     private static final class Cand {
         final String kind;
         final double sec, end, conf, stab;
+        /** 1 - its sung risk over the 1.5 s before its end (0.35: unknown). */
+        double clean;
 
         Cand(String kind, double sec, double end, double conf, double stab) {
             this.kind = kind;
@@ -1291,10 +1304,40 @@ public final class Planner {
      * does; null when none fits (the natural point then).
      */
     static Anchor anchoredMixOut(Analysis cur, Grid g, double span, double lo, double[][] sung) {
+        // the song's walks once per song, grid, span and spans (they don't move with lo); only lo moves each tick
+        List<Object> key = Arrays.asList(cur.loudnessCurve, cur.bassCurve, cur.vocals, cur.durationSec, cur.contentEndSec,
+                cur.gridConfidence, g.downbeatSec, g.beatSec, g.barSec, g.phraseSec, span, new Deep(sung));
+        AnchorCands ac = ANCHOR_CANDS.get(key);
+        if (ac == null) ANCHOR_CANDS.put(key, ac = anchorCands(cur, g, span, sung));
+        if (ac.cands == null) return null;
+        Anchor best = null;
+        for (Cand c : ac.cands) {
+            double start = c.end - span, cut = Math.max(0, ac.keepUntil - c.end);
+            if (start < lo - 1e-6 || start < ac.dur / 2 || c.end > ac.audible + 1e-6 || c.end > ac.dur - 0.3 || cut > MAX_DISCARD_SEC) continue;
+            double score = anchorSource(c.kind) / 4 * 0.2 + c.conf * 0.55 + c.stab * 0.15 + c.clean * 0.1 - cut / MAX_DISCARD_SEC * 0.15;
+            if (best == null || score > best.score + 1e-9) {
+                best = new Anchor();
+                best.kind = c.kind;
+                best.sec = Math.round(c.sec * 1000) / 1000.0;
+                best.mixOut = start;
+                best.score = Math.round(score * 1000) / 1000.0;
+            }
+        }
+        return best;
+    }
+
+    /** The anchor search's candidates (null: no curves to search), with what a tick's choice reads. */
+    static final class AnchorCands {
+        List<Cand> cands;
+        double audible, keepUntil, dur;
+    }
+
+    private static AnchorCands anchorCands(Analysis cur, Grid g, double span, double[][] sung) {
+        AnchorCands out = new AnchorCands();
         if (cur.loudnessCurve == null || cur.loudnessCurve.values == null || cur.loudnessCurve.values.length == 0
-                || cur.bassCurve == null || cur.bassCurve.values == null || cur.bassCurve.values.length == 0) return null;
+                || cur.bassCurve == null || cur.bassCurve.values == null || cur.bassCurve.values.length == 0) return out;
         double level = usualLevel(cur);
-        if (!(level > 0)) return null;
+        if (!(level > 0)) return out;
         double dur = cur.durationSec;
         // the audible end: the last half second at a tenth of the usual level, within the music
         double audible = Math.min(musicEnd(cur).durationSec, dur - 0.3);
@@ -1368,24 +1411,16 @@ public final class Planner {
             double stab = steady.applyAsDouble(t - ANCHOR_SIDE_SEC);
             cands.add(new Cand("downbeat", t, t, Math.min(0.6, grid * 0.35 + stab * 0.35 + (1 - V.applyAsDouble(t - 1, t + 1)) * 0.3), stab));
         }
-        // Orchard's score; the blend must fit before the audible end, cut at most 12 s of the music before
-        // the outro (all of it without one), start past half the song
-        Anchor best = null;
+        // what each candidate is, whatever the tick: its sung risk at the hand-over
         for (Cand c : cands) {
-            double start = c.end - span, cut = Math.max(0, keepUntil - c.end);
-            if (start < lo - 1e-6 || start < dur / 2 || c.end > audible + 1e-6 || c.end > dur - 0.3 || cut > MAX_DISCARD_SEC) continue;
             double risk = voiceRisk(cur, c.end - 1.5, c.end, sung);
-            double clean = Double.isNaN(risk) ? 0.35 : 1 - risk;
-            double score = anchorSource(c.kind) / 4 * 0.2 + c.conf * 0.55 + c.stab * 0.15 + clean * 0.1 - cut / MAX_DISCARD_SEC * 0.15;
-            if (best == null || score > best.score + 1e-9) {
-                best = new Anchor();
-                best.kind = c.kind;
-                best.sec = Math.round(c.sec * 1000) / 1000.0;
-                best.mixOut = start;
-                best.score = Math.round(score * 1000) / 1000.0;
-            }
+            c.clean = Double.isNaN(risk) ? 0.35 : 1 - risk;
         }
-        return best;
+        out.cands = cands;
+        out.audible = audible;
+        out.keepUntil = keepUntil;
+        out.dur = dur;
+        return out;
     }
 
     /**
@@ -1393,7 +1428,7 @@ public final class Planner {
      * the beatless bridge, else a filter mix at an anchor, else (both would sing over the filter
      * mix) an echo out at one, else the hand-over.
      */
-    static Plan unmatchedMix(Settings s, Analysis cur, Analysis next, Grid fromGrid, Grid toGrid, double pos, double earliest, String why, Sung sung) {
+    static Plan unmatchedMix(Settings s, Analysis cur, Analysis next, Grid fromGrid, Grid toGrid, double pos, double earliest, String why, Sung sung, boolean speeds) {
         double[] b = new double[3];
         if (beatlessBridge(cur, next, sung, b) == null && b[0] >= earliest) return handoff(cur, next, earliest, why, sung);
         double lo = Math.max(earliest, pos);
@@ -1403,9 +1438,12 @@ public final class Planner {
         if ("filter".equals(f.style) && f.clash <= V2_CLASH_MAX && !"filter".equals(avoid)) return f;
         String sang = !"filter".equals(f.style) ? "" : "filter".equals(avoid) ? ", a filter mix the last two times"
                 : f.clash > V2_CLASH_MAX ? ", both would sing " + Math.round(f.clash * 100) + "% of a filter mix" : "";
-        Plan e = "echo".equals(avoid) ? null : echoOut(cur, next, fromGrid, toGrid, lo, why + sang + ": an echo out (no beat match)", sung);
+        // playlist speeds (spotify-mixes.md rule 10): no echo out, a blend at x1 that would not keep B
+        // at speedIn through the mix (BitChord audit 1a #1)
+        Plan e = "echo".equals(avoid) || speeds ? null : echoOut(cur, next, fromGrid, toGrid, lo, why + sang + ": an echo out (no beat match)", sung);
+        // (the reason as spotify-mixes.md rule 10 and automix.js word it)
         return e != null ? e : handoff(cur, next, earliest, why + sang + ", and no " + ("echo".equals(avoid) ? "third echo out in a row or " : "")
-                + "filter mix or echo out fits", sung);
+                + "filter mix" + (speeds ? " (no echo out at a playlist speed)" : " or echo out") + " fits", sung);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1507,14 +1545,13 @@ public final class Planner {
         }
     }
 
+    // versions.md "The loop mix's baseline" rule 6: a credit word followed by ":", "：", " - " or "by"; or any line opening "prod. "
     private static final Pattern CREDIT = Pattern.compile(
-            "^\\s*[\\[(]?\\s*(作词|作詞|作曲|编曲|編曲|词|詞|曲|制作人|製作人|监制|監製|混音|母带|和声|吉他|贝斯|鼓|录音|"
-                    + "letra|lyrics|lyricist|written|writer|words|music|composer|composed|compositor|"
-                    + "prod\\.?|produced|producer|producers|mixed|mix|mastered|mastering|arranged|arrangement|arreglos|"
-                    + "beat|beats|engineer|engineered|recorded|vocals? by|featuring|feat\\.?|ft\\.)(\\s*(by|por|de)\\b)?\\s*[:：\\-–—]",
+            "^\\s*[\\[(]?\\s*(?:(?:作词|作詞|作曲|编曲|編曲|词|詞|曲|制作人|製作人|监制|監製|混音|母带|母帶|和声|和聲|录音|錄音|出品|发行|發行|"
+                    + "letra|música|compositor(?:es)?|autor(?:es)?|lyrics?|lyricist|written|writers?|words|music|composed|composer|"
+                    + "composition|arranged|arrangement|arranger|produced|producers?|prod\\.?|mixed|mixing|mastered|mastering|recorded|"
+                    + "engineer(?:ed)?)(?:\\s*[:：]|\\s+-\\s|\\s+by\\b)|prod\\.\\s)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern CREDIT_BY = Pattern.compile(
-            "^\\s*[\\[(]?\\s*(lyrics|written|composed|produced|prod\\.?|mixed|mastered|arranged|music|beat)\\s*by\\b", Pattern.CASE_INSENSITIVE);
 
     /**
      * A credit or tag line, not sung: its text is the song's title or artist (or both), a credit
@@ -1527,15 +1564,15 @@ public final class Planner {
         String n = norm(t);
         String ti = norm(title), ar = norm(artist);
         if (!n.isEmpty() && (n.equals(ti) || n.equals(ar) || n.equals(ar + ti) || n.equals(ti + ar))) return true;
-        if (CREDIT.matcher(t).find()) return true;
-        return CREDIT_BY.matcher(t).find();
+        return CREDIT.matcher(t).find();
     }
 
-    /** Letters and digits only, lower case: "Cris MJ - SI NO ES CONTIGO" and "cris mj si no es contigo" compare equal. */
+    /** Letters and digits only, lower case, no accents: "Cris MJ - SI NO ES CONTIGO" and "cris mj si no es contigo" compare equal. */
     private static String norm(String s) {
         if (s == null) return "";
         StringBuilder b = new StringBuilder();
-        s.toLowerCase(Locale.ROOT).codePoints().filter(Character::isLetterOrDigit).forEach(b::appendCodePoint);
+        String plain = Normalizer.normalize(s, Normalizer.Form.NFKD).replaceAll("\\p{M}+", "");
+        plain.toLowerCase(Locale.ROOT).codePoints().filter(Character::isLetterOrDigit).forEach(b::appendCodePoint);
         return b.toString();
     }
 
@@ -1617,6 +1654,14 @@ public final class Planner {
     public static double[][] carveSung(double[][] spans, Analysis a) {
         if (spans == null || a == null || a.vocals == null || a.vocals.isEmpty()) return spans;
         double beat = a.beatIntervalSec > 0 ? a.beatIntervalSec : 0.5;
+        // planned every tick: cached on what it reads, not on the analysis (copied each plan)
+        List<Object> key = Arrays.asList(new Deep(spans), a.vocals, beat);
+        double[][] hit = CARVED.get(key);
+        if (hit == null) CARVED.put(key, hit = carve(spans, a, beat));
+        return Deep.copy(hit);
+    }
+
+    private static double[][] carve(double[][] spans, Analysis a, double beat) {
         double[][] sorted = spans.clone();
         java.util.Arrays.sort(sorted, (p, q) -> Double.compare(p[0], q[0]));
         List<double[]> runs = new ArrayList<>();
@@ -1646,6 +1691,67 @@ public final class Planner {
             } else if (y > from) out.add(new double[]{from, y});
         }
         return out.toArray(new double[0][]);
+    }
+
+    // ───────── per-song walks the plan repeats every tick (Automix plans every 250 ms) ─────────
+    // The extension's crackle (c42bb5f): a cache keyed on the analysis object missed every tick, as
+    // the planner copies it (asOutgoing, musicEnd). These are keyed on the parts the walk reads
+    // (curves, the vocal mask, sung spans and the grid), which the copies share.
+
+    /** A few results by key, the least recently used dropped first. */
+    static final class Memo<V> {
+        private final java.util.LinkedHashMap<List<Object>, V> map = new java.util.LinkedHashMap<List<Object>, V>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<List<Object>, V> e) {
+                return size() > 16;
+            }
+        };
+        /** Walks done (a test reads it). */
+        int misses;
+
+        synchronized V get(List<Object> key) {
+            return map.get(key);
+        }
+
+        synchronized void put(List<Object> key, V v) {
+            misses++;
+            map.put(key, v);
+        }
+
+        synchronized void clear() {
+            map.clear();
+            misses = 0;
+        }
+    }
+
+    static final Memo<double[][]> CARVED = new Memo<>();
+    static final Memo<Double> WHOLE_LOUDNESS = new Memo<>();
+    static final Memo<AnchorCands> ANCHOR_CANDS = new Memo<>();
+
+    /** Spans compared by their numbers (each plan may build them again). */
+    static final class Deep {
+        final double[][] x;
+
+        Deep(double[][] x) {
+            this.x = x;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Deep && Arrays.deepEquals(x, ((Deep) o).x);
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.deepHashCode(x);
+        }
+
+        static double[][] copy(double[][] x) {
+            if (x == null) return null;
+            double[][] c = new double[x.length][];
+            for (int i = 0; i < x.length; i++) c[i] = x[i].clone();
+            return c;
+        }
     }
 
     /** Each side's spans carved by its own song's mask. */

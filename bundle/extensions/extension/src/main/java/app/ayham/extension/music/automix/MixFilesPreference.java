@@ -75,7 +75,7 @@ public class MixFilesPreference extends Preference {
     @Override
     protected void onClick() {
         Activity a = activityOf(getContext());
-        if (a == null) return;
+        if (gone(a)) return;
         if (!Automix.ready()) {
             say(a, "Open the player once first: the mixes are read when the app starts.");
             return;
@@ -94,6 +94,11 @@ public class MixFilesPreference extends Preference {
                 .show();
     }
 
+    /** No window to show a dialog on: none, finishing or destroyed. */
+    private static boolean gone(Activity a) {
+        return a == null || a.isFinishing() || a.isDestroyed();
+    }
+
     private void say(Activity a, String text) {
         last = text;
         setSummary(text);
@@ -103,8 +108,8 @@ public class MixFilesPreference extends Preference {
 
     // ---- import (rules 3 to 7)
 
-    void imported(Activity a, String text) {
-        MixFile.Read r = MixFile.read(text);
+    /** A file read (off the main thread, MixFile.read), on the main thread. */
+    void imported(Activity a, MixFile.Read r) {
         if (r.refused != null) {
             say(a, "Not imported: " + r.refused + ".");
             return;
@@ -122,6 +127,7 @@ public class MixFilesPreference extends Preference {
             for (String c : m.changes) b.append("\n  ").append(c);
         }
         if (!p.add.isEmpty()) b.append("\n\n(").append(p.add.size()).append(p.add.size() == 1 ? " new pair is" : " new pairs are").append(" added either way.)");
+        if (gone(a)) return;
         new AlertDialog.Builder(a)
                 .setTitle("Replace saved mixes?")
                 .setMessage(b.toString())
@@ -161,6 +167,7 @@ public class MixFilesPreference extends Preference {
         last = text;
         setSummary(text);
         Log.i(TAG, text);
+        if (gone(a)) return;
         new AlertDialog.Builder(a)
                 .setTitle("Mix files")
                 .setMessage(text)
@@ -371,29 +378,50 @@ public class MixFilesPreference extends Preference {
         public void onActivityResult(int requestCode, int resultCode, Intent data) {
             Activity a = getActivity();
             MixFilesPreference p = pref;
+            String name = pendingName, out = pendingText;
+            int count = pendingCount;
+            // the settings screen is not held past its answer
+            pref = null;
+            pendingName = null;
+            pendingText = null;
             Uri uri = data != null ? data.getData() : null;
             if (a == null || p == null || resultCode != Activity.RESULT_OK || uri == null) return;
+            android.content.ContentResolver cr = a.getContentResolver();
+            // the file read or written, and a mix file parsed, off the main thread (a cloud file, a 300-mix export)
             if (requestCode == OPEN) {
-                String text;
-                try (InputStream in = a.getContentResolver().openInputStream(uri)) {
-                    text = readCapped(in, MixFile.MAX_BYTES);
-                } catch (Throwable t) {
-                    p.say(a, "Not imported: the file could not be read.");
-                    return;
-                }
-                if (text == null) p.say(a, "Not imported: the file is over 2 MB, not a mix file.");
-                else p.imported(a, text);
-            } else if (requestCode == CREATE) {
-                boolean ok;
-                try (OutputStream out = a.getContentResolver().openOutputStream(uri, "wt")) {
-                    out.write(pendingText.getBytes(StandardCharsets.UTF_8));
-                    ok = true;
-                } catch (Throwable t) {
-                    Log.w(TAG, "export failed", t);
-                    ok = false;
-                }
-                p.exported(a, pendingName, pendingCount, ok);
-                pendingText = null;
+                new Thread(() -> {
+                    String text = null, why = null;
+                    MixFile.Read r = null;
+                    try (InputStream in = cr.openInputStream(uri)) {
+                        text = readCapped(in, MixFile.MAX_BYTES);
+                    } catch (Throwable t) {
+                        why = "Not imported: the file could not be read.";
+                    }
+                    if (why == null && text == null) why = "Not imported: the file is over 2 MB, not a mix file.";
+                    if (why == null) r = MixFile.read(text);
+                    String said = why;
+                    MixFile.Read read = r;
+                    a.runOnUiThread(() -> {
+                        if (gone(a)) return;
+                        if (said != null) p.say(a, said);
+                        else p.imported(a, read);
+                    });
+                }, "MixFiles-import").start();
+            } else if (requestCode == CREATE && out != null) {
+                new Thread(() -> {
+                    boolean ok;
+                    try (OutputStream o = cr.openOutputStream(uri, "wt")) {
+                        o.write(out.getBytes(StandardCharsets.UTF_8));
+                        ok = true;
+                    } catch (Throwable t) {
+                        Log.w(TAG, "export failed", t);
+                        ok = false;
+                    }
+                    boolean done = ok;
+                    a.runOnUiThread(() -> {
+                        if (!gone(a)) p.exported(a, name, count, done);
+                    });
+                }, "MixFiles-write").start();
             }
         }
 

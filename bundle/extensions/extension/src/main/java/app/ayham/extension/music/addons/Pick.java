@@ -274,7 +274,12 @@ public final class Pick {
      * lossless). A cached copy under the tier asked: only the addons ranked above it, for better.
      */
     public static Upgrade upgradeWanted(Protocol.Stream st, String tier, boolean cached) {
-        int r = qualityRank(st), want = LOSSLESS.equals(tier) || HIRES.equals(tier) ? 2 : CD.equals(tier) ? 1 : 0;
+        return upgradeWanted(qualityRank(st), tier, cached);
+    }
+
+    /** The same, by the copy's qualityRank (what AddonPrep keeps of a playing copy). */
+    public static Upgrade upgradeWanted(int r, String tier, boolean cached) {
+        int want = LOSSLESS.equals(tier) || HIRES.equals(tier) ? 2 : CD.equals(tier) ? 1 : 0;
         if (r >= want) return null;
         if (cached) return new Upgrade(true, r + 1);
         return r == 0 ? new Upgrade(false, 1) : null;

@@ -910,9 +910,14 @@ public final class Automix {
             }
             // rule 6: this song's addon copy, after the analysis lines; never the next song's
             if (o.waiting == null && o.fromId.equals(id) && AddonSettings.on()) {
-                o.waiting = addonStage(AddonPrep.stageOf(id), AddonDirect.switching(id),
-                        AddonPrep.losslessCopy(id));
-                if (o.waiting != null) o.waitDone = -1;
+                String[] prep = AddonPrep.stageOf(id);
+                boolean switching = AddonDirect.switching(id);
+                o.waiting = addonStage(prep, switching, AddonPrep.losslessCopy(id));
+                // paused: the copy is ready and waits, no moving bar (the PC's "Switching…" spun forever)
+                if (o.waiting != null && prep == null && switching && AddonDirect.switchWaitsForPlay(id)) {
+                    o.waiting = readyWhenPlays(AddonPrep.losslessCopy(id));
+                    o.waitNoBar = true;
+                } else if (o.waiting != null) o.waitDone = -1;
             }
             if (o.waiting == null && o.fromId.equals(id) && amx.loopPending) {
                 o.waiting = "Looking for a loop mix";
@@ -1316,6 +1321,11 @@ public final class Automix {
             }
         }
         return switching ? "Switching to " + (lossless ? "the lossless copy" : "the addon's copy") : null;
+    }
+
+    /** The take-over's line while paused (editor.md §11 rule 6 [all]): a still row, no bar. */
+    static String readyWhenPlays(boolean lossless) {
+        return (lossless ? "The lossless copy" : "The addon's copy") + " is ready: it takes over when the song plays";
     }
 
     /** The song the last mix brought in, and the one it came from. */

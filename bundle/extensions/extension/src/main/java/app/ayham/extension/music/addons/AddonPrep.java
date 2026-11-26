@@ -429,6 +429,15 @@ public final class AddonPrep {
     /** Playback gave up on it (the file stalled or errored): not played from the addon again soon. */
     public static synchronized void dropped(String id, String why) {
         Prepared p = ready.remove(id);
+        // its file deleted under it (a storage cleanup, a file manager): searched and opened once
+        // more on the next tick, not YouTube's audio for RETRY_MS (the PC's f8b8b96); a second
+        // loss of the same song is a failure as any other
+        if (p != null && gone(p) && lostOnce.add(id)) {
+            Log.w(TAG, "dropped " + id + ": its file is gone (" + why + "); searched again");
+            if (p.saved) deleteQuietly(p.wav);
+            else deleteFiles(p);
+            return;
+        }
         if (p != null && p.saved) {
             // a downloaded file stays (only this play falls back to YouTube)
             failedAt.put(id, SystemClock.elapsedRealtime());
@@ -439,6 +448,15 @@ public final class AddonPrep {
         failedAt.put(id, SystemClock.elapsedRealtime());
         Log.w(TAG, "dropped " + id + ": " + why);
         if (p != null) deleteFiles(p);
+    }
+
+    /** Songs whose copy was lost once (dropped): the next loss is a failure. */
+    private static final java.util.Set<String> lostOnce = new java.util.HashSet<>();
+
+    /** The copy a player reads is gone: a streamed row's bytes, or the file itself. */
+    static boolean gone(Prepared p) {
+        if (p.stream != null) return p.stream.lost();
+        return p.file == null || !p.file.isFile() || p.file.length() == 0;
     }
 
     /**

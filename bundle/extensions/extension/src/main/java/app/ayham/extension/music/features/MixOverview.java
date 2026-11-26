@@ -92,7 +92,8 @@ final class MixOverview {
     private static void forget() {
         dialog = null;
         owner = null;
-        sub = msg = clock = note = preview = workText = lock = reset = badge = winReset = customToggle = null;
+        sub = msg = clock = note = preview = workText = lock = reset = badge = winReset = customToggle = filesResult = null;
+        app.ayham.extension.music.automix.MixFilesPreference.changed = null;
         songsRow = work = customBox = null;
         workBar = null;
         view = null;
@@ -394,6 +395,24 @@ final class MixOverview {
         note.setMinLines(3);
         card.addView(note);
 
+        // mix-file.md rule 9: the Mix files row at the foot (Import…, Export, Play these mixes), as
+        // in Settings > Automix; its result line under it
+        LinearLayout files = new LinearLayout(a);
+        files.setGravity(Gravity.CENTER_VERTICAL);
+        files.setPadding(0, dp(a, 6), 0, 0);
+        TextView filesChip = chip(a, "Mix files…");
+        filesChip.setOnClickListener(v -> {
+            Activity at = owner;
+            if (at != null) app.ayham.extension.music.automix.MixFilesPreference.showMenu(at);
+        });
+        files.addView(filesChip, chipLp(a));
+        filesResult = text(a, "", 12, 0xB3FFFFFF, false);
+        filesResult.setPadding(dp(a, 4), 0, 0, 0);
+        files.addView(filesResult, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(files);
+        showFilesResult();
+        app.ayham.extension.music.automix.MixFilesPreference.changed = MixOverview::showFilesResult;
+
         // the sheet sits on the bottom: it only grows while open, so nothing in it moves down under a
         // finger when a shorter note or warning comes (SteadyLayout)
         card.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
@@ -509,6 +528,16 @@ final class MixOverview {
         scroll.addView(chips);
         row.addView(scroll, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         return row;
+    }
+
+    /** The Mix files row's result line: the last import or export (MixFilesPreference). */
+    private static TextView filesResult;
+
+    private static void showFilesResult() {
+        TextView t = filesResult;
+        if (t == null) return;
+        String r = app.ayham.extension.music.automix.MixFilesPreference.lastResult();
+        t.setText(r != null ? r : "Import a .vivimix.json or a Spotify mix export, or export your edits.");
     }
 
     private static TextView chip(Context a, String label) {

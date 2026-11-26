@@ -72,9 +72,26 @@ public class MixFilesPreference extends Preference {
         return null;
     }
 
+    /** The result line of the last import or export, or null (the overview's Mix files row shows it). */
+    public static String lastResult() {
+        return last;
+    }
+
+    /** Told on the main thread when the result line changes (the overview's row). */
+    public static volatile Runnable changed;
+
+    /** The Mix files menu from the Automix overview's foot (rule 9: the same row as the settings'). */
+    public static void showMenu(Activity a) {
+        if (gone(a)) return;
+        new MixFilesPreference(a).menu(a);
+    }
+
     @Override
     protected void onClick() {
-        Activity a = activityOf(getContext());
+        menu(activityOf(getContext()));
+    }
+
+    private void menu(Activity a) {
         if (gone(a)) return;
         if (!Automix.ready()) {
             say(a, "Open the player once first: the mixes are read when the app starts.");
@@ -94,14 +111,20 @@ public class MixFilesPreference extends Preference {
                 .show();
     }
 
+    private void result(String text) {
+        last = text;
+        setSummary(text);
+        Runnable r = changed;
+        if (r != null) r.run();
+    }
+
     /** No window to show a dialog on: none, finishing or destroyed. */
     private static boolean gone(Activity a) {
         return a == null || a.isFinishing() || a.isDestroyed();
     }
 
     private void say(Activity a, String text) {
-        last = text;
-        setSummary(text);
+        result(text);
         Toast.makeText(a, text, Toast.LENGTH_LONG).show();
         Log.i(TAG, text);
     }
@@ -164,8 +187,7 @@ public class MixFilesPreference extends Preference {
             return;
         }
         // the result with "Play these mixes" (rule 9)
-        last = text;
-        setSummary(text);
+        result(text);
         Log.i(TAG, text);
         if (gone(a)) return;
         new AlertDialog.Builder(a)

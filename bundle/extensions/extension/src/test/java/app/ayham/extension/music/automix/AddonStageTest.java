@@ -35,4 +35,11 @@ public class AddonStageTest {
         // a second look (a lossless pass) while the lossy copy still switches: the pass is shown
         assertEquals("Asking your addons", Automix.addonStage(new String[]{AddonPrep.ASKING, ""}, true, false));
     }
+
+    @Test
+    public void pausedTheReadyCopyWaitsForPlay() {
+        // rule 6 [all]: while paused the take-over isn't "Switching…" with a busy bar
+        assertEquals("The lossless copy is ready: it takes over when the song plays", Automix.readyWhenPlays(true));
+        assertEquals("The addon's copy is ready: it takes over when the song plays", Automix.readyWhenPlays(false));
+    }
 }

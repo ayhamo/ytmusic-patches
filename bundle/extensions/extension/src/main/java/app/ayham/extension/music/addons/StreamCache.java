@@ -96,6 +96,16 @@ public final class StreamCache {
             }
         }
 
+        /**
+         * Its bytes deleted under it (a storage cleanup, a file manager) while its list still names
+         * chunks: true, and the list starts again empty, so the next open fetches them again.
+         */
+        public synchronized boolean lost() {
+            if (have.isEmpty() || data.exists()) return false;
+            forget();
+            return true;
+        }
+
         /** Whether the chunks covering [from, to) are all on disk. */
         public synchronized boolean has(long from, long to) {
             if (length >= 0) to = Math.min(to, length);

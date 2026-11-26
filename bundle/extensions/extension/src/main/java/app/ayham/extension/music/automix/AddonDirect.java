@@ -177,6 +177,15 @@ public final class AddonDirect {
         return started;
     }
 
+    /** The take-over's player is ready but YT is paused: it takes over when the song plays. Main thread. */
+    public static boolean switchWaitsForPlay(String id) {
+        synchronized (shadows) {
+            for (Shadow s : shadows.values())
+                if (!s.done && s.p.id.equals(id) && !s.forMix && s.mode == Mode.LOCKING && !s.playing) return true;
+        }
+        return false;
+    }
+
     /** A player of ours (playing or armed) is on this song: its files must stay. */
     /** The playing song's id, as YT's queue names it (null when unknown). */
     public static String playingId() {

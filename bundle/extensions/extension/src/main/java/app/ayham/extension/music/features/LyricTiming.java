@@ -143,7 +143,7 @@ final class LyricTiming {
      * behind its running estimate, and the fill would step back. A seek lets go of it.
      */
     private static long position(Object manager) throws Exception {
-        return lyricsPos(rawPosition(manager), offsetFor(manager));
+        return rawPosition(manager);
     }
 
     private static long rawPosition(Object manager) throws Exception {
@@ -166,7 +166,9 @@ final class LyricTiming {
         long ms = app.ayham.extension.music.automix.Automix.incomingHeardMs();
         if (ms < 0 || lyricsVideo == null) return -1;
         try {
-            return deckFor(String.valueOf(lyricsVideo.get(manager)), app.ayham.extension.music.automix.Automix.incomingId(), ms);
+            long d = deckFor(String.valueOf(lyricsVideo.get(manager)), app.ayham.extension.music.automix.Automix.incomingId(), ms);
+            // on Morphe's clock: its getPositionMs takes off its offsets, so the deck's time does too
+            return d < 0 ? -1 : Math.max(0, d - morpheOffset(manager));
         } catch (Throwable t) {
             return -1;
         }
@@ -343,20 +345,6 @@ final class LyricTiming {
         return starts.length - 1;
     }
 
-    /** §3.1: the song's offset and the global one, added. */
-    static long offset(long song, long global) {
-        return song + global;
-    }
-
-    /** §3.2: the lyrics position: a positive offset shows the lyrics earlier. */
-    static long lyricsPos(long player, long offset) {
-        return player + offset;
-    }
-
-    /** §3.2: a seek by lyrics goes the other way, never below 0. */
-    static long seekFor(long lyricTime, long offset) {
-        return Math.max(0, lyricTime - offset);
-    }
 
     /**
      * §6.1: the gaps of 7000 or more without a line, {start, end}: the intro from 0 to the first
@@ -375,6 +363,34 @@ final class LyricTiming {
         return out;
     }
 
+    /**
+     * §6.1: where a line starts for the gaps: the earlier of its tag and its first timed word (one
+     * whose end is after its start), so a countdown ends when the voice comes in (Metrolist 5f58b4081).
+     * wordStarts, wordEnds: null for a line without word timings.
+     */
+    static long startOf(long tag, long[] wordStarts, long[] wordEnds) {
+        long s = tag;
+        if (wordStarts != null && wordEnds != null)
+            for (int k = 0; k < wordStarts.length && k < wordEnds.length; k++) if (wordEnds[k] > wordStarts[k]) s = Math.min(s, wordStarts[k]);
+        return s;
+    }
+
+    /** startOf for one of Morphe's lines (its tag when its words can't be read). */
+    private static long startOf(long tag, Object line) {
+        try {
+            if (line == null || !(Boolean) hasWordTimings.invoke(line)) return tag;
+            List<?> ws = (List<?>) words.invoke(line);
+            long[] s = new long[ws.size()], e = new long[ws.size()];
+            for (int k = 0; k < ws.size(); k++) {
+                s[k] = (Long) wStart.invoke(ws.get(k));
+                e[k] = (Long) wEnd.invoke(ws.get(k));
+            }
+            return startOf(tag, s, e);
+        } catch (Throwable t) {
+            return tag;
+        }
+    }
+
     /** §6.2: the gap shown at [pos] (pos + 190 inside it), or null. */
     private static long[] gapAt(long pos) {
         if (gapList == null) return null;
@@ -391,7 +407,7 @@ final class LyricTiming {
             if (texts[i].isEmpty()) continue;
             int j = i + 1;
             while (j < starts.length && starts[j] <= starts[i]) j++;
-            s.add(starts[i]);
+            s.add(startOf(starts[i], lineObjs == null || i >= lineObjs.size() ? null : lineObjs.get(i)));
             e.add(j < starts.length ? starts[j] : starts[i]);
         }
         long[] ss = new long[s.size()], ee = new long[s.size()];
@@ -402,60 +418,88 @@ final class LyricTiming {
         gapList = gaps(ss, ee);
     }
 
-    // ---- §3: the offsets, kept: the global one and one per song (by video id) ----
+    // ---- §3: the offsets are Morphe's (its global "Lyrics offset" and its per-track one) ----
 
-    private static android.content.SharedPreferences offsets() {
-        android.content.Context c = Features.appContext;
-        return c == null ? null : c.getSharedPreferences("ayham_lyrics_offset", android.content.Context.MODE_PRIVATE);
-    }
+    private static Method temporaryOffset, setTemporaryOffset, persistTemporaryOffset;
 
-    static long globalOffset() {
-        android.content.SharedPreferences p = offsets();
-        return p == null ? 0 : p.getLong("global", 0);
-    }
-
-    static long songOffset(String videoId) {
-        android.content.SharedPreferences p = offsets();
-        return p == null || videoId == null ? 0 : p.getLong("song." + videoId, 0);
-    }
-
-    /** Saved as it is changed (no Save step); 0 removes the song's. */
-    static void setOffset(String videoId, long ms) {
-        android.content.SharedPreferences p = offsets();
-        if (p == null) return;
-        String k = videoId == null ? "global" : "song." + videoId;
-        if (ms == 0) p.edit().remove(k).apply();
-        else p.edit().putLong(k, ms).apply();
-    }
-
-    /** The video id Morphe's lyrics are for; its id can be empty: then the playing song's. Null: none. */
-    static String lyricsId() {
+    /** Morphe's offsets [ms]: what its getPositionMs takes off the player's time (positive: lyrics later). */
+    private static long morpheOffset(Object manager) {
         try {
-            init();
-            return idOf(getInstance.invoke(null));
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    private static String idOf(Object manager) {
-        String id = null;
-        try {
-            Object v = lyricsVideo == null ? null : lyricsVideo.get(manager);
-            id = v == null ? null : String.valueOf(v);
-        } catch (Throwable ignored) {
-        }
-        if (id == null || id.isEmpty()) id = app.ayham.extension.music.automix.Automix.currentId();
-        return id == null || id.isEmpty() ? null : id;
-    }
-
-    private static long offsetFor(Object manager) {
-        try {
-            return offset(songOffset(idOf(manager)), globalOffset());
+            if (temporaryOffset == null) temporaryOffset = manager.getClass().getMethod("getTemporaryOffsetMs");
+            return globalSetting() + (Integer) temporaryOffset.invoke(manager);
         } catch (Throwable t) {
             return 0;
         }
     }
+
+    private static Object offsetSetting() throws Exception {
+        return Class.forName("app.morphe.extension.music.settings.Settings").getField("LYRICS_OFFSET_MS").get(null);
+    }
+
+    private static int globalSetting() throws Exception {
+        Object setting = offsetSetting();
+        return ((Number) setting.getClass().getMethod("get").invoke(setting)).intValue();
+    }
+
+    /** Morphe's offset slider runs -2000..2000 ms. */
+    private static int clampOffset(long ms) {
+        return (int) Math.max(-2000, Math.min(2000, ms));
+    }
+
+    /**
+     * Once: the strip's own offsets (until 2026-11-24, "ayham_lyrics_offset", positive = lyrics
+     * earlier) go to Morphe's, sign turned. The global one at once; a song's when its lyrics are
+     * Morphe's current ones (Morphe keeps them by track, not by video id), unless Morphe has one for
+     * it already. The file goes when it is empty.
+     */
+    private static void migrateOffsets(Object manager) {
+        android.content.Context c = Features.appContext;
+        if (c == null || migrated) return;
+        android.content.SharedPreferences p = c.getSharedPreferences("ayham_lyrics_offset", android.content.Context.MODE_PRIVATE);
+        java.util.Map<String, ?> all = p.getAll();
+        if (all.isEmpty()) {
+            migrated = true;
+            return;
+        }
+        try {
+            if (all.get("global") instanceof Long) {
+                long ours = (Long) all.get("global");
+                if (globalSetting() == 0 && ours != 0) {
+                    Object setting = offsetSetting();
+                    for (Method m : setting.getClass().getMethods()) {
+                        if (m.getName().equals("save") && m.getParameterTypes().length == 1) {
+                            m.invoke(setting, Integer.valueOf(clampOffset(-ours)));
+                            break;
+                        }
+                    }
+                    Log.i(TAG, "lyrics offset: the strip's global " + ours + " ms is now Morphe's " + clampOffset(-ours) + " ms");
+                }
+                p.edit().remove("global").apply();
+            }
+            Object v = lyricsVideo == null ? null : lyricsVideo.get(manager);
+            String id = v == null ? null : String.valueOf(v);
+            Object song = id == null || id.isEmpty() ? null : all.get("song." + id);
+            if (song instanceof Long && current.get(manager) != null) {
+                if (setTemporaryOffset == null) {
+                    setTemporaryOffset = manager.getClass().getMethod("setTemporaryOffsetMs", int.class);
+                    persistTemporaryOffset = manager.getClass().getMethod("persistTemporaryOffsetMs");
+                    if (temporaryOffset == null) temporaryOffset = manager.getClass().getMethod("getTemporaryOffsetMs");
+                }
+                if ((Integer) temporaryOffset.invoke(manager) == 0) {
+                    int ms = clampOffset(-(Long) song);
+                    setTemporaryOffset.invoke(manager, ms);
+                    persistTemporaryOffset.invoke(manager);
+                    Log.i(TAG, "lyrics offset: the strip's " + song + " ms for " + id + " is now Morphe's " + ms + " ms for this track");
+                }
+                p.edit().remove("song." + id).apply();
+            }
+        } catch (Throwable t) {
+            migrated = true; // another Morphe version: the old values stay, unused
+            Log.w(TAG, "lyrics offsets not moved to Morphe's", t);
+        }
+    }
+
+    private static boolean migrated;
 
     private static void lines(Object lyr) throws Exception {
         if (lyr == linesFor) return;
@@ -503,6 +547,7 @@ final class LyricTiming {
             Object manager = getInstance.invoke(null);
             Object lyr = current.get(manager);
             if (lyr == null) return shown;
+            if (lyr != linesFor && !migrated) migrateOffsets(manager);
             lines(lyr);
             long pos = position(manager);
             int due = due(pos);
@@ -511,8 +556,6 @@ final class LyricTiming {
             // player). In a fast song that is half the line still being sung, and the fill jumped to
             // the next line (Midnight Sun): the line being sung stays until the next one's own lead.
             // (+40 ms: the strip's wake-up for the next line reads a clock a few ms behind its own)
-            // §3: with an offset Morphe's own line is on its clock, not ours: the line due is ours
-            if (offsetFor(manager) != 0) return held(due);
             if (aheadOf(starts, texts, due, want, pos, lead() + 40) >= 0) return held(due);
             // an empty line that is not a gap (§6.1): the line before it stays up
             if (want.isEmpty() && due >= 0 && gapAt(pos) == null) return held(due);

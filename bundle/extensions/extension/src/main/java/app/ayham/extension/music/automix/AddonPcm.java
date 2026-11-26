@@ -123,19 +123,27 @@ public final class AddonPcm {
             delete(c, p.id);
             throw t;
         }
-        Analyzer.Pcm h = Analyzer.Pcm.open(hf), t = Analyzer.Pcm.open(tf);
-        // the boost toward YouTube's loudness, as our player has it (LoudnessEnhancer): in the samples.
-        // The fit's boost keeps the true peak at -1 dBTP, so the limiter is only a safety net
+        Analyzer.Pcm h, t;
         String boost = "";
-        double db = p.boostDb();
-        if (db > 0.005) {
-            app.ayham.extension.music.addons.AtmosWav.Limited a = app.ayham.extension.music.addons.AtmosWav.limit(hf, 16, 2, h.rate, db, DECK_CEILING_DBFS);
-            app.ayham.extension.music.addons.AtmosWav.Limited b = app.ayham.extension.music.addons.AtmosWav.limit(tf, 16, 2, t.rate, db, DECK_CEILING_DBFS);
-            boost = String.format(Locale.US, ", boost: opening %s, end %s", a, b);
-        }
-        if (!hf.renameTo(headFile(c, p.id)) || !tf.renameTo(tailFile(c, p.id))) {
+        // a failure from here on leaves no .part file behind either
+        try {
+            h = Analyzer.Pcm.open(hf);
+            t = Analyzer.Pcm.open(tf);
+            // the decoder gave no audio (no format came, so nothing was written)
+            if (h == null || t == null) throw new IOException("no deck audio decoded from " + p.id + "'s file");
+            // the boost toward YouTube's loudness, as our player has it (LoudnessEnhancer): in the samples.
+            // The fit's boost keeps the true peak at -1 dBTP, so the limiter is only a safety net
+            double db = p.boostDb();
+            if (db > 0.005) {
+                app.ayham.extension.music.addons.AtmosWav.Limited a = app.ayham.extension.music.addons.AtmosWav.limit(hf, 16, 2, h.rate, db, DECK_CEILING_DBFS);
+                app.ayham.extension.music.addons.AtmosWav.Limited b = app.ayham.extension.music.addons.AtmosWav.limit(tf, 16, 2, t.rate, db, DECK_CEILING_DBFS);
+                boost = String.format(Locale.US, ", boost: opening %s, end %s", a, b);
+            }
+            if (!hf.renameTo(headFile(c, p.id)) || !tf.renameTo(tailFile(c, p.id)))
+                throw new IOException("deck audio of " + p.id + " could not be moved in");
+        } catch (Throwable x) {
             delete(c, p.id);
-            throw new IOException("deck audio of " + p.id + " could not be moved in");
+            throw x;
         }
         Log.i(TAG, String.format(Locale.US, "%s: deck audio from %s written in %d ms (opening %.1f-%.1f s, end %.1f-%.1f s at %d Hz)%s", p.id, p.addon,
                 System.currentTimeMillis() - t0, h.start(), h.end(), t.start(), t.end(), h.rate, boost));

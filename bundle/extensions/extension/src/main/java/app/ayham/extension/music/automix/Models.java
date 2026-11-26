@@ -30,6 +30,8 @@ public final class Models {
     static final String VOCALS = "vocals_umxhq_int8.onnx";
 
     private static OrtSession beat, vocals;
+    /** The vocal model's input, kept between windows: a fresh ~16 MB native buffer each time piles up before GC frees it. */
+    private static ByteBuffer vocalInput;
     private static boolean nativeLoaded;
 
     private Models() {
@@ -116,7 +118,10 @@ public final class Models {
             if (frames <= 0 || frames > fixed) return null;
             OrtEnvironment env = OrtEnvironment.getEnvironment();
             if (vocals == null) vocals = open(ctx, VOCALS);
-            ByteBuffer backing = ByteBuffer.allocateDirect(2 * bins * fixed * 4).order(ByteOrder.nativeOrder());
+            int bytes = 2 * bins * fixed * 4;
+            if (vocalInput == null || vocalInput.capacity() != bytes) vocalInput = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+            // (every float is written below, the padding too: nothing of the last window stays)
+            ByteBuffer backing = vocalInput;
             FloatBuffer into = backing.asFloatBuffer();
             float[] pad = new float[fixed - frames];
             for (int c = 0; c < 2; c++) {
@@ -137,9 +142,10 @@ public final class Models {
                     for (int c = 0; c < 2; c++) {
                         for (int bin = lo; bin <= hi; bin++) {
                             int idx = (c * bins + bin) * fixed + f;
-                            float m = mix.get(idx);
-                            if (m <= 1e-6f) continue;
-                            sum += Math.max(0f, Math.min(1f, target.get(idx) / m));
+                            float m = mix.get(idx), t = target.get(idx);
+                            // a NaN from the model would make the whole frame NaN (Math.max/min keep NaN)
+                            if (!(m > 1e-6f) || Float.isNaN(t)) continue;
+                            sum += Math.max(0f, Math.min(1f, t / m));
                             count++;
                         }
                     }

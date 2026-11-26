@@ -60,8 +60,9 @@ final class CachedDataSource {
                         uri[0] = uriF.get(a[0]);
                         long pos = posF.getLong(a[0]), len = lenF.getLong(a[0]);
                         long total = e.length();
-                        if (total >= 0 && pos > total) throw new IOException("position past the end");
-                        long left = len != -1 ? len : total >= 0 ? total - pos : -1;
+                        if (pos < 0 || (total >= 0 && pos > total)) throw new IOException("position " + pos + " outside the stream");
+                        // a length past the end is cut to what is there (DataSource.open returns what will be read)
+                        long left = len != -1 ? (total >= 0 ? Math.min(len, total - pos) : len) : total >= 0 ? total - pos : -1;
                         at[0] = pos;
                         at[1] = left;
                         return left;
@@ -85,7 +86,9 @@ final class CachedDataSource {
                 case "d":
                     return Collections.emptyMap();
                 case "e":
-                case "f":
+                    return null;
+                case "f":   // close: getUri is null again until the next open
+                    uri[0] = null;
                     return null;
                 default:
                     break;

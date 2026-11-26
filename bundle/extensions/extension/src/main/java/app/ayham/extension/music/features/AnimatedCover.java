@@ -40,6 +40,7 @@ final class AnimatedCover {
     private static float zoom = 1f;
     /** The live frame, 48 px on its longest side (Metrolist's CanvasFrameSampler), reused. */
     private static android.graphics.Bitmap sample;
+    private static long sampledAt;
     /** The last transform set, so an unchanged layout is not set again each frame. */
     private static final float[] fitWas = new float[6];
 
@@ -65,11 +66,6 @@ final class AnimatedCover {
                 tick(activity, decor, pageId, thumbId, artistId, titleId);
             } catch (Throwable t) {
                 Features.failed("canvas", t);
-            }
-            try {
-                SongCover.tick(activity, decor, pageId, thumbId);
-            } catch (Throwable t) {
-                Features.failed("autoSong", t);
             }
             return true;
         });
@@ -128,7 +124,6 @@ final class AnimatedCover {
         int[] at = new int[2];
         page.getLocationOnScreen(at);
         boolean wanted = thumb.isShown() && thumb.getAlpha() > 0.5f && at[1] < decor.getHeight() / 2;
-        if (!wanted && at[1] < decor.getHeight() / 2) songMode(activity, decor);
 
         long now = System.currentTimeMillis();
         if (wanted != lastWanted) {
@@ -242,6 +237,12 @@ final class AnimatedCover {
     /** Each new clip frame (Metrolist samples every one): its letterbox zoom, and the live blurred backdrop. */
     private static void sampled() {
         if (!clipShowing() || !view.isAvailable() || !FullArt.clipMode() || videoW == 0) return;
+        // reading a frame back from the GPU stalls the main thread: only when it is used, the
+        // backdrop's next mesh (every 3 s) or the letterbox zoom still measured (4 times a second)
+        long now = android.os.SystemClock.uptimeMillis();
+        boolean measuring = zoom <= 1f && now - sampledAt >= 250;
+        if (!measuring && !ArtBackdrop.wantsFrame()) return;
+        sampledAt = now;
         int[] sz = sampleSize(48);
         try {
             if (sample == null || sample.getWidth() != sz[0] || sample.getHeight() != sz[1])
@@ -338,6 +339,8 @@ final class AnimatedCover {
 
             @Override
             public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                // switched off for this run after it kept failing (Features.failed)
+                if ("0".equals(Features.props().getProperty("canvas frame"))) return;
                 try {
                     sampled();
                 } catch (Throwable t) {
@@ -346,35 +349,6 @@ final class AnimatedCover {
             }
         });
         return v;
-    }
-
-    private static String switchedFor = "";
-
-    /**
-     * The song version replaced a music video, but YT still shows its video page (black: the song
-     * has no picture). Flip YT's song/video toggle to song once for that video, so the art and the
-     * animated art show. Tapping back to video afterwards is left alone.
-     */
-    private static void songMode(Activity activity, View decor) {
-        String id;
-        try {
-            id = app.ayham.extension.music.automix.Automix.currentId();
-        } catch (Throwable t) {
-            return;
-        }
-        if (id == null || id.equals(switchedFor) || !"1".equals(Features.props().getProperty("autoSong")) || !SongVersion.swapped(id)) return;
-        // not during a mix: the toggle makes YT reload its player, so the incoming player our engine
-        // aligned is replaced and the handover lands far off (heard as a cut and a jump). Clicked
-        // once the mix is done, on a later tick.
-        try {
-            if (app.ayham.extension.music.automix.Automix.incomingId() != null) return;
-        } catch (Throwable ignored) {
-        }
-        // the page has two copies of the toggle (one hidden): the one on screen
-        View toggle = shownWithId(decor, id(activity, "audio_video_switch_toggle", activity.getPackageName()));
-        if (toggle == null) return;
-        switchedFor = id;
-        Log.i(TAG, "song version playing in video mode: switching YT to song mode, click=" + toggle.performClick());
     }
 
     private static View shownWithId(View v, int id) {
@@ -475,8 +449,10 @@ final class AnimatedCover {
                 } catch (Throwable ignored) {
                 }
                 // its downloaded Spotify canvas first (Metrolist's order: Spotify before Apple), then its art clip
-                if (vid != null && spotify) saved = CanvasCache.lookup(CanvasCache.spotifyIdKey(vid));
-                if (vid != null && (saved == null || saved.isEmpty())) saved = CanvasCache.lookup(CanvasCache.idKey(vid));
+                // each only while its source is on (canvas.md §13 rule 1), as for an online lookup
+                if (vid != null && CanvasSettings.on(p, CanvasSettings.SPOTIFY)) saved = CanvasCache.lookup(CanvasCache.spotifyIdKey(vid));
+                if (vid != null && (saved == null || saved.isEmpty()) && CanvasSettings.on(p, CanvasSettings.APPLE))
+                    saved = CanvasCache.lookup(CanvasCache.idKey(vid));
             }
             if (saved != null && !saved.isEmpty()) {
                 // saved lookup: a miss for 24 h, or the clip file (also offline)

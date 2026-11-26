@@ -25,6 +25,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.text.InputType;
+import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -41,6 +43,7 @@ import java.util.Locale;
 import java.util.Map;
 
 import app.ayham.extension.music.automix.Automix;
+import app.ayham.extension.music.automix.DrawEdit;
 import app.ayham.extension.music.automix.MixOverride;
 import app.ayham.extension.music.automix.Overview;
 import app.ayham.extension.music.automix.Planner;
@@ -53,7 +56,9 @@ import app.ayham.extension.music.automix.Waves;
  * grid (bars brighter) and each song's volume, EQ and filter curves from the plan. For each pair:
  * a preset (or custom lanes under "Customize"), beat match, a length, and the window (each song
  * dragged under the frame, snapped to its downbeats, beats after a long-press, nudged in 10 ms),
- * kept (or locked) for the next time the pair plays. Preview jumps to just before the mix.
+ * kept (or locked) for the next time the pair plays. A lane can be drawn (editor.md §10, DrawEdit):
+ * Draw… in its dropdown, then tap, drag and long-press points of the chosen curve, Repeat, Undo; a
+ * shape or preset picked over a drawing asks first. Preview jumps to just before the mix.
  * Opened from the "..." menu of the title row, or by tapping the automix line on the art.
  */
 final class MixOverview {
@@ -61,18 +66,21 @@ final class MixOverview {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final int LOW = 0xFF2E45E6, MID = 0xFFE08B35, HIGH = 0xFFF1DDC4, FRAME = 0xFF3A9BDC;
     /** editor.md §2: the lanes' colours, the same in both apps. */
-    private static final int VOLUME = 0xFF4C8DFF, EQ = 0xFFF5C542, EFFECT = 0xFFA779FF;
+    private static final int VOLUME = 0xFF4C8DFF, EQ = 0xFFF5C542, EFFECT = 0xFFA779FF, FX = 0xFFE8E8E8, LOOPING = 0xFF5FD39A;
+    /** Each lane's colour, in LANES' order. */
+    private static final int[] LANE_COLORS = {VOLUME, EQ, EFFECT, FX, LOOPING};
     private static final float OUTSIDE_ALPHA = 0.32f;
     /** editor.md §2: id, name, chip colour (Echo out is reserved, §5, and not shown). */
-    private static final String[] PRESETS = {"auto", "smooth", "rise", "blend", "wave", "melt", "slam", "loop", "custom"};
-    private static final String[] PRESET_NAMES = {"Auto", "Smooth", "Rise", "Blend", "Wave", "Melt", "Slam", "Loop", "Custom"};
-    private static final int[] PRESET_COLORS = {FRAME, 0xFF4C8DFF, 0xFFA779FF, 0xFFF5C542, 0xFFA779FF, 0xFFA779FF, 0xFFE5534B, 0xFF3FB950, FRAME};
+    private static final String[] PRESETS = MixOverride.PRESETS;
+    private static final String[] PRESET_NAMES = {"Auto", "Custom", "Fade", "Rise", "Wave", "Blend", "Slam", "Melt", "Afterglow", "Surge", "Dissolve", "No transition", "Loop"};
+    private static final int PURPLE = 0xFFA779FF;
+    private static final int[] PRESET_COLORS = {FRAME, FRAME, 0xFF4C8DFF, PURPLE, PURPLE, 0xFFF5C542, 0xFFE5534B, PURPLE, PURPLE, PURPLE, PURPLE, FRAME, 0xFF3FB950};
     private static final String[] MATCH = {"auto", "sync", "glide", "off"};
     private static final String[] MATCH_NAMES = {"Auto", "Sync", "Glide", "Off"};
     private static final int[] BARS = {0, 2, 4, 8, 16, 32};
     private static final String[] BAR_LABELS = {"Auto", "2", "4", "8", "16", "32"};
-    private static final String[] LANES = {"volume", "eq", "effect"};
-    private static final String[] LANE_TITLES = {"Volume", "EQ", "Effect"};
+    private static final String[] LANES = {"volume", "eq", "effect", "fx", "looping"};
+    private static final String[] LANE_TITLES = {"Volume", "EQ", "Filter", "Effects", "Looping"};
     private static final int NUDGE_MS = 10, NUDGE_MAX_MS = 2000;
     private static final long FRAME_MS = 50, LONG_PRESS_MS = 400;
     private static final double MAX_ZOOM = 8;
@@ -94,6 +102,16 @@ final class MixOverview {
         java.util.Arrays.fill(barChips, null);
         java.util.Arrays.fill(laneChips, null);
         java.util.Arrays.fill(nudgeChips, null);
+        java.util.Arrays.fill(curveChips, null);
+        drawRow = null;
+        lateField = null;
+        repFrom = repLen = null;
+        repUnit = undoChip = null;
+        drawKey = null;
+        drawPair = null;
+        pdrag = null;
+        pendingDrawPair = null;
+        undo.clear();
     }
 
     private static TextView sub, msg, clock, note, preview, workText, lock, reset, badge, winReset, customToggle;
@@ -109,11 +127,29 @@ final class MixOverview {
     private static long tagsAt;
     private static String tagsSig = "";
     private static final Map<String, Bitmap> covers = new HashMap<>();
+    // the drawing (editor.md §10 rule 6): its row, the curve chosen, a point under the finger, undo
+    private static LinearLayout drawRow;
+    private static final TextView[] curveChips = new TextView[DrawEdit.KEYS.length + 1];
+    private static EditText repFrom, repLen;
+    /** B's late entry (mix-file.md rule 2): "B in after N s" by the window's nudges. */
+    private static EditText lateField;
+    private static TextView repUnit, undoChip;
+    /** The curve being drawn (a DrawEdit key), null: none chosen (Done), the frame moves the window. */
+    private static String drawKey;
+    /** The pair the curve was chosen on. */
+    private static String drawPair;
+    private static PointDrag pdrag;
+    /** Draw picked on a loop mix: Custom first, the drawing once the blend is planned for this pair. */
+    private static String pendingDrawPair;
+    private static int pendingDrawLane;
+    private static final DrawEdit.Undo undo = new DrawEdit.Undo();
 
     private MixOverview() {
     }
 
     static void show(Activity a) {
+        // a dialog on an activity going away throws BadTokenException
+        if (a == null || a.isFinishing() || a.isDestroyed()) return;
         // a dialog of an activity that was destroyed while it showed never gets its dismiss
         if (dialog != null && owner != null && owner.isDestroyed()) forget();
         if (dialog != null && dialog.isShowing()) return;
@@ -193,8 +229,8 @@ final class MixOverview {
         LinearLayout legend = new LinearLayout(a);
         legend.setGravity(Gravity.CENTER_VERTICAL);
         legend.setPadding(0, dp(a, 8), 0, dp(a, 6));
-        int[] keys = {LOW, MID, HIGH, VOLUME, EQ, EFFECT};
-        String[] names = {"Low", "Mid", "High", "Volume", "EQ", "Effect"};
+        int[] keys = {LOW, MID, HIGH, VOLUME, EQ, EFFECT, FX};
+        String[] names = {"Low", "Mid", "High", "Volume", "EQ", "Filter", "Effects"};
         for (int i = 0; i < keys.length; i++) {
             View sw = new View(a);
             GradientDrawable g = new GradientDrawable();
@@ -233,12 +269,11 @@ final class MixOverview {
         customBox = new LinearLayout(a);
         customBox.setOrientation(LinearLayout.VERTICAL);
         customBox.setVisibility(View.GONE);
-        int[] laneColors = {VOLUME, EQ, EFFECT};
         for (int k = 0; k < LANES.length; k++) {
             LinearLayout row = new LinearLayout(a);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(0, dp(a, 4), 0, 0);
-            TextView l = text(a, LANE_TITLES[k], 13, laneColors[k], true);
+            TextView l = text(a, LANE_TITLES[k], 13, LANE_COLORS[k], true);
             row.addView(l, new LinearLayout.LayoutParams(dp(a, 64), ViewGroup.LayoutParams.WRAP_CONTENT));
             TextView c = chip(a, "…");
             int lane = k;
@@ -247,8 +282,11 @@ final class MixOverview {
                 PopupMenu menu = new PopupMenu(v.getContext(), v);
                 List<String> opts = MixOverride.options(LANES[lane]);
                 for (int i = 0; i < opts.size(); i++) menu.getMenu().add(0, i, i, shapeName(opts.get(i)));
+                // (Looping is shapes only: no Draw, editor.md §13)
+                if (lane < MixOverride.LANE_COUNT) menu.getMenu().add(0, opts.size(), opts.size(), "Draw…");
                 menu.setOnMenuItemClickListener(item -> {
-                    pickLane(lane, opts.get(item.getItemId()));
+                    if (item.getItemId() == opts.size()) startDraw(lane);
+                    else pickLane(lane, opts.get(item.getItemId()));
                     return true;
                 });
                 menu.show();
@@ -258,6 +296,7 @@ final class MixOverview {
             customBox.addView(row);
         }
         card.addView(customBox);
+        card.addView(drawTools(a));
         card.addView(chipRow(a, "Beat match", MATCH.length, i -> MATCH_NAMES[i], matchChips, i -> {
             MixOverride o = current();
             if (o == null) return;
@@ -297,6 +336,20 @@ final class MixOverview {
             save(o);
         });
         wc.addView(winReset, chipLp(a));
+        // B's late entry (mix-file.md rule 2): a number field by the nudges, 0 clears it
+        wc.addView(text(a, "  B in after ", 13, 0xE6FFFFFF, false));
+        lateField = numberField(a, "0", "Seconds into the mix before the next song comes in; 0: with the mix");
+        lateField.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        lateField.setOnEditorActionListener((v, id, ev) -> {
+            setLate(number(lateField));
+            v.clearFocus();
+            return false;
+        });
+        lateField.setOnFocusChangeListener((v, has) -> {
+            if (!has) setLate(number(lateField));
+        });
+        wc.addView(lateField, new LinearLayout.LayoutParams(dp(a, 52), ViewGroup.LayoutParams.WRAP_CONTENT));
+        wc.addView(text(a, " s", 13, 0xE6FFFFFF, false));
         ws.addView(wc);
         win.addView(ws, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         card.addView(win);
@@ -385,13 +438,37 @@ final class MixOverview {
 
     /** "Center bass swap" from centerBassSwap. */
     static String shapeName(String id) {
+        // Spotify's names where it has the shape (editor.md §2, spotify-mixes.md rule 4)
         switch (id) {
-            case "lpOut": return "Low-pass out";
-            case "hpIn": return "High-pass in";
-            case "lpBoth": return "Low-pass both";
-            case "hpBoth": return "High-pass both";
-            case "lpInHpOut": return "Low-pass in, high-pass out";
+            case "none": return "None";
+            case "centerCut": return "Center cut";
+            case "smooth": return "Smooth crossfade";
+            case "fadeIn1BarCutOut": return "Fade in 1 bar cut out";
+            case "overlap1BarCutOut": return "Overlap 1 bar cut out";
             case "threeBandFade": return "3-band fade";
+            case "hpIn": return "High pass filter in";
+            case "hpOut": return "High pass filter out";
+            case "hpBoth": return "High pass filter in high pass filter out";
+            case "lpIn": return "Low pass filter in";
+            case "lpOut": return "Low pass filter out";
+            case "lpBoth": return "Low pass filter in low pass filter out";
+            case "hpInLpOut": return "High pass filter in low pass filter out";
+            case "lpInHpOut": return "Low pass filter in high pass filter out";
+            case "hpHalfOut": return "High-pass filter half out";
+            case "echo1CutEnd": return "Echo 1 cut end";
+            case "echo34CutEnd": return "Echo ¾ cut end";
+            case "echoHalfCutEnd": return "Echo ½ cut end";
+            case "echo1OutEnd": return "Echo 1 out end";
+            case "echo34OutEnd": return "Echo ¾ out end";
+            case "echoHalfOutEnd": return "Echo ½ out end";
+            case "delay34CutEnd": return "Delay ¾ cut end";
+            case "delayHalfCutEnd": return "Delay ½ cut end";
+            case "loop1": return "1 beat loop";
+            case "loop2": return "2 beat loop";
+            case "loop4": return "4 beat loop";
+            case "loop8": return "8 beat loop";
+            case "loop16": return "16 beat loop";
+            case MixOverride.DRAW: return "Drawn";
             default:
                 StringBuilder b = new StringBuilder();
                 for (char ch : id.toCharArray()) {
@@ -502,14 +579,31 @@ final class MixOverview {
         MixOverride o = current();
         if (o == null) return;
         String p = PRESETS[i];
+        // a preset other than Custom drops the drawn lanes: asked first, and Undo brings them back
+        if (!p.equals("custom") && o.hasDrawing() && !p.equals(o.preset)) {
+            int drawn = 0;
+            for (int lane = 0; lane < MixOverride.LANE_COUNT; lane++) if (drawingOf(o, lane) != null) drawn++;
+            confirmReplace(drawn, (drawn > 1 ? "The drawn lanes are" : "The drawn lane is") + " replaced by " + PRESET_NAMES[i] + ".", () -> {
+                MixOverride now = current();
+                if (now == null) return;
+                undo.push(Automix.overview().pairKey, now, now.bars);
+                drawKey = null;
+                applyPreset(now, p);
+            });
+            return;
+        }
+        applyPreset(o, p);
+    }
+
+    private static void applyPreset(MixOverride o, String p) {
         o.family = null;
         if (p.equals("custom")) {
             String[] l = lanesNow(o);
-            o.volume = l[0];
-            o.eq = l[1];
-            o.effect = l[2];
+            for (int k = 0; k < l.length; k++) o.setLane(k, l[k]);
         }
         o.preset = p.equals("auto") ? null : p;
+        // a preset picked (Auto too) replaces a retired one: its note goes
+        o.retiredPreset = null;
         // (Loop: the loop decks do their own tempo ramp, editor.md §2)
         if (p.equals("loop")) o.beatMatch = null;
         save(o);
@@ -519,14 +613,243 @@ final class MixOverview {
     private static void pickLane(int lane, String shape) {
         MixOverride o = current();
         if (o == null) return;
+        // a shape over a drawing replaces its points: asked first, and Undo brings them back
+        if (drawingOf(o, lane) != null) {
+            confirmReplace(1, "The drawn " + LANE_TITLES[lane] + " lane is replaced by " + shapeName(shape) + ".", () -> {
+                MixOverride now = current();
+                if (now == null) return;
+                undo.push(Automix.overview().pairKey, now, now.bars);
+                if (drawKey != null && DrawEdit.laneOf(drawKey) == lane) drawKey = null;
+                applyLane(now, lane, shape);
+            });
+            return;
+        }
+        applyLane(o, lane, shape);
+    }
+
+    private static void applyLane(MixOverride o, int lane, String shape) {
         String[] l = lanesNow(o);
         l[lane] = shape;
         o.family = null;
         o.preset = "custom";
-        o.volume = l[0];
-        o.eq = l[1];
-        o.effect = l[2];
+        o.drawn = o.drawn.clone();
+        if (lane < MixOverride.LANE_COUNT) o.drawn[lane] = null;
+        for (int k = 0; k < l.length; k++) o.setLane(k, l[k]);
         save(o);
+    }
+
+    /**
+     * "Replace the drawing?" ("the drawings" for more than one) before a pick drops drawn points
+     * (editor.md §10 rule 6). Custom and Reset to Auto don't ask.
+     */
+    private static void confirmReplace(int drawings, String what, Runnable yes) {
+        Activity a = owner;
+        if (a == null || a.isFinishing()) return;
+        new android.app.AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(drawings > 1 ? "Replace the drawings?" : "Replace the drawing?")
+                .setMessage(what + (drawings > 1 ? " Undo brings them back." : " Undo brings it back."))
+                .setPositiveButton("Replace", (x, w) -> yes.run())
+                .setNegativeButton("Keep it", null)
+                .show();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // drawn curves (editor.md §10, automix-overview.js startDraw .. repeat)
+
+    /** A point under the finger: the drawing as it changes, which deck and point. */
+    private static final class PointDrag {
+        Overview s;
+        String key;
+        boolean out, moved, added;
+        int i;
+        MixOverride.Drawing d;
+        float x0, y0;
+    }
+
+    /** The beat a drawing's x counts in, as the planner reads it (drawCtx, §10 rule 4). */
+    private static final class Ctx {
+        double beatSec;
+        Planner.Glide glide;
+        String unit;
+    }
+
+    private static Ctx ctxOf(Overview s) {
+        Planner.Plan m = s.plan;
+        boolean beat = !"crossfade".equals(m.style) && m.barSec > 0;
+        Ctx c = new Ctx();
+        c.beatSec = beat ? m.barSec / 4 : s.outGrid != null && s.outGrid[1] > 0 ? s.outGrid[1] : 0.5;
+        c.glide = beat ? m.glide : null;
+        c.unit = "crossfade".equals(m.style) ? "sec" : "beat";
+        return c;
+    }
+
+    /** A lane's drawing in the saved edit, or null when the lane is a shape. */
+    private static MixOverride.Drawing drawingOf(MixOverride o, int lane) {
+        if (o == null || !"custom".equals(o.preset) || lane >= MixOverride.LANE_COUNT) return null;
+        String[] l = o.lanes();
+        return l != null && MixOverride.DRAW.equals(l[lane]) ? o.drawn[lane] : null;
+    }
+
+    /** Whether the frame is for points: a curve chosen on a drawn lane of a planned blend. */
+    private static boolean drawOn(Overview s) {
+        return drawKey != null && s != null && s.why == null && s.toId != null && s.plan != null && s.loop == null
+                && s.editable && drawingOf(s.override, DrawEdit.laneOf(drawKey)) != null;
+    }
+
+    /** Draw in a lane's dropdown: the lane's shape as points, saved, its first curve chosen (rule 6). */
+    private static void startDraw(int lane) {
+        Overview s = Automix.overview();
+        if (s.pairKey == null || s.toId == null || s.why != null) return;
+        if (s.loop != null || s.plan == null) {
+            // on a loop mix: Custom first, and the drawing once the blend is planned for it
+            pendingDrawPair = s.pairKey;
+            pendingDrawLane = lane;
+            MixOverride o = current();
+            if (o == null) return;
+            applyPreset(o, "custom");
+            return;
+        }
+        MixOverride o = s.override;
+        MixOverride.Drawing had = drawingOf(o, lane);
+        drawKey = DrawEdit.firstKey(lane);
+        drawPair = s.pairKey;
+        if (had != null) {
+            if (view != null) view.sig = "";
+            return;
+        }
+        Ctx c = ctxOf(s);
+        String cur = lanesNow(o)[lane];
+        Object from = MixOverride.shapeDrawing(LANES[lane], cur, s.D, c.beatSec, c.glide, c.unit);
+        saveDrawing(s, lane, DrawEdit.start(lane, from, c.unit));
+    }
+
+    /** A drawing edit saved: Custom with this lane drawn and the length shown kept, one undo step. */
+    private static void saveDrawing(Overview s, int lane, MixOverride.Drawing d) {
+        MixOverride o = s.override;
+        int bars = DrawEdit.barsToSave(o != null ? o.bars : 0, s.plan.bars, s.plan.style);
+        undo.push(s.pairKey, o, bars);
+        save(s.pairKey, DrawEdit.withDrawing(o, lanesNow(o), lane, d, bars));
+    }
+
+    private static void undoDraw() {
+        Overview s = Automix.overview();
+        if (s.pairKey == null) return;
+        MixOverride back = undo.undo(s.pairKey, s.override);
+        if (back == null) return;
+        if (drawKey != null && drawingOf(back, DrawEdit.laneOf(drawKey)) == null) drawKey = null;
+        save(s.pairKey, back);
+    }
+
+    private static void repeat() {
+        Overview s = Automix.overview();
+        if (!drawOn(s)) return;
+        double from = number(repFrom), len = number(repLen);
+        int lane = DrawEdit.laneOf(drawKey);
+        Ctx c = ctxOf(s);
+        MixOverride.Drawing d = drawingOf(s.override, lane);
+        double end = MixOverride.drawX(s.D, d.unit, c.beatSec, c.glide);
+        DrawEdit.Repeated r = DrawEdit.repeat(d, drawKey, from, len, end);
+        if (r.refused != null) refusedNote = r.refused;
+        else if (r.d != null) saveDrawing(s, lane, r.d);
+    }
+
+    private static double number(EditText e) {
+        try {
+            return Double.parseDouble(e.getText().toString().trim());
+        } catch (Exception x) {
+            return Double.NaN;
+        }
+    }
+
+    /** The drawing's row: which curve (the drawn lanes' ones, and Done), Repeat, Undo. */
+    private static View drawTools(Activity a) {
+        drawRow = new LinearLayout(a);
+        drawRow.setOrientation(LinearLayout.VERTICAL);
+        drawRow.setVisibility(View.GONE);
+        String[] names = new String[DrawEdit.KEYS.length + 1];
+        System.arraycopy(DrawEdit.CHIPS, 0, names, 0, DrawEdit.CHIPS.length);
+        names[DrawEdit.KEYS.length] = "Done";
+        drawRow.addView(chipRow(a, "Draw", names.length, i -> names[i], curveChips, i -> {
+            drawKey = i < DrawEdit.KEYS.length ? DrawEdit.KEYS[i] : null;
+            drawPair = Automix.overview().pairKey;
+            pdrag = null;
+            refusedNote = "";
+            if (view != null) view.sig = "";
+        }));
+        LinearLayout rep = new LinearLayout(a);
+        rep.setGravity(Gravity.CENTER_VERTICAL);
+        rep.setPadding(0, dp(a, 6), 0, 0);
+        rep.addView(text(a, "Repeat", 13, 0xB3FFFFFF, false), new LinearLayout.LayoutParams(dp(a, 64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        rep.addView(text(a, "from ", 13, 0xE6FFFFFF, false));
+        repFrom = numberField(a, "0", "Where the part to repeat starts");
+        rep.addView(repFrom, new LinearLayout.LayoutParams(dp(a, 52), ViewGroup.LayoutParams.WRAP_CONTENT));
+        rep.addView(text(a, " every ", 13, 0xE6FFFFFF, false));
+        repLen = numberField(a, "2", "How long it is, and how far apart the copies are");
+        rep.addView(repLen, new LinearLayout.LayoutParams(dp(a, 52), ViewGroup.LayoutParams.WRAP_CONTENT));
+        repUnit = text(a, " beats", 13, 0xE6FFFFFF, false);
+        rep.addView(repUnit);
+        HorizontalScrollView hs = new HorizontalScrollView(a);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout btns = new LinearLayout(a);
+        btns.setPadding(dp(a, 6), 0, 0, 0);
+        TextView go = chip(a, "Repeat");
+        go.setContentDescription("Copy this part of the chosen line along the window, both songs");
+        go.setOnClickListener(v -> repeat());
+        btns.addView(go, chipLp(a));
+        undoChip = chip(a, "Undo");
+        undoChip.setOnClickListener(v -> {
+            if (v.isEnabled()) undoDraw();
+        });
+        btns.addView(undoChip, chipLp(a));
+        hs.addView(btns);
+        rep.addView(hs, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        drawRow.addView(rep);
+        return drawRow;
+    }
+
+    private static EditText numberField(Context a, String v, String what) {
+        EditText e = new EditText(a);
+        e.setText(v);
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        e.setTextColor(0xFFFFFFFF);
+        e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        e.setSingleLine();
+        e.setGravity(Gravity.CENTER);
+        e.setContentDescription(what);
+        e.setBackgroundTintList(android.content.res.ColorStateList.valueOf(FRAME));
+        return e;
+    }
+
+    /** The drawing's row as the edit stands: shown with a drawn lane, its curves' chips, Undo. */
+    private static void drawControls(Overview s) {
+        MixOverride ov = s.override;
+        // (a save replans: for a moment there is no plan, and the curve chosen stays)
+        boolean blend = s.why == null && s.plan != null && s.loop == null;
+        boolean shown = s.why == null && s.loop == null;
+        boolean any = false;
+        for (int k = 0; k < LANES.length; k++) any |= drawingOf(ov, k) != null;
+        boolean show = shown && any || undo.has(String.valueOf(s.pairKey));
+        if (show != (drawRow.getVisibility() == View.VISIBLE)) drawRow.setVisibility(show ? View.VISIBLE : View.GONE);
+        // another pair, or the lane no longer drawn: no curve chosen
+        if (drawKey != null && (!TextUtils.equals(drawPair, s.pairKey) || s.why == null && drawingOf(ov, DrawEdit.laneOf(drawKey)) == null)) drawKey = null;
+        for (int i = 0; i < DrawEdit.KEYS.length; i++) {
+            int lane = DrawEdit.laneOf(DrawEdit.KEYS[i]);
+            TextView c = curveChips[i];
+            boolean on = shown && drawingOf(ov, lane) != null;
+            int vis = on ? View.VISIBLE : View.GONE;
+            if (c.getVisibility() != vis) c.setVisibility(vis);
+            lit(c, DrawEdit.KEYS[i].equals(drawKey), LANE_COLORS[lane]);
+        }
+        lit(curveChips[DrawEdit.KEYS.length], drawKey == null, FRAME);
+        enable(undoChip, undo.has(String.valueOf(s.pairKey)));
+        if (blend && drawKey != null) set(repUnit, "sec".equals(ctxOf(s).unit) ? " s" : " beats");
+        // Draw picked on the loop mix: started once the blend is planned for that pair
+        if (pendingDrawPair != null && blend && s.editable && pendingDrawPair.equals(s.pairKey)) {
+            pendingDrawPair = null;
+            startDraw(pendingDrawLane);
+        } else if (pendingDrawPair != null && !pendingDrawPair.equals(s.pairKey)) {
+            pendingDrawPair = null;
+        }
     }
 
     /** The lanes on screen: the custom ones, else the preset's, else Smooth's (automix-overview.js lanesNow). */
@@ -623,9 +946,34 @@ final class MixOverview {
      */
     static void windowWith(Overview s, MixOverride o, boolean out, MixOverride.Position pos) {
         if (out) o.out = pos;
-        else o.in = pos;
+        else {
+            // moving the mix-in keeps B's late entry (mix-file.md rule 2)
+            double late = o.in != null ? o.in.delaySec : 0;
+            if (late > 0 && !(pos.delaySec > 0)) pos.delaySec = late;
+            o.in = pos;
+        }
         if (out && o.in == null) o.in = positionOf(s, false, s.plan.mixInTrackTime, false, false);
         if (!out && o.out == null) o.out = positionOf(s, true, s.plan.mixOutTrackTime, false, false);
+    }
+
+    /**
+     * B's late entry from the field (automix-overview.js setLate): seconds into the mix, to the ms,
+     * up to 60; 0 (or nothing) clears it. The mix-in stays where the plan has it.
+     */
+    static void setLate(double v) {
+        Overview s = Automix.overview();
+        if (!windowEditable(s)) return;
+        double late = v >= 0.001 ? Math.round(Math.min(v, 60) * 1000) / 1000.0 : 0;
+        MixOverride o = s.override != null ? s.override.copy() : new MixOverride();
+        double was = o.in != null ? o.in.delaySec : 0;
+        if (Math.abs(late - was) < 1e-9) return;
+        if (late == 0 && o.in == null) return;
+        MixOverride.Position in = (o.in != null ? o.in : positionOf(s, false, s.plan.mixInTrackTime, false, false)).copyOf();
+        in.delaySec = late;
+        o.in = null;
+        windowWith(s, o, false, in);
+        o.in.delaySec = late;
+        save(s.pairKey, o);
     }
 
     /** A 10 ms step of one song's position (from where the plan has it, when nothing is saved yet). */
@@ -640,9 +988,18 @@ final class MixOverview {
             refusedNote = "Nudges reach " + NUDGE_MAX_MS / 1000 + " s at most: drag the song instead";
             return;
         }
-        MixOverride.Position p = new MixOverride.Position(now.bar, now.beat, n, Math.round((now.sec + dir * NUDGE_MS / 1000.0) * 1000) / 1000.0);
+        // a nudge keeps a seconds-only position seconds only (editor.md §6)
+        MixOverride.Position p = new MixOverride.Position(now.bar, now.beat, n, Math.round((now.sec + dir * NUDGE_MS / 1000.0) * 1000) / 1000.0, now.secOnly);
+        // the drag's limits (editor.md §6): a nudge further past one is refused, one back inside goes
+        double[] lim = limitsOf(s, out);
+        String[] why = LIMIT_WHY[out ? 0 : 1];
+        if (dir < 0 && p.sec < lim[0] - 1e-6 || dir > 0 && p.sec > lim[1] + 1e-6) {
+            refusedNote = "held: " + (dir < 0 ? why[0] : why[1]);
+            return;
+        }
         windowWith(s, o, out, p);
-        save(o);
+        // the pair the nudge was for, not one that came on meanwhile
+        save(s.pairKey, o);
     }
 
     private static String fmtSec(double t) {
@@ -653,7 +1010,10 @@ final class MixOverview {
 
     /** "A mixes out at 3:12.4 (bar 81) · B enters at 0:32.4 (bar 17)"; bars count from 1 on screen. */
     private static String readout(MixOverride.Position out, MixOverride.Position in) {
-        return "A mixes out at " + fmtSec(out.sec) + " (bar " + (out.bar + 1) + ") · B enters at " + fmtSec(in.sec) + " (bar " + (in.bar + 1) + ")";
+        // seconds only: no bar in the readout (editor.md §6)
+        return "A mixes out at " + fmtSec(out.sec) + (out.secOnly ? "" : " (bar " + (out.bar + 1) + ")")
+                + " · B enters at " + fmtSec(in.sec) + (in.secOnly ? "" : " (bar " + (in.bar + 1) + ")")
+                + (in.delaySec > 0 ? String.format(Locale.ROOT, ", %.1f s into the mix", in.delaySec) : "");
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -679,6 +1039,11 @@ final class MixOverview {
         // once shown it keeps its room (invisible, not gone): the chips below don't jump up when it ends
         if (on != (work.getVisibility() == View.VISIBLE)) work.setVisibility(on ? View.VISIBLE : View.INVISIBLE);
         if (!on) return;
+        workBar.setVisibility(s.waitNoBar ? View.GONE : View.VISIBLE);
+        if (s.waitNoBar) {
+            set(workText, s.waiting);
+            return;
+        }
         boolean known = s.waitDone >= 0;
         set(workText, s.waiting + (known ? String.format(Locale.ROOT, " · %d%%", Math.round(s.waitDone * 100)) : "…"));
         if (workBar.isIndeterminate() == known) workBar.setIndeterminate(!known);
@@ -729,6 +1094,7 @@ final class MixOverview {
     }
 
     private static void controls(Overview s) {
+        drawControls(s);
         boolean has = s.why == null;
         boolean pair = s.toId != null && s.pairKey != null;
         MixOverride ov = s.override;
@@ -741,28 +1107,39 @@ final class MixOverview {
             enable(b, pair && !(PRESETS[i].equals("loop") && loopNone));
             if (i == 0) set(b, preset.equals("auto") && has ? s.autoName() : "Auto");
         }
+        // Loop has its own lanes; No transition has none, nor a length or beat match (editor.md §2)
+        boolean off = preset.equals("loop") || preset.equals("none");
         // the lanes a first change starts from: Auto shows Smooth's (lanesNow)
         String[] lanes = lanesNow(ov);
         for (int k = 0; k < LANES.length; k++) {
             TextView c = laneChips[k];
             set(c, shapeName(lanes[k]) + " ▾");
-            lit(c, preset.equals("custom"), new int[]{VOLUME, EQ, EFFECT}[k]);
-            enable(c, pair && !preset.equals("loop"));
+            lit(c, preset.equals("custom"), LANE_COLORS[k]);
+            enable(c, pair && !off);
         }
-        enable(customToggle, !preset.equals("loop"));
+        enable(customToggle, !off);
         for (int i = 0; i < MATCH.length; i++) {
             lit(matchChips[i], MATCH[i].equals(bm), FRAME);
-            enable(matchChips[i], pair && !preset.equals("loop"));
+            enable(matchChips[i], pair && !off);
         }
         boolean isLoop = preset.equals("loop") || (preset.equals("auto") && has && "loop".equals(s.style()));
         int bars = ov != null ? ov.bars : 0;
         for (int i = 0; i < BARS.length; i++) {
             lit(barChips[i], BARS[i] == bars, FRAME);
-            enable(barChips[i], pair && !(isLoop && BARS[i] != 0));
+            enable(barChips[i], pair && !preset.equals("none") && !(isLoop && BARS[i] != 0));
         }
         boolean winOn = windowEditable(s);
         boolean hasWin = ov != null && (ov.out != null || ov.in != null);
         for (TextView c : nudgeChips) enable(c, winOn);
+        if (lateField != null) {
+            lateField.setEnabled(winOn);
+            lateField.setAlpha(winOn ? 1f : 0.35f);
+            if (!lateField.hasFocus()) {
+                double late = ov != null && ov.in != null ? ov.in.delaySec : 0;
+                String t = late > 0 ? String.valueOf(late) : "0";
+                if (!t.contentEquals(lateField.getText())) lateField.setText(t);
+            }
+        }
         lit(winReset, !hasWin, FRAME);
         enable(winReset, winOn && hasWin);
         lit(lock, ov != null && ov.lock, FRAME);
@@ -781,13 +1158,15 @@ final class MixOverview {
         String n = "";
         Drag d = drag;
         if (!has) {
-            n = s.waiting != null ? "The mix is planned once the analysis is done." : ov != null ? "These two songs have an edit of their own: Reset clears it." : "";
+            n = s.waiting != null && !s.waitNoBar ? "The mix is planned once the analysis is done." : ov != null ? "These two songs have an edit of their own: Reset clears it." : "";
         } else if (d != null && d.pos != null && s.plan != null) {
             MixOverride.Position other = positionOf(s, !d.out, d.out ? s.plan.mixInTrackTime : s.plan.mixOutTrackTime, false, false);
             n = d.out ? readout(d.pos, other) : readout(other, d.pos);
             if (d.limit != null) n += " · held: " + d.limit;
         } else if (!refusedNote.isEmpty()) {
             n = refusedNote;
+        } else if (drawOn(s)) {
+            n = "Tap the frame to add a point, drag one to move it, long-press one to delete it.";
         } else if (!s.editable) {
             n = "Mixing now: an edit is for the next time these two play.";
         } else if (s.provisional) {
@@ -961,7 +1340,9 @@ final class MixOverview {
                     // a second finger: a zoom, not a drag (the drag is dropped, nothing saved)
                     pinching = true;
                     removeCallbacks(longPress);
+                    removeCallbacks(deletePress);
                     drag = null;
+                    pdrag = null;
                     refusedNote = "";
                     getParent().requestDisallowInterceptTouchEvent(true);
                     invalidate();
@@ -969,6 +1350,10 @@ final class MixOverview {
                 }
                 case MotionEvent.ACTION_DOWN: {
                     pinching = false;
+                    if (drawOn(o)) {
+                        pointDown(e, o, w);
+                        return true;
+                    }
                     if (!windowEditable(o)) return true;
                     Drag d = new Drag();
                     d.out = e.getY() < getHeight() / 2f;
@@ -986,6 +1371,11 @@ final class MixOverview {
                     return true;
                 }
                 case MotionEvent.ACTION_MOVE: {
+                    if (pdrag != null) {
+                        if (!pinching) pointMove(e, w);
+                        invalidate();
+                        return true;
+                    }
                     Drag d = drag;
                     if (d == null || pinching) return true;
                     if (!moved && Math.abs(e.getX() - downX) > 8 * getResources().getDisplayMetrics().density) {
@@ -1000,6 +1390,13 @@ final class MixOverview {
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL: {
                     removeCallbacks(longPress);
+                    removeCallbacks(deletePress);
+                    PointDrag pd = pdrag;
+                    pdrag = null;
+                    if (pd != null && pd.moved && !pinching && e.getActionMasked() == MotionEvent.ACTION_UP
+                            && pd.s.pairKey != null && pd.s.pairKey.equals(Automix.overview().pairKey)) {
+                        saveDrawing(pd.s, DrawEdit.laneOf(pd.key), pd.d);
+                    }
                     Drag d = drag;
                     drag = null;
                     if (d != null && moved && !pinching && e.getActionMasked() == MotionEvent.ACTION_UP) dragEnd(d);
@@ -1061,6 +1458,7 @@ final class MixOverview {
             } else {
                 c.drawBitmap(layer, 0, 0, null);
             }
+            drawPoints(c, o, w, h);
             // the playhead, on the mix's clock
             if (!Double.isNaN(o.at) && o.at >= t0 && o.at <= t1) {
                 float x = X(o.at, w);
@@ -1069,6 +1467,143 @@ final class MixOverview {
                 float dd = getResources().getDisplayMetrics().density;
                 c.drawRect(x - dd, 4 * dd, x + dd, h - 4 * dd, paint);
             }
+        }
+
+        // ----- the drawing's points (automix-overview.js hitOf, pointAt, pointStart/Move, pointDelete, drawPoints)
+
+        /** A long press on a point without moving it: the point is deleted (a volume deck keeps its last). */
+        private final Runnable deletePress = () -> {
+            PointDrag pd = pdrag;
+            if (pd == null || pd.added || pd.moved) return;
+            pdrag = null;
+            DrawEdit.Edit r = DrawEdit.delete(pd.key, DrawEdit.points(pd.d, pd.key, pd.out), pd.i);
+            if (r.refused != null) refusedNote = r.refused;
+            else if (r.pts != null && pd.s.pairKey != null && pd.s.pairKey.equals(Automix.overview().pairKey)) {
+                performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                saveDrawing(pd.s, DrawEdit.laneOf(pd.key), DrawEdit.withPoints(pd.d, pd.key, pd.out, r.pts));
+            }
+            invalidate();
+        };
+
+        /** A value's height in deck k's half as y (the static picture's lanes). */
+        private float Y(String key, int k, double n, int h) {
+            float d = getResources().getDisplayMetrics().density, gap = 10 * d, laneH = (h - gap * 3) / 2;
+            float top = k == 0 ? gap : gap * 2 + laneH;
+            return key.equals("gain") ? (float) (top + laneH - d - n * (laneH - 4 * d)) : (float) (top + 2 * d + (1 - n) * (laneH - 6 * d));
+        }
+
+        private double N(String key, int k, float y, int h) {
+            float d = getResources().getDisplayMetrics().density, gap = 10 * d, laneH = (h - gap * 3) / 2;
+            float top = k == 0 ? gap : gap * 2 + laneH;
+            return key.equals("gain") ? (top + laneH - d - y) / (laneH - 4 * d) : 1 - (y - top - 2 * d) / (laneH - 6 * d);
+        }
+
+        /** A finger's place as a point [x, v] of the chosen curve, x snapped (a quarter beat, or 10 ms). */
+        private double[] pointAt(Overview o, MixOverride.Drawing d, String key, int k, float px, float py, int w) {
+            Ctx c = ctxOf(o);
+            double t = Math.max(0, Math.min(T(px, w), o.D));
+            double x = DrawEdit.snap(MixOverride.drawX(t, d.unit, c.beatSec, c.glide), d.unit, false);
+            return new double[]{x, DrawEdit.value(key, N(key, k, py, getHeight()))};
+        }
+
+        private void pointDown(MotionEvent e, Overview o, int w) {
+            refusedNote = "";
+            int h = getHeight();
+            int k = e.getY() < h / 2f ? 0 : 1;
+            String key = drawKey;
+            MixOverride.Drawing d = drawingOf(o.override, DrawEdit.laneOf(key));
+            if (d == null) return;
+            getParent().requestDisallowInterceptTouchEvent(true);
+            Ctx c = ctxOf(o);
+            double[][] pts = DrawEdit.points(d, key, k == 0);
+            float hit = 16 * getResources().getDisplayMetrics().density;
+            int best = -1;
+            for (int i = 0; i < pts.length; i++) {
+                float dist = (float) Math.hypot(X(MixOverride.drawSec(pts[i][0], d.unit, c.beatSec, c.glide), w) - e.getX(),
+                        Y(key, k, DrawEdit.norm(key, pts[i][1]), h) - e.getY());
+                if (dist <= hit) {
+                    hit = dist;
+                    best = i;
+                }
+            }
+            PointDrag pd = new PointDrag();
+            pd.s = o;
+            pd.key = key;
+            pd.out = k == 0;
+            pd.x0 = e.getX();
+            pd.y0 = e.getY();
+            if (best < 0) {
+                double t = T(e.getX(), w);
+                if (t < 0 || t > o.D) return; // points go inside the frame
+                DrawEdit.Edit r = DrawEdit.add(pts, pointAt(o, d, key, k, e.getX(), e.getY(), w));
+                if (r.refused != null) refusedNote = r.refused;
+                if (r.pts == null) return;
+                pd.i = r.i;
+                pd.d = DrawEdit.withPoints(d, key, pd.out, r.pts);
+                pd.added = pd.moved = true;
+            } else {
+                pd.i = best;
+                pd.d = d;
+                postDelayed(deletePress, LONG_PRESS_MS);
+            }
+            pdrag = pd;
+            invalidate();
+        }
+
+        private void pointMove(MotionEvent e, int w) {
+            PointDrag pd = pdrag;
+            if (!pd.moved && Math.hypot(e.getX() - pd.x0, e.getY() - pd.y0) < 8 * getResources().getDisplayMetrics().density) return;
+            removeCallbacks(deletePress);
+            int k = pd.out ? 0 : 1;
+            double[] p = pointAt(pd.s, pd.d, pd.key, k, e.getX(), e.getY(), w);
+            DrawEdit.Edit r = DrawEdit.move(DrawEdit.points(pd.d, pd.key, pd.out), pd.i, p);
+            pd.d = DrawEdit.withPoints(pd.d, pd.key, pd.out, r.pts);
+            pd.moved = true;
+        }
+
+        /** The chosen curve on top: bold, with its points (the one under the finger white). */
+        private void drawPoints(Canvas g, Overview o, int w, int h) {
+            if (!drawOn(o)) return;
+            String key = drawKey;
+            int lane = DrawEdit.laneOf(key);
+            PointDrag pd = pdrag;
+            MixOverride.Drawing d = pd != null && pd.d != null ? pd.d : drawingOf(o.override, lane);
+            if (d == null) return;
+            Ctx c = ctxOf(o);
+            float dd = getResources().getDisplayMetrics().density;
+            float x0 = X(0, w), x1 = X(o.D, w);
+            int color = LANE_COLORS[lane];
+            g.save();
+            g.clipRect(x0, 0, x1, h);
+            for (int k = 0; k < 2; k++) {
+                double[][] pts = DrawEdit.points(d, key, k == 0);
+                if (pts.length == 0) continue;
+                float[][] xy = new float[pts.length][];
+                for (int i = 0; i < pts.length; i++) {
+                    xy[i] = new float[]{X(MixOverride.drawSec(pts[i][0], d.unit, c.beatSec, c.glide), w), Y(key, k, DrawEdit.norm(key, pts[i][1]), h)};
+                }
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(2.5f * dd);
+                paint.setColor(color);
+                Path path = new Path();
+                path.moveTo(x0, xy[0][1]);
+                for (float[] q : xy) path.lineTo(q[0], q[1]);
+                path.lineTo(x1, xy[xy.length - 1][1]);
+                g.drawPath(path, paint);
+                for (int i = 0; i < xy.length; i++) {
+                    boolean held = pd != null && pd.out == (k == 0) && pd.i == i;
+                    float r = (held ? 6 : 4.5f) * dd;
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(held ? 0xFFFFFFFF : color);
+                    g.drawCircle(xy[i][0], xy[i][1], r, paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dd);
+                    paint.setColor(0xFF15141C);
+                    g.drawCircle(xy[i][0], xy[i][1], r, paint);
+                }
+            }
+            paint.setStyle(Paint.Style.FILL);
+            g.restore();
         }
 
         private float X(double t, int w) {
@@ -1157,9 +1692,14 @@ final class MixOverview {
                 for (int lane = 0; lane < 2; lane++) {
                     Map<String, double[][]> side = lane == 0 ? o.curves.out : o.curves.in;
                     curve(g, p, side.get("bassDb"), top[lane], laneH, fx0, fx1, w, EQ, 0);
+                    curve(g, p, side.get("midDb"), top[lane], laneH, fx0, fx1, w, (EQ & 0x00FFFFFF) | 0xCC000000, 0);
                     curve(g, p, side.get("highDb"), top[lane], laneH, fx0, fx1, w, (EQ & 0x00FFFFFF) | 0xAA000000, 0);
                     curve(g, p, side.get("lowpassHz"), top[lane], laneH, fx0, fx1, w, EFFECT, 1);
                     curve(g, p, side.get("highpassHz"), top[lane], laneH, fx0, fx1, w, EFFECT, 2);
+                    curve(g, p, side.get("noise"), top[lane], laneH, fx0, fx1, w, (EFFECT & 0x00FFFFFF) | 0xAA000000, 3);
+                    curve(g, p, side.get("echoSend"), top[lane], laneH, fx0, fx1, w, FX, 3);
+                    curve(g, p, side.get("reverbSend"), top[lane], laneH, fx0, fx1, w, (FX & 0x00FFFFFF) | 0xCC000000, 3);
+                    curve(g, p, side.get("delaySend"), top[lane], laneH, fx0, fx1, w, (FX & 0x00FFFFFF) | 0x99000000, 3);
                 }
                 p.setPathEffect(null);
             }
@@ -1188,18 +1728,18 @@ final class MixOverview {
             return b;
         }
 
-        /** One lane's curve inside the frame. kind 0: dB (0 at the top, the cut at the bottom); 1: low-pass Hz; 2: high-pass Hz. */
+        /** One lane's curve inside the frame. kind 0: dB (0 at the top, the cut at the bottom); 1: low-pass Hz; 2: high-pass Hz; 3: an amount 0..1. */
         private void curve(Canvas g, Paint p, double[][] pts, float top, float laneH, float fx0, float fx1, int w, int color, int kind) {
             if (pts == null || pts.length == 0) return;
             float d = getResources().getDisplayMetrics().density;
             float y0 = top + 2 * d, span = laneH - 6 * d;
             p.setColor(color);
-            p.setPathEffect(kind > 0 ? new android.graphics.DashPathEffect(new float[]{4 * d, 3 * d}, 0) : null);
+            p.setPathEffect(kind == 1 || kind == 2 ? new android.graphics.DashPathEffect(new float[]{4 * d, 3 * d}, 0) : null);
             Path path = new Path();
             boolean first = true;
             for (float x = Math.max(0, fx0); x <= Math.min(w, fx1); x += 2 * d) {
-                double val = valueAt(pts, T(x, w), kind > 0);
-                double f = kind == 0 ? 1 - Math.min(1, Math.max(0, val / cutDb()))
+                double val = valueAt(pts, T(x, w), kind == 1 || kind == 2);
+                double f = kind == 3 ? Math.min(1, Math.max(0, val)) : kind == 0 ? 1 - Math.min(1, Math.max(0, val / cutDb()))
                         : Math.log(Math.max(20, val) / 20) / Math.log(1000);
                 if (kind == 2) f = 1 - f;
                 float y = (float) (y0 + (1 - f) * span);

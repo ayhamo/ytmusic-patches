@@ -234,9 +234,11 @@ final class CanvasSongMenu {
 
     private static void videoDialog(Activity a, Now n, List<String[]> rows) {
         if (rows.isEmpty()) {
-            Toast.makeText(a, "No videos found for this song", Toast.LENGTH_SHORT).show();
+            Toast.makeText(a.getApplicationContext(), "No videos found for this song", Toast.LENGTH_SHORT).show();
             return;
         }
+        // the search took a while: the page may be gone (a dialog on it would crash the app)
+        if (a.isFinishing() || a.isDestroyed()) return;
         float dp = a.getResources().getDisplayMetrics().density;
         LinearLayout col = new LinearLayout(a);
         col.setOrientation(LinearLayout.VERTICAL);
@@ -317,7 +319,7 @@ final class CanvasSongMenu {
             }
             if (f == null) {
                 Log.i(TAG, "canvas choice: " + id + " can't make a loop: the song keeps what it had");
-                main.post(() -> Toast.makeText(a, "That video can't make a loop", Toast.LENGTH_SHORT).show());
+                main.post(() -> Toast.makeText(a.getApplicationContext(), "That video can't make a loop", Toast.LENGTH_SHORT).show());
                 return;
             }
             CanvasCache.put(AnimatedCover.loopKey(n.vid, trial), f.getAbsolutePath());

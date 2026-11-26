@@ -63,8 +63,10 @@ def start_watchdog(secs):
     tmp = os.path.join(os.environ.get("TEMP", "."), "ayham_wd.sh")
     with open(tmp, "w", newline="\n") as f:
         f.write(WATCHDOG)
-    adb("push", tmp, WD_SCRIPT)
-    os.remove(tmp)
+    try:
+        adb("push", tmp, WD_SCRIPT)  # exits on failure: the temp file goes either way
+    finally:
+        os.remove(tmp)
     shell(f"nohup sh {WD_SCRIPT} {secs} >/dev/null 2>&1 &")
     # The network only goes off once the watchdog is there to bring it back: a push or start that
     # timed out would otherwise leave the emulator offline for good.

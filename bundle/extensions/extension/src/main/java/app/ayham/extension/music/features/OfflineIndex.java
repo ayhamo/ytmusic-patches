@@ -123,6 +123,9 @@ public final class OfflineIndex {
         t.start();
         checks = new android.os.Handler(t.getLooper());
         String dir = new File(c.getApplicationInfo().dataDir, "databases").getPath();
+        // a fresh install may have no databases folder yet: a watch on a missing folder never fires
+        //noinspection ResultOfMethodCallIgnored
+        new File(dir).mkdirs();
         observer = new android.os.FileObserver(dir, android.os.FileObserver.CLOSE_WRITE | android.os.FileObserver.DELETE | android.os.FileObserver.MOVED_TO) {
             @Override
             public void onEvent(int event, String path) {

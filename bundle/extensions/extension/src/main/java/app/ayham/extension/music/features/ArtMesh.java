@@ -12,7 +12,24 @@ final class ArtMesh {
     static final int GRID = 6, TEX = 32, BLUR_RADIUS = 1, BLUR_PASSES = 3;
     static final float VIBRANCE = 1.12f, FLOOR = 0.045f;
 
+    /** The brightest a backdrop may stay under white text (luma 0..255, the 90th percentile). */
+    static final int GLARE_CAP = 128;
+
     private ArtMesh() {
+    }
+
+    /**
+     * Extra black (alpha 0..255) over a backdrop made from these pixels: none while the cover's
+     * bright tenth stays at or under GLARE_CAP, else enough to bring it there. BitChord's 6% to 30%
+     * scrim left a near-white cover (Fortnight) light grey under the white title and controls.
+     */
+    static int glare(int[] px) {
+        if (px == null || px.length == 0) return 0;
+        int[] hist = new int[256];
+        for (int p : px) hist[(299 * ((p >> 16) & 0xFF) + 587 * ((p >> 8) & 0xFF) + 114 * (p & 0xFF)) / 1000]++;
+        int left = px.length / 10, l = 255;
+        for (; l > 0; l--) if ((left -= hist[l]) < 0) break;
+        return l <= GLARE_CAP ? 0 : Math.round(255 * (1 - GLARE_CAP / (float) l));
     }
 
     /** The cover's GRID x GRID cell means, as {r, g, b} 0..1. */

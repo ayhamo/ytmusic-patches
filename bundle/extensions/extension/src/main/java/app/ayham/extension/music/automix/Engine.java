@@ -47,7 +47,16 @@ final class Engine {
 
     /** The volume YT (or Morphe) last asked each player for, not counting ours: its loudness level. */
     private static final java.util.Map<Object, Float> ytAsked = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
-    private static volatile boolean selfCall; // set by our thread, read on YT's
+    /**
+     * Set while our own setVolume runs on this thread: the gate runs inside it (at the start of
+     * ExoPlayer.setVolume, on the same thread), so YT's own calls from another thread meanwhile still count.
+     */
+    private static final ThreadLocal<boolean[]> selfCall = new ThreadLocal<boolean[]>() {
+        @Override
+        protected boolean[] initialValue() {
+            return new boolean[1];
+        }
+    };
 
     static float ytVolume(Object player) {
         Float v = player == null ? null : ytAsked.get(player);
@@ -70,7 +79,7 @@ final class Engine {
 
     static float gate(Object player, float volume) {
         if (player != null && app.ayham.extension.music.features.PlayerTap.isOurs(player)) return volume; // our addon player
-        if (!selfCall && player != null) ytAsked.put(player, volume);
+        if (player != null && !selfCall.get()[0]) ytAsked.put(player, volume);
         float v;
         // the stream deck plays this song: YT's player stays silent under it
         if (player != null && StreamDeck.mutes(player)) v = 0f;
@@ -124,6 +133,8 @@ final class Engine {
     private AudioTrack track;
     private volatile long offsetFrames = Long.MIN_VALUE;
     private volatile boolean stop;
+    /** The track stood still (rule 4 watchdog): no silence tail, its writes can't return. */
+    private volatile boolean stalled;
     private volatile long written;
     private volatile double fadeFrom = Double.NaN, fadeLen; // master fade (abort / another song)
     /**
@@ -134,8 +145,9 @@ final class Engine {
     static final double SOFT_SEC = 0.25;
     private volatile double softFrom = Double.NaN;
     /**
-     * The crossfade is to a player lined up with the deck (the same song within a few ms): equal
-     * gain, which sums those to a flat level, where equal power would bump it +3 dB mid-way.
+     * The crossfade is to YT's player lined up with the deck (the same stream within a few ms): equal
+     * gain, which sums those to a flat level, where equal power would bump it +3 dB mid-way. Onto
+     * the addon's player (another copy) it is equal power.
      */
     private volatile boolean softLinear;
 
@@ -152,7 +164,16 @@ final class Engine {
     }
     private boolean softRamp;
     private final List<Double> offsets = new ArrayList<>();
-    private boolean started, tookOver, asked, toasted, handedOver, finished;
+    private boolean started, toasted;
+    // read by Automix outside the control loop too
+    private volatile boolean tookOver, asked, handedOver, finished;
+    /** The track's output latency read over the silent pre-roll (outputLatency), and what the takeover uses. */
+    private final List<Double> latencyReads = new ArrayList<>();
+    private double takeoverLatency = Double.NaN;
+    /** The incoming deck's fade-out (song seconds) asked for by control(), set by the render thread. */
+    private volatile double inFadeOutAt = Double.NaN;
+    /** When the master fade was asked for (uptimeMillis). */
+    private long fadeSetAt;
     private double handoverAt = Double.NaN;
     private long lead = 260;
     private int seeks, nudges;
@@ -175,15 +196,23 @@ final class Engine {
     /** The next song plays from an addon: its player takes the handover. */
     private boolean addonIn;
 
+    /** A deck's chain: bass shelf, high shelf, high-pass, low-pass, and the 1 kHz band (editor.md §12, run only when a curve moves it). */
     private static Biquad[] chain() {
         return new Biquad[]{new Biquad(Biquad.LOWSHELF, SR, 250), new Biquad(Biquad.HIGHSHELF, SR, 4000),
-                new Biquad(Biquad.HIGHPASS, SR, 0), new Biquad(Biquad.LOWPASS, SR, 0)};
+                new Biquad(Biquad.HIGHPASS, SR, 0), new Biquad(Biquad.LOWPASS, SR, 0), new Biquad(Biquad.PEAKING, SR, 1000, 0.7)};
     }
 
     private Engine(Mix m, Listener listener) {
         this.m = m;
         this.listener = listener;
+        Planner.Plan p = m.plan;
+        echo = p != null && "echo".equals(p.shape) && p.echo != null && p.echo.delaySec > 0 && p.echo.delaySec <= 2 ? new EchoLine(p.echo, m.t0) : null;
+        fx = m.fx || m.noise ? new FxBus(m, BLOCK, CONTROL) : null;
     }
+
+    /** The Effects returns and the noise (editor.md §12), or null when the mix has none. */
+    private final FxBus fx;
+    private final float[] fxOut = new float[BLOCK * 2];
 
     // ---------------------------------------------------------------------------------------------
     // Building (background thread)
@@ -214,6 +243,7 @@ final class Engine {
 
     /** The decks loaded and the renderers ready; null (logged) when the decoded audio doesn't cover the mix. */
     static Engine build(Context ctx, Mix m, Listener listener) {
+        long hOut = 0, hIn = 0;
         try {
             Models.loadNative();
             Analyzer.Pcm outPcm = Analyzer.tail(ctx, m.outId), inPcm = Analyzer.head(ctx, m.inId);
@@ -245,18 +275,33 @@ final class Engine {
             double t = m.elementAt;
             while (m.in.trackAt(t) < e.inRegionEnd - 2 && t < m.elementAt + 120) t += 0.25;
             e.deadline = t;
-            e.hOut = deck(LoopMixRenderer.OUT, m.out, ro);
-            e.hIn = deck(LoopMixRenderer.IN, m.in, ri);
-            e.firstFrame = Math.min(LoopMixRenderer.nativeFirstFrame(e.hOut), LoopMixRenderer.nativeFirstFrame(e.hIn));
+            hOut = deck(LoopMixRenderer.OUT, m.out, ro);
+            hIn = deck(LoopMixRenderer.IN, m.in, ri);
+            e.firstFrame = Math.min(LoopMixRenderer.nativeFirstFrame(hOut), LoopMixRenderer.nativeFirstFrame(hIn));
+            e.hOut = hOut;
+            e.hIn = hIn;
             return e;
         } catch (Throwable t) {
             Log.e(TAG, "mix not built", t);
+            // a renderer made before the failure holds native audio and stretch state: freed here
+            if (hOut != 0) LoopMixRenderer.nativeDestroy(hOut);
+            if (hIn != 0) LoopMixRenderer.nativeDestroy(hIn);
             return null;
         }
     }
 
     private static long deck(int index, Mix.Deck d, Region r) {
         long h = LoopMixRenderer.nativeCreate(SR);
+        try {
+            setDeck(h, index, d, r);
+        } catch (Throwable t) {
+            LoopMixRenderer.nativeDestroy(h);
+            throw t;
+        }
+        return h;
+    }
+
+    private static void setDeck(long h, int index, Mix.Deck d, Region r) {
         int n = d.knotT.length;
         double[] kf = new double[n], kp = new double[n];
         for (int k = 0; k < n; k++) {
@@ -268,7 +313,6 @@ final class Engine {
                 loop ? Math.round((d.loopA - r.start) * SR) : 0, loop ? Math.round((d.loopB - r.start) * SR) : 0,
                 loop && d.release < 1e17 ? (d.release - r.start) * SR : (loop ? 1e18 : 0), kf, kp, d.runOn, d.stopAt, 0.4, 1f);
         LoopMixRenderer.nativePrepare(h);
-        return h;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -282,6 +326,13 @@ final class Engine {
             @Override
             public void run() {
                 if (stop) return;
+                // another song plays (opened, skipped to, picked from the queue): this mix is let go, or it
+                // waited for a takeover point that never comes and Automix planned nothing (phone, 2026-11-24)
+                String playing = Automix.currentId();
+                if (playing != null && !m.outId.equals(playing)) {
+                    finish(false, "the playing song changed before the mix");
+                    return;
+                }
                 long now = Automix.position(outPlayer);
                 if (now >= at - 3000 && now < at - 600) {
                     start();
@@ -365,11 +416,57 @@ final class Engine {
     private float levelOut = Float.NaN, levelIn = Float.NaN;
     private static final float LEVEL_GLIDE = (float) (1 - Math.exp(-1 / (0.3 * SR)));
 
+    /** The echo out's delay line on the outgoing deck (Planner.echoOut; editor.md §5), or null. */
+    private final EchoLine echo;
+
+    /**
+     * crossfade.js's echo: the beat before the catch (mix time t0) is fed to a delay of one beat
+     * with feedback, after the deck's fader (which cuts the dry sound on the catch), so the echo
+     * rings on under the next song; it fades out over the mix's last 50 ms.
+     */
+    static final class EchoLine {
+        final float[] ring;
+        final double open, close, end, feedback;
+        int at;
+
+        EchoLine(Planner.Echo e, double t0) {
+            ring = new float[2 * Math.max(1, (int) Math.round(e.delaySec * SR))];
+            open = t0 - e.delaySec;
+            close = t0;
+            end = t0 + e.beats * e.delaySec;
+            feedback = e.feedback;
+        }
+
+        /** One block of the deck [buf] (mix frame [frame] on): the send taken from it, the echo added to it. */
+        void run(float[] buf, long frame) {
+            for (int i = 0; i < BLOCK; i++) {
+                double t = (frame + i) / (double) SR;
+                if (t < open - 0.005 || t > end) continue;
+                // the send: 5 ms ramps in at the beat's start, out on the catch
+                float send = (float) (t < open ? (t - (open - 0.005)) / 0.005 : t < close - 0.005 ? 1 : Math.max(0, (close - t) / 0.005));
+                float wet = (float) (t < end - 0.05 ? 1 : Math.max(0, (end - t) / 0.05));
+                for (int ch = 0; ch < 2; ch++) {
+                    float d = ring[at + ch];
+                    ring[at + ch] = send * buf[2 * i + ch] + (float) feedback * d;
+                    buf[2 * i + ch] += wet * d;
+                }
+                at = (at + 2) % ring.length;
+            }
+        }
+    }
+
     private void renderLoop() {
-        float[] buf = new float[BLOCK * 2], bo = new float[BLOCK * 2], bi = new float[BLOCK * 2];
-        long w = 0;
+        float[] buf = new float[BLOCK * 2], next = new float[BLOCK * 2], bo = new float[BLOCK * 2], bi = new float[BLOCK * 2];
+        long w = 0, bufFrame = Long.MIN_VALUE;
         try {
             while (!stop) {
+                // the incoming deck's fade-out, asked for by control(): set here, as this thread alone
+                // renders the decks and frees them
+                double fo = inFadeOutAt;
+                if (!Double.isNaN(fo)) {
+                    inFadeOutAt = Double.NaN;
+                    LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, fo);
+                }
                 long off = offsetFrames;
                 if (off == Long.MIN_VALUE || w + off < firstFrame) {
                     int n = BLOCK;
@@ -378,33 +475,23 @@ final class Engine {
                     track.write(buf, 0, n * 2, AudioTrack.WRITE_BLOCKING);
                     w += n;
                     written = w;
+                    bufFrame = Long.MIN_VALUE;
                     continue;
                 }
                 long f = w + off;
-                LoopMixRenderer.nativeRender(hOut, f, bo, 0, BLOCK);
-                LoopMixRenderer.nativeRender(hIn, f, bi, 0, BLOCK);
-                shape(m.out, fOut, bo, f);
-                shape(m.in, fIn, bi, f);
-                double fs = fadeFrom;
-                float lo = levelOutTarget, li = levelInTarget;
-                if (Float.isNaN(levelOut)) {
-                    levelOut = lo;
-                    levelIn = li;
-                }
-                double sf = softFrom;
-                for (int i = 0; i < BLOCK; i++) {
-                    float g = 1;
-                    if (!Double.isNaN(fs)) g = (float) Math.max(0, Math.min(1, 1 - ((f + i) / (double) SR - fs) / fadeLen));
-                    // the soft hand-over: the deck goes out on a cosine while YT comes in on a sine
-                    if (!Double.isNaN(sf)) g *= softOut(((f + i) / (double) SR - sf) / SOFT_SEC, softLinear);
-                    levelOut += (lo - levelOut) * LEVEL_GLIDE;
-                    levelIn += (li - levelIn) * LEVEL_GLIDE;
-                    buf[2 * i] = (bo[2 * i] * levelOut + bi[2 * i] * levelIn) * g;
-                    buf[2 * i + 1] = (bo[2 * i + 1] * levelOut + bi[2 * i + 1] * levelIn) * g;
-                }
+                // rendered one block ahead: the limiter's lookahead, with no delay against YT's clock
+                if (bufFrame != f) render(f, buf, bo, bi);
+                render(f + BLOCK, next, bo, bi);
+                // on the loop mix too, as a clip guard only (versions.md "The mix's ceiling" rule 1)
+                limiter.process(buf, next, sums(f) || sums(f + BLOCK));
                 track.write(buf, 0, BLOCK * 2, AudioTrack.WRITE_BLOCKING);
                 w += BLOCK;
                 written = w;
+                float[] t = buf;
+                buf = next;
+                next = t;
+                bufFrame = f + BLOCK;
+                double fs = fadeFrom;
                 if (!Double.isNaN(fs) && f / (double) SR > fs + fadeLen + 0.05) break;
             }
         } catch (Throwable t) {
@@ -414,9 +501,10 @@ final class Engine {
             try {
                 // 3 s of silence before the deck stops: stopping it right after the mix cut the whole
                 // phone's sound for ~10 ms (S21 FE, recorded 2026-11-17: Samsung's output reconfigures
-                // as a track stops); stopped later, while it plays silence, nothing is heard
+                // as a track stops); stopped later, while it plays silence, nothing is heard. Not on a
+                // stalled track: those blocking writes would never return, nor the track be released
                 float[] z = new float[BLOCK * 2];
-                for (int k = 0; k < 3 * SR / BLOCK; k++) track.write(z, 0, z.length, AudioTrack.WRITE_BLOCKING);
+                for (int k = 0; k < 3 * SR / BLOCK && !stalled; k++) track.write(z, 0, z.length, AudioTrack.WRITE_BLOCKING);
             } catch (Throwable ignored) {
             }
             try {
@@ -430,19 +518,169 @@ final class Engine {
             }
             LoopMixRenderer.nativeDestroy(hOut);
             LoopMixRenderer.nativeDestroy(hIn);
+            // logged here: the limiter's figures are written on this thread
+            if (limiter.lowered > 0) Log.i(TAG, String.format(Locale.US, "limiter: down to %.1f dB at most, %.0f ms lowered in all",
+                    20 * Math.log10(limiter.deepest), limiter.lowered * 1000.0 / SR));
             renderDone = true;
         }
     }
 
     /** A deck's gain and filters over one block (mix frame [frame] on). */
-    private static void shape(Mix.Deck d, Biquad[] f, float[] buf, long frame) {
+    /** The mix's soft limiter (Limiter): on while a deck sounds (limits). */
+    private final Limiter limiter = new Limiter(BLOCK);
+
+    /** The limiter is on for this block (limits). */
+    private boolean sums(long f) {
+        double t = (f + BLOCK / 2.0) / SR;
+        return limits(m, t, echo != null && t <= echo.end, fx != null && t >= m.t0 && t <= fx.until);
+    }
+
+    /**
+     * The limiter's rule at mix second t (versions.md "The mix's ceiling" rule 1): on as long as a deck
+     * sounds, from its fade-in at the takeover to the hand-over, a song alone on it included: a hot
+     * master held to ±1, or stretched to a playlist speed, clips there (2026-11-25: pair 1's B run-on,
+     * ~160 flat-top runs; pair 2's Stay at x0.97 over the hand lead, 332).
+     */
+    static boolean limits(Mix m, double t, boolean echoSounds, boolean fxSounds) {
+        // (versions.md 8ba27b64: on as long as a deck sounds, a song alone on it included; pair 2,
+        // 2026-11-25: Stay alone on the deck at x0.97 over the hand lead clipped)
+        return t >= -Mix.H || echoSounds || fxSounds;
+    }
+
+    /*
+     * YT's clock, with the outgoing song at its playlist speed r (spotify-mixes.md rule 10): its song
+     * second runs r per heard second, so a reading is kept as position / r less the heard second;
+     * the decks' mix 0 is then where YT reaches takeoverSong, and YT's song second at mix t is
+     * takeoverSong + r t. At x1 these are the plain position less the heard second.
+     */
+    static double clockOf(long posMs, double heardSec, double rate) {
+        return posMs / 1000.0 / rate - heardSec;
+    }
+
+    /** The decks' offset from the clock readings' median (mix = heard + offset). */
+    static double offsetSec(double clock, double takeoverSong, double rate) {
+        return clock - takeoverSong / rate;
+    }
+
+    /** YT's song second at mix second t, as it plays the outgoing song on. */
+    static double ytSongAt(double takeoverSong, double mix, double rate) {
+        return takeoverSong + rate * mix;
+    }
+
+    /** The speed YT plays the outgoing song at up to the takeover (its playlist speed, else x1). */
+    private double ytRate() {
+        return m.plan != null ? Mix.leadRate(m.plan) : 1;
+    }
+
+    /**
+     * The mix second YT's player is muted at for the takeover: 12 ms before the deck is whole (inside
+     * its 25 ms fade-in), moved the output latency ahead, as a volume is heard that much after it is set,
+     * and TAKEOVER_EXTRA_LEAD more: YT's own track is heard a little later than ours (Vaina Loca,
+     * 2026-11-25: a hit right at the takeover clipped for 15 ms with both playing).
+     */
+    static double takeoverMuteAt(double latencySec) {
+        return -0.012 - latencySec - TAKEOVER_EXTRA_LEAD;
+    }
+
+    static final double TAKEOVER_EXTRA_LEAD = 0.010;
+
+    /**
+     * The output latency from the pre-roll's readings: their median, held to 0.5 s. None, or a track
+     * that reports its head as already heard (under 5 ms): the S21 FE's measured 40 ms (mixerLead).
+     */
+    static double outputLatency(List<Double> reads) {
+        if (reads.isEmpty()) return 0.040;
+        List<Double> s = new ArrayList<>(reads);
+        Collections.sort(s);
+        double med = s.get(s.size() / 2);
+        return med < 0.005 ? 0.040 : Math.min(0.5, med);
+    }
+
+    /**
+     * How far ahead of the deck's heard clock YT's volume goes out at the hand-over (versions.md "The
+     * player's level at a take-over" rule 1): the output latency measured over the pre-roll, else 40 ms.
+     */
+    static double handoverLead(double measured) {
+        return Double.isNaN(measured) ? 0.040 : measured;
+    }
+
+    /** The track's playback head less the frame being heard now, in seconds; NaN unread. */
+    private double trackLatency(double heard) {
+        if (track == null || heard < 0) return Double.NaN;
+        long head = track.getPlaybackHeadPosition() & 0xffffffffL;
+        return (head - heard) / SR;
+    }
+
+    /**
+     * A deck held to ±1 before its level, as YT's own decoder holds a song: a lossy file's overs then
+     * peak where YT's player would (its volume), not at full scale.
+     */
+    static void clamp(float[] b) {
+        for (int i = 0; i < b.length; i++) {
+            float v = b[i];
+            if (v > 1f) b[i] = 1f;
+            else if (v < -1f) b[i] = -1f;
+            else if (v != v) b[i] = 0f; // a NaN: silence, not poison for the limiter and the track
+        }
+    }
+
+    /** One block of the mix at frame [f] into [buf]. */
+    private void render(long f, float[] buf, float[] bo, float[] bi) {
+        LoopMixRenderer.nativeRender(hOut, f, bo, 0, BLOCK);
+        LoopMixRenderer.nativeRender(hIn, f, bi, 0, BLOCK);
+        // B's late entry (mix-file.md rule 2): nothing of the next song before its start, filters and
+        // sends included; then up to the curve within LATE_RISE_SEC
+        if (m.inStart > 0 && f < (m.inStart + LATE_RISE_SEC) * SR) {
+            for (int i = 0; i < BLOCK; i++) {
+                float g = (float) lateGain((f + i) / (double) SR, m.inStart);
+                bi[2 * i] *= g;
+                bi[2 * i + 1] *= g;
+            }
+        }
+        shape(m.out, fOut, bo, f, m.mid);
+        if (echo != null) echo.run(bo, f);
+        shape(m.in, fIn, bi, f, m.mid);
+        // after the filters: even at rest the 20 Hz high-pass and 20 kHz low-pass push a peak over 1
+        clamp(bo);
+        clamp(bi);
+        double fs = fadeFrom;
+        float lo = levelOutTarget, li = levelInTarget;
+        if (Float.isNaN(levelOut)) {
+            levelOut = lo;
+            levelIn = li;
+        }
+        double sf = softFrom;
+        // the Effects returns and the noise (editor.md §12): fed by the decks at their levels
+        if (fx != null) {
+            Arrays.fill(fxOut, 0f);
+            fx.run(bo, bi, f, levelOut, levelIn, fxOut);
+        }
+        for (int i = 0; i < BLOCK; i++) {
+            float g = 1;
+            if (!Double.isNaN(fs)) g = (float) Math.max(0, Math.min(1, 1 - ((f + i) / (double) SR - fs) / fadeLen));
+            // the soft hand-over: the deck goes out on a cosine while YT comes in on a sine
+            if (!Double.isNaN(sf)) g *= softOut(((f + i) / (double) SR - sf) / SOFT_SEC, softLinear);
+            levelOut += (lo - levelOut) * LEVEL_GLIDE;
+            levelIn += (li - levelIn) * LEVEL_GLIDE;
+            buf[2 * i] = (bo[2 * i] * levelOut + bi[2 * i] * levelIn + fxOut[2 * i]) * g;
+            buf[2 * i + 1] = (bo[2 * i + 1] * levelOut + bi[2 * i + 1] * levelIn + fxOut[2 * i + 1]) * g;
+        }
+    }
+
+    private static void shape(Mix.Deck d, Biquad[] f, float[] buf, long frame, boolean mid) {
         for (int at = 0; at < BLOCK; at += CONTROL) {
             double t0 = (frame + at) / (double) SR, t1 = (frame + at + CONTROL) / (double) SR, tm = (t0 + t1) / 2;
             f[0].setValue(d.lowDb.at(tm));
             f[1].setValue(d.highDb.at(tm));
             f[2].setValue(d.hpHz.at(tm));
             f[3].setValue(d.lpHz.at(tm));
-            for (Biquad b : f) b.process(buf, at, at + CONTROL);
+            // bass, mid, high, high-pass, low-pass: the PC's chain (fx-plus.js)
+            f[0].process(buf, at, at + CONTROL);
+            if (mid) {
+                f[4].setValue(d.midDb.at(tm));
+                f[4].process(buf, at, at + CONTROL);
+            }
+            for (int k = 1; k < 4; k++) f[k].process(buf, at, at + CONTROL);
             double g0 = d.gain.at(t0), g1 = d.gain.at(t1);
             for (int i = 0; i < CONTROL; i++) {
                 float g = (float) (g0 + (g1 - g0) * i / CONTROL);
@@ -467,8 +705,8 @@ final class Engine {
         boolean fresh = lastClockP != Long.MIN_VALUE && p != lastClockP;
         lastClockP = p;
         if (fresh) {
-            offsets.add(p / 1000.0 - heard / SR);
-            freshOutAt = p / 1000.0 - heard / SR;
+            offsets.add(clockOf(p, heard / SR, ytRate()));
+            freshOutAt = clockOf(p, heard / SR, ytRate());
         }
         clockReads++;
         return clockReads >= 40 && offsets.size() >= 5;
@@ -480,9 +718,10 @@ final class Engine {
     /**
      * How long after the mixer a sample is heard, as measured on the S21 FE: with YT unmuted 12.5 ms
      * ahead the hole was 21 ms of silence between the deck's 25 ms fade and an 8 ms ramp back, so
-     * the ramp lands mid-fade at ~37 ms more; 40 ms is used. AudioTrack's own figure (getLatency()
-     * less its buffer: 84 ms there) counts more than the volume's path and would double the sound
-     * for ~45 ms instead, so it is only logged.
+     * the ramp lands mid-fade at ~37 ms more; 40 ms was used. Now the output latency read over the
+     * pre-roll (handoverLead; 53 ms on LDPlayer, 2026-11-25), 40 ms without a reading. AudioTrack's
+     * own figure (getLatency() less its buffer: 84 ms there) counts more than the volume's path and
+     * would double the sound for ~45 ms instead, so it is only logged.
      */
     private double mixerLead() {
         if (!leadLogged) {
@@ -494,9 +733,10 @@ final class Engine {
             } catch (Throwable t) {
                 read = "unread (" + t.getClass().getSimpleName() + ")";
             }
-            Log.i(TAG, "hand-over: YT's volume comes back 40 ms before the deck fades (the track says " + read + " after the mixer)");
+            Log.i(TAG, String.format(Locale.US, "hand-over: YT's volume comes back %.0f ms before the deck fades (%s; getLatency says %s after the mixer)",
+                    handoverLead(takeoverLatency) * 1000, Double.isNaN(takeoverLatency) ? "no latency reading" : "the output latency read at the takeover", read));
         }
-        return 0.040;
+        return handoverLead(takeoverLatency);
     }
 
     private double heardFrames() {
@@ -510,7 +750,34 @@ final class Engine {
             finish(false, null);
             return;
         }
-        if (outPlayer != null) levelOutTarget = ytVolume(outPlayer);
+        // a fade that never plays out (the track's clock stopped, a write stuck): the mix still ends,
+        // so automix isn't left running with YT's players let go
+        if (!Double.isNaN(fadeFrom) && SystemClock.uptimeMillis() - fadeSetAt > Math.round(fadeLen * 1000) + 3000) {
+            finish(false, null);
+            unstick();
+            return;
+        }
+        // rule 4: our track's playback head stood still for 3 s (a stuck output, a dead audio server):
+        // the mix is called off without marking the song, YT's player heard again
+        if (track != null && !stopping && Double.isNaN(fadeFrom)
+                && clockWatch.stalled(track.getPlaybackHeadPosition() & 0xffffffffL, SystemClock.uptimeMillis())) {
+            Log.w(TAG, "mix aborted: the audio clock stopped (" + ClockWatch.STALL_MS + " ms still)");
+            holding = false;
+            released = null;
+            Object p = inPlayer != null ? inPlayer : outPlayer;
+            if (p != null) restoreVolume(p);
+            if (inPlayer != null) {
+                speedBack();
+                restoreVolume(inPlayer);
+            }
+            finish(false, "the audio clock stopped");
+            unstick();
+            return;
+        }
+        // the outgoing deck follows YT's level only while YT still plays that song: once YT moves on, its
+        // old player is faded to 0 within ~0.3 s, and following it cut the rest of the mix's outgoing
+        // side (an echo out's tail, a blend's second half), recorded on the phone 2026-11-24
+        if (outPlayer != null && !asked && inPlayer == null) levelOutTarget = ytVolume(outPlayer);
         if (inPlayer != null) {
             // not YT's start-up ramp on it: the deck is playing that song already
             float v = inFade.follow(SystemClock.uptimeMillis(), ytVolume(inPlayer));
@@ -532,7 +799,7 @@ final class Engine {
             List<Double> s = new ArrayList<>(offsets);
             Collections.sort(s);
             double c = s.get(s.size() / 2);
-            long off = Math.round((c - m.takeoverSong) * SR);
+            long off = Math.round(offsetSec(c, m.takeoverSong, ytRate()) * SR);
             double iqr = (s.get(s.size() * 3 / 4) - s.get(s.size() / 4)) * 1000;
             // YT's readings are loose just after a seek or a stall: wait for steady ones while time allows
             if (iqr > 40) {
@@ -571,7 +838,7 @@ final class Engine {
                 offsets.clear();
                 clockReads = 0;
                 Collections.sort(s);
-                long off = Math.round((s.get(s.size() / 2) - m.takeoverSong) * SR);
+                long off = Math.round(offsetSec(s.get(s.size() / 2), m.takeoverSong, ytRate()) * SR);
                 double spread = (s.get(s.size() * 3 / 4) - s.get(s.size() / 4)) * 1000;
                 if (Math.abs(off - offsetFrames) > SR * 0.03 && spread < 40) {
                     Log.i(TAG, String.format(Locale.US, "YT's clock moved %+.0f ms: decks moved onto it", (off - offsetFrames) * 1000.0 / SR));
@@ -590,16 +857,29 @@ final class Engine {
                 releasedDeck = a;
             }
         }
-        if (!tookOver && mix >= -0.012) {
+        // the takeover's mute goes out one output latency ahead: YT's volume acts on the mixer, the
+        // deck's samples sit on the heard timeline (pair 1 on LDPlayer, 2026-11-25: muted 12 ms ahead,
+        // both played A whole for ~200 ms, 108 flat-top runs)
+        if (!tookOver && Double.isNaN(takeoverLatency)) {
+            if (mix < -0.6) {
+                double lat = trackLatency(heard);
+                if (!Double.isNaN(lat)) latencyReads.add(lat);
+            } else {
+                takeoverLatency = outputLatency(latencyReads);
+                Log.i(TAG, String.format(Locale.US, "takeover: YT muted %.0f ms ahead (the track's output latency, %d readings)",
+                        (takeoverLatency + 0.012) * 1000, latencyReads.size()));
+            }
+        }
+        if (!tookOver && !Double.isNaN(takeoverLatency) && mix >= takeoverMuteAt(takeoverLatency)) {
             tookOver = true;
             holding = true;
             released = null;
             setVolume(outPlayer, 0f);
             // YT's position from its last fresh reading, run on by the decks' clock (a single reading
             // now can be up to ~250 ms stale on some streams)
-            double yt = (freshOutAt + heard / SR) * 1000;
+            double yt = ytRate() * (freshOutAt + heard / SR) * 1000, deckAt = ytSongAt(m.takeoverSong, mix, ytRate());
             Log.i(TAG, String.format(Locale.US, "TAKEOVER at %.0f ms (deck at %.3f s, splice error %+.0f ms, YT's volume %.3f): %s", yt,
-                    m.takeoverSong + mix, yt - (m.takeoverSong + mix) * 1000, ytVolume(outPlayer), m.note));
+                    deckAt, yt - deckAt * 1000, ytVolume(outPlayer), m.note));
             listener.onMixStarted(this);
         }
         if (tookOver && !toasted && mix >= m.t0 - 0.05) {
@@ -612,7 +892,7 @@ final class Engine {
             if (now - lastSeekCheck > 100) {
                 lastSeekCheck = now;
                 long p = Automix.position(outPlayer);
-                if (p >= 0 && Math.abs(p - (m.takeoverSong + mix) * 1000) > 1500) {
+                if (p >= 0 && Math.abs(p - ytSongAt(m.takeoverSong, mix, ytRate()) * 1000) > 1500) {
                     abort("the playing song was seeked", true);
                     return;
                 }
@@ -652,18 +932,34 @@ final class Engine {
             // the render writes ~0.26 s ahead of what is heard (the track's buffer and the output's
             // latency): the crossfade starts past that, or its first part is skipped as a step
             handoverAt = mix + (deckTakes ? 0.3 : 0.5);
+            // a forced hand-over can land mid-nudge: the speed goes back now, while the player is still
+            // silent, so its audio re-plans in the 0.5 s before it is heard, not as it is unmuted
+            // (phone, 2026-11-24: forced at x0.920, a ~100 ms hole after the crossfade, -7.5 dB)
+            float home = (float) m.home;
+            if (nudgeUntil > 0 || Math.abs(setSpeed - home) > 0.0005f) {
+                nudge = 1;
+                nudgeUntil = 0;
+                nudgeEnds.remove(inPlayer);
+                setSpeed = home;
+                speed(inPlayer, home);
+                speedSetAt = SystemClock.elapsedRealtime();
+            }
             if (!deckTakes) {
                 softFrom = handoverAt - SOFT_SEC / 2;
-                softLinear = lined;
+                // equal gain only onto YT's player, which plays the deck's own stream (the two sum
+                // flat). The addon's player is another copy (FLAC against YT's Opus): a few ms apart
+                // they sum like two songs, so equal gain dipped mid-way (phone, 2026-11-24, screen-
+                // recorded at the hand-over to the addon: -2.5 dB over the 250 ms, heard as a cut)
+                softLinear = lined && !addonIn;
                 String to = addonIn ? "the addon's player" : "YT's player";
                 if (lined)
-                    Log.i(TAG, String.format(Locale.US, "hand-over to %s at mix %.2f s: a %.0f ms equal-gain crossfade (in step, last error %s ms)",
-                            to, mix, SOFT_SEC * 1000, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr)));
+                    Log.i(TAG, String.format(Locale.US, "hand-over to %s at mix %.2f s: a %.0f ms %s crossfade (in step, last error %s ms)",
+                            to, mix, SOFT_SEC * 1000, softLinear ? "equal-gain" : "equal-power", lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr)));
                 else
                     Log.w(TAG, String.format(Locale.US, "hand-over forced at mix %.2f s with %s not in step (last error %s ms): a %.0f ms equal-power crossfade",
                             mix, to, lastErr == Long.MIN_VALUE ? "-" : String.valueOf(lastErr), SOFT_SEC * 1000));
             } else {
-                LoopMixRenderer.nativeSetFadeOut(hIn, LoopMixRenderer.IN, m.in.trackAt(handoverAt));
+                inFadeOutAt = m.in.trackAt(handoverAt);
             }
             // the stream deck takes the song from here when it is in step (YT stays silent), else YT does
             if (deck != null && deck.inStep()) {
@@ -682,7 +978,7 @@ final class Engine {
         if (!handedOver && !Double.isNaN(handoverAt) && mix >= (Double.isNaN(soft) ? handoverAt - 0.0125 : soft) - mixerLead()) {
             handedOver = true;
             rescueOffHandover();
-            if (setSpeed != 1) speed(inPlayer, 1f);
+            speedBack();
             released = inPlayer;
             if (Double.isNaN(soft)) restoreVolume(inPlayer);
             else softRamp = true;
@@ -780,7 +1076,7 @@ final class Engine {
         inIdSeen = id;
         if (id.equals(m.inId)) return;
         Log.i(TAG, "the queue played " + id + " instead of " + m.inId + ": crossfading into it as it is");
-        if (setSpeed != 1) speed(inPlayer, 1f);
+        speedBack();
         released = inPlayer;
         Automix.rampVolume(inPlayer, 1.5);
         fadeOut(1.5);
@@ -791,7 +1087,21 @@ final class Engine {
         double heard = heardFrames();
         double mix = heard < 0 || offsetFrames == Long.MIN_VALUE ? 0 : (heard + offsetFrames) / SR;
         fadeLen = sec;
+        fadeSetAt = SystemClock.uptimeMillis();
         fadeFrom = mix + 0.2;
+    }
+
+    /** YT's speed back to the song's own once (x1, or its playlist speed; each change re-plans its audio), with no nudge left running on it. */
+    private void speedBack() {
+        if (inPlayer == null) return;
+        nudge = 1;
+        nudgeUntil = 0;
+        nudgeEnds.remove(inPlayer);
+        float home = (float) m.home;
+        if (setSpeed != home) {
+            setSpeed = home;
+            speed(inPlayer, home);
+        }
     }
 
     /** Ends the mix early: the deck fades out quickly and YT's players are let go. */
@@ -803,9 +1113,14 @@ final class Engine {
         Object p = inPlayer != null ? inPlayer : outPlayer;
         if (p != null && restoreOut) restoreVolume(p);
         if (inPlayer != null) {
-            if (setSpeed != 1) speed(inPlayer, 1f);
+            speedBack();
             restoreVolume(inPlayer);
         }
+        // a late entry (mix-file.md rule 2) called off before B came in: YT plays B from its mix-in,
+        // not from where its silent player ran up to it
+        double at = mixNow();
+        if (m.inStart > 0 && !Double.isNaN(at) && at < m.inStart && inPlayer instanceof SeekAccess && !handedOver && m.inId.equals(inIdSeen))
+            ((SeekAccess) inPlayer).ayham_seekTo(incomingSpotMs(m, at));
         if (track == null || offsetFrames == Long.MIN_VALUE) {
             finish(false, why);
             return;
@@ -816,18 +1131,121 @@ final class Engine {
 
     private String finishReason;
 
-    /** Pause: everything stops at once. */
+    /**
+     * The listener's pause (playback.md "The queue during a mix" rule 5): the mix is called off at
+     * once, not marked; YT's paused players get their volumes back (paused, never started here), the
+     * stream deck is handed back and the decks fade out over PAUSE_FADE_SEC from the next sample.
+     */
     void stopNow(String why) {
-        if (stop || finished) return;
+        if (stop || finished || stopping) return;
+        stopping = true;
         Log.i(TAG, "mix stopped: " + why);
         holding = false;
         released = null;
         if (outPlayer != null) restoreVolume(outPlayer);
         if (inPlayer != null) {
-            if (setSpeed != 1) speed(inPlayer, 1f);
+            speedBack();
             restoreVolume(inPlayer);
         }
-        finish(false, why);
+        if (deck != null) deck.handBack(why);
+        // after our Next: YT's paused player at the incoming song's spot the mix had reached, not
+        // where its held, silent player was (a seek doesn't start it)
+        double at = mixNow();
+        // (not a song the queue moved on to: that one is left where it is)
+        if (inPlayer instanceof SeekAccess && !Double.isNaN(at) && !handedOver && m.inId.equals(inIdSeen)) {
+            long to = incomingSpotMs(m, at);
+            ((SeekAccess) inPlayer).ayham_seekTo(to);
+            Log.i(TAG, "the incoming song left paused at " + to + " ms, where the mix was (YT's player at " + Automix.position(inPlayer) + " ms)");
+        }
+        if (track == null || offsetFrames == Long.MIN_VALUE) {
+            finish(false, why);
+            return;
+        }
+        // a fade already running (an abort's, another song's): the one that ends sooner, from the level it is at
+        double[] f = pauseFade(fadeFrom, fadeLen, pauseFadeFrom(written, offsetFrames));
+        fadeLen = f[1];
+        fadeSetAt = SystemClock.uptimeMillis();
+        fadeFrom = f[0];
+        finishReason = why;
+    }
+
+    private volatile boolean stopping;
+    static final double PAUSE_FADE_SEC = 0.1;
+
+    private final ClockWatch clockWatch = new ClockWatch();
+
+    /** mix-file.md rule 2: a late B rises from 0 to its curve within 10 ms once the delay ends. */
+    static final double LATE_RISE_SEC = 0.010;
+
+    /** B's gain under a late entry at mix second [t]: 0 before [inStart], a linear rise over LATE_RISE_SEC, then 1. */
+    static double lateGain(double t, double inStart) {
+        if (!(inStart > 0)) return 1;
+        return Math.max(0, Math.min(1, (t - inStart) / LATE_RISE_SEC));
+    }
+
+    /**
+     * A stalled track (rule 4): the render thread waits in a blocking write the head never takes.
+     * Paused and flushed from here, the write returns, the loop sees stop, and the track and the
+     * decks are released without the silence tail.
+     */
+    private void unstick() {
+        stalled = true;
+        AudioTrack t = track;
+        if (t == null) return;
+        try {
+            t.pause();
+            t.flush();
+        } catch (Throwable e) {
+            Log.w(TAG, "stalled track not flushed", e);
+        }
+    }
+
+    /** playback.md "The queue during a mix" rule 4: the audio clock standing still for STALL_MS. */
+    static final class ClockWatch {
+        static final long STALL_MS = 3000;
+        private long frame = Long.MIN_VALUE, since;
+
+        /** [head]: the track's playback head now, at wall-clock [nowMs]. */
+        boolean stalled(long head, long nowMs) {
+            if (head != frame) {
+                frame = head;
+                since = nowMs;
+                return false;
+            }
+            return nowMs - since >= STALL_MS;
+        }
+    }
+
+    /**
+     * The incoming song's second heard at mix second [t], in ms; its start (its mix-in) before the mix
+     * brings it in, a late entry's too (mix-file.md rule 2).
+     */
+    static long incomingSpotMs(Mix m, double t) {
+        return Math.max(0, Math.round(m.in.trackAt(Math.max(t, m.inStart > 0 ? m.inStart : m.t0)) * 1000));
+    }
+
+    /**
+     * The mix second of the first block not rendered yet: the render thread renders one block ahead
+     * and waits in the write of the block before it, so 2 blocks past what is written. A pause's fade
+     * starts there, whole, not part-way into a block (an 11% step).
+     */
+    static double pauseFadeFrom(long written, long offset) {
+        return (written + 2L * BLOCK + offset) / (double) SR;
+    }
+
+    /**
+     * A pause's fade {from, length} from mix second [at] over PAUSE_FADE_SEC, against a fade already
+     * running ([fs], [len]; fs NaN: none): the one that ends sooner, never back up to full. A later
+     * pause end keeps the running fade; a sooner one goes on from the level the running one is at then.
+     */
+    static double[] pauseFade(double fs, double len, double at) {
+        if (Double.isNaN(fs) || !(len > 0)) return new double[]{at, PAUSE_FADE_SEC};
+        double end = at + PAUSE_FADE_SEC;
+        if (fs + len <= end) return new double[]{fs, len};
+        double level = Math.max(0, Math.min(1, 1 - (at - fs) / len));
+        if (level <= 0) return new double[]{fs, len};
+        double l = PAUSE_FADE_SEC / level;
+        return new double[]{end - l, l};
     }
 
     private void finish(boolean ok, String why) {
@@ -837,7 +1255,7 @@ final class Engine {
         if (why == null) why = finishReason;
         holding = false;
         released = null;
-        if (inPlayer != null && setSpeed != 1) speed(inPlayer, 1f);
+        speedBack();
         // stopped mid-crossfade (a soft hand-over): YT's volume is given back whole, not left part way
         if (softRamp && inPlayer != null) {
             softRamp = false;
@@ -1022,13 +1440,15 @@ final class Engine {
     // ---- YT's player ----
 
     static void setVolume(Object player, float v) {
-        selfCall = true;
+        boolean[] self = selfCall.get();
+        boolean was = self[0];
+        self[0] = true;
         try {
             player.getClass().getMethod("patch_setVolume", float.class).invoke(player, v);
         } catch (Throwable t) {
             Log.w(TAG, "setVolume failed", t);
         } finally {
-            selfCall = false;
+            self[0] = was;
         }
     }
 

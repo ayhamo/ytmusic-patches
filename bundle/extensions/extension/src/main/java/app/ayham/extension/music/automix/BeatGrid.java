@@ -165,6 +165,8 @@ public final class BeatGrid {
 
     /** normalizeTempo: the beat interval folded into 70-180 BPM. */
     static double normalizeInterval(double beatIntervalSec) {
+        // no tempo to fold (0, negative, NaN, infinite): the loops below would never end
+        if (!(beatIntervalSec > 0) || Double.isInfinite(beatIntervalSec)) return beatIntervalSec;
         double bpm = 60 / beatIntervalSec;
         while (bpm < 70) {
             bpm *= 2;

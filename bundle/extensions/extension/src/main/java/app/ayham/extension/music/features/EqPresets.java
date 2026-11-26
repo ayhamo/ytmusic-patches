@@ -95,6 +95,8 @@ public final class EqPresets {
             release(s);
             if (deck) decks.add(s);
             attach(s);
+            // a deck stays out of YT's player order (as attachDeck keeps it)
+            if (deck) order.remove(s);
         }
         Log.i(TAG, "settings changed: " + sessions.size() + " sessions now on '" + Features.props().getProperty("eq", "off") + "'");
     }
@@ -210,7 +212,15 @@ public final class EqPresets {
         presets.remove(session);
         AudioEffect[] e = effects.remove(session);
         if (e == null) return;
-        for (AudioEffect a : e) if (a != null) a.release();
+        // each on its own: one that throws must not leave the other held
+        for (AudioEffect a : e) {
+            if (a == null) continue;
+            try {
+                a.release();
+            } catch (Throwable t) {
+                Log.w(TAG, "session " + session + ": effect release failed: " + t);
+            }
+        }
         Log.i(TAG, "session " + session + ": effects released");
     }
 

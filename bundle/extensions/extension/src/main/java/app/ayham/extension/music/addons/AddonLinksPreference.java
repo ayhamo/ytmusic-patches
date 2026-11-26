@@ -170,7 +170,10 @@ public class AddonLinksPreference extends Preference {
                         Toast.makeText(c, why, Toast.LENGTH_SHORT).show();
                         return;
                     }
-                    if (links.contains(l)) {
+                    // §2: the same addon however its link is written (a trailing /manifest.json, the host's case)
+                    boolean dup = false;
+                    for (String x : links) if (Protocol.sameAddon(x, l)) dup = true;
+                    if (dup) {
                         Toast.makeText(c, "Already in the list", Toast.LENGTH_SHORT).show();
                         return;
                     }
@@ -206,7 +209,8 @@ public class AddonLinksPreference extends Preference {
                 long t2 = android.os.SystemClock.elapsedRealtime();
                 msg = testResult(d.manifest, rows.size(), t1 - t0, t2 - t1);
             } catch (Throwable e) {
-                msg = "Failed: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                // a network error's message can hold the link, and so the token
+                msg = "Failed: " + (e.getMessage() != null ? Protocol.scrub(e.getMessage()) : e.getClass().getSimpleName());
             }
             final String m = msg;
             main.post(() -> {

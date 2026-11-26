@@ -289,6 +289,11 @@ public class CanvasCasesTest {
                 check(g, c, got == (Boolean) want, got);
                 return;
             }
+            case "spotifyCanvas": {
+                String got = SpotifyCanvas.canvasOf(c.get("answer"));
+                check(g, c, java.util.Objects.equals(got, want), got);
+                return;
+            }
             case "spotifyTotp": {
                 // the key is the xor'd values joined as decimal digits (spotlib Totp.kt)
                 String got = SpotifyCanvas.totp(lng(c.get("nowMs")));

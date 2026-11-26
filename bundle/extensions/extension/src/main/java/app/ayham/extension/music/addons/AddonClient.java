@@ -33,6 +33,7 @@ public final class AddonClient {
         void sleep(long ms) throws InterruptedException;
     }
 
+    /** Called from the race's lane threads at the same time: must be thread-safe (Android's Log is). */
     public interface Log {
         void log(String line);
     }
@@ -418,24 +419,42 @@ public final class AddonClient {
         String key = "t|" + url;
         Object hit = cached(key);
         if (hit != null) return (Protocol.Stream) hit;
-        long wait = limits.tryStart(addon.base, man.limits);
+        // one budget per addon, however its link was written (streamWait counts the same way)
+        String base = Protocol.baseOf(addon.base);
+        long wait = limits.tryStart(base, man.limits);
         if (wait > 0) throw new AddonError("limit", "stream limit, free in " + (long) Math.ceil(wait / 1000.0) + " s");
         Protocol.Stream s;
         try {
-            s = Protocol.readStream(getJson(addon.base, url, false, false), man.limits.cachedMarker, atmos);
-            limits.answered(addon.base, s.cached);
+            Object j = getJson(addon.base, url, false, false);
+            s = Protocol.readStream(j, man.limits.cachedMarker, atmos);
+            limits.answered(base, s.cached);
+            // §4: a 200 with a blank url or an error falls back to the row's streamURL, as a 404 does
+            if (s.miss != null && row.streamURL != null && noUrl(j)) s = fromRow(row, atmos);
         } catch (AddonError e) {
             if (e.status != null && e.status == 429) {
-                int perMinute = limits.rateLimited(addon.base, e.retryAfterSec);
+                int perMinute = limits.rateLimited(base, e.retryAfterSec);
                 throw new AddonError("limit", "stream limit (429), " + perMinute + "/min from now on");
             }
             if (!"miss".equals(e.kind) || row.streamURL == null) throw e;
-            Map<String, Object> fallback = new HashMap<>();
-            fallback.put("url", row.streamURL);
-            s = Protocol.readStream(fallback, null, atmos);
+            s = fromRow(row, atmos);
         }
-        remember(key, s, TTL_STREAM);
+        // §6: a miss isn't remembered (a passing "rate limit" error would hold the row for 5 min)
+        if (s.miss == null) remember(key, s, TTL_STREAM);
         return s;
+    }
+
+    private static Protocol.Stream fromRow(Pick.Row row, boolean atmos) {
+        Map<String, Object> fallback = new HashMap<>();
+        fallback.put("url", row.streamURL);
+        return Protocol.readStream(fallback, null, atmos);
+    }
+
+    /** A /stream answer with no link: a blank url, or an error (§4). Other misses (not https, Atmos) are not. */
+    @SuppressWarnings("unchecked")
+    private static boolean noUrl(Object j) {
+        if (!(j instanceof Map)) return true;
+        Map<String, Object> m = (Map<String, Object>) j;
+        return Js.trim(Js.text(m.get("url"))).isEmpty() || Js.truthy(m.get("error"));
     }
 
     /**
@@ -444,7 +463,8 @@ public final class AddonClient {
      * Returns how many went.
      */
     public synchronized int forgetSong(String title, java.util.Collection<String> rowIds) {
-        String t = title == null || title.isEmpty() ? null : "title=" + Js.encode(title) + "&";
+        String tt = Js.trim(Js.text(title));   // searchUrl sends it trimmed
+        String t = tt.isEmpty() ? null : "title=" + Js.encode(tt) + "&";
         int n = 0;
         Iterator<String> it = cache.keySet().iterator();
         while (it.hasNext()) {
@@ -470,7 +490,10 @@ public final class AddonClient {
         synchronized (this) {
             cache.remove("t|" + url);
         }
-        return stream(addon, row, man, atmos);
+        Protocol.Stream s = stream(addon, row, man, atmos);
+        // the same checks as the first answer (openRow): a new link is never plain http or a manifest
+        if (s.miss != null || !"file".equals(s.transport) || !Protocol.allowed(s.url, allowLocalHttp)) return null;
+        return s;
     }
 
     /** §7: Range bytes=0-0 (4 s): the file must hold the whole song. Unmeasurable is not refused. */
@@ -684,7 +707,9 @@ public final class AddonClient {
             return null;
         }
         note(addon.base, true, "ok", now() - t0);
-        log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id + ", "
+        log.log("addons: " + man.name + " (" + addon.host + ") has it: row " + row.id
+                + " (\"" + row.title + "\" by " + row.artist
+                + (row.durationSec != null ? ", " + Js.number(Math.round(row.durationSec)) + " s" : "") + "), "
                 + (s.atmos ? "Dolby Atmos " : "") + (s.codec != null ? s.codec : "?")
                 + (s.sampleRate != null && s.sampleRate != 0 ? " " + Js.number(s.sampleRate / 1000) + " kHz" : "")
                 + (s.bitDepth != null && s.bitDepth != 0 ? "/" + Js.number(s.bitDepth) : ""));
@@ -727,7 +752,8 @@ public final class AddonClient {
         final int n = addons.size();
         final Lane[] lanes = new Lane[n];
         final Object lock = new Object();
-        final boolean[] over = new boolean[1];
+        // over[0]: the race is decided; over[1]: an answer is being checked (the lanes wait it out)
+        final boolean[] over = new boolean[2];
         for (int i = 0; i < n; i++) lanes[i] = new Lane();
         for (int i = 0; i < n; i++) {
             final Lane lane = lanes[i];
@@ -753,6 +779,7 @@ public final class AddonClient {
                         lock.wait(200);
                     }
                     c = pick < 0 ? null : lanes[pick].ready;
+                    if (c != null) over[1] = true;
                 }
                 if (c == null) {
                     if (cancelled(o)) why = "cancelled";
@@ -760,6 +787,7 @@ public final class AddonClient {
                 }
                 String refused = o.check == null ? null : o.check.refuse(c);
                 synchronized (lock) {
+                    over[1] = false;
                     if (refused == null) {
                         won = c;
                         over[0] = true;
@@ -795,6 +823,18 @@ public final class AddonClient {
         return none;
     }
 
+    /**
+     * Whether the race is decided, after waiting out an answer being checked: on the phone the check
+     * (the window fit) takes ~3 s, and a lane going on meanwhile sent its /stream and probe for a race
+     * already won (phone, 2026-11-24: Tidotido 1.7 s after Nebula's answer; each adds a debrid entry).
+     */
+    private static boolean decided(Object lock, boolean[] over) throws InterruptedException {
+        synchronized (lock) {
+            while (over[1] && !over[0]) lock.wait();
+            return over[0];
+        }
+    }
+
     private void runLane(Addon a, TrackMatcher.Target target, Options o, Lane lane, Object lock, boolean[] over) {
         try {
             List<Found> found = new ArrayList<>();
@@ -804,18 +844,17 @@ public final class AddonClient {
                 try {
                     Protocol.Manifest man = manifest(f.addon.base);
                     for (Pick.Row row : f.rows) {
-                        synchronized (lock) {
-                            if (over[0]) return;
-                        }
+                        if (decided(lock, over)) return;
                         if (cancelled(o)) return;
                         Opened c = openRow(f, man, row, target, o, lane.tried, t0, () -> {
-                            synchronized (lock) {
-                                return over[0];
+                            try {
+                                return decided(lock, over);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return true;
                             }
                         });
-                        synchronized (lock) {
-                            if (over[0]) return;
-                        }
+                        if (decided(lock, over)) return;
                         if (c == null) continue;
                         synchronized (lock) {
                             lane.ready = c;

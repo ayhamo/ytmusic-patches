@@ -181,6 +181,7 @@ public class AnalysisCasesRealTest {
         AnalysisCases.Rules rules = AnalysisCases.rules();
         List<String> failed = new ArrayList<>();
         for (AnalysisCases.Case c : AnalysisCases.cases()) {
+            if (!c.rendered()) continue;
             StringBuilder info = new StringBuilder();
             long t0 = System.nanoTime();
             Analysis a = analyse(c, info);

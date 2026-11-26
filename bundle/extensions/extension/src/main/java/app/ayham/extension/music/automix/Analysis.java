@@ -12,7 +12,7 @@ import java.util.Map;
  */
 public final class Analysis {
     /** Bumped whenever the analysis changes: a saved one of another version is redone. */
-    public static final String VERSION = "ayham.3";
+    public static final String VERSION = "ayham.4";
 
     public String fileKey;
     public double durationSec = Double.NaN;
@@ -270,7 +270,32 @@ public final class Analysis {
         a.chroma = chroma != null && chroma.length == 12 ? chroma : null;
         a.chromaCurve = chromaCurve(m.get("chromaCurve"));
         a.analysisVersion = (String) m.get("analysisVersion");
+        // saved before the bar rule too: phased as it is loaded (it changes nothing a second time)
+        barPhase(a);
         return a;
+    }
+
+    /**
+     * analysis-cases.md "The bar [all]" (dedb2a2d): each grid's bars start where the beat model's
+     * downbeats in its window vote, 0-3 beats after its first downbeat. The PC's withBarPhase.
+     */
+    static void barPhase(Analysis a) {
+        a.firstDownbeatSec = votedDownbeat(a.beatIntervalSec, a.firstDownbeatSec, a.headBeats == null ? null : a.headBeats.downbeats);
+        if (a.tailGrid != null)
+            a.tailGrid.firstDownbeatSec = votedDownbeat(a.tailGrid.beatIntervalSec, a.tailGrid.firstDownbeatSec, a.tailBeats == null ? null : a.tailBeats.downbeats);
+    }
+
+    /** Each downbeat within a quarter beat of the grid votes for its place k mod 4; a tie keeps place 0. */
+    static double votedDownbeat(double beatSec, double fd, double[] downs) {
+        if (!(beatSec > 0) || Double.isNaN(fd) || downs == null || downs.length == 0) return fd;
+        int[] votes = new int[4];
+        for (double d : downs) {
+            long k = Math.round((d - fd) / beatSec);
+            if (Math.abs(fd + k * beatSec - d) <= beatSec / 4) votes[(int) (((k % 4) + 4) % 4)]++;
+        }
+        int best = 0;
+        for (int p = 1; p < 4; p++) if (votes[p] > votes[best]) best = p;
+        return fd + best * beatSec;
     }
 
     @SuppressWarnings("unchecked")

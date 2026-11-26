@@ -56,7 +56,7 @@ public class AnalysisCasesTest {
     @Test
     public void theTruthPassesEveryCase() {
         List<AnalysisCases.Case> cases = AnalysisCases.cases();
-        assertEquals(11, cases.size());
+        assertEquals(12, cases.size());
         for (AnalysisCases.Case c : cases) {
             AnalysisCases.Result r = AnalysisCases.check(c, truth(c, 0, c.song.parts.get(0)[1], 0), RULES);
             assertEquals(c.name + " checks", c.check.size(), r.verdicts.size());

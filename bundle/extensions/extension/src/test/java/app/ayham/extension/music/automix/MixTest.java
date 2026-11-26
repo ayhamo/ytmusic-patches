@@ -186,6 +186,45 @@ public class MixTest {
         assertEquals(m.t0 + m.D, m.pulseEnd(), 1e-9);
     }
 
+    /** The baseline's gains (the extension's d26dc16): no trim, linear, A out by the release. */
+    @Test
+    public void theLoopMixPlaysTheBaselinesGains() {
+        Planner.LoopPlan lp = PlannerTest.loopPlan();
+        Planner.LoopSchedule x = Planner.loopSchedule(lp, 0);
+        Mix m = Mix.loop(lp, "a", "b", 200);
+        assertEquals(1, m.out.gain.at(0), 1e-9);
+        assertEquals(1, m.out.gain.at(x.enterEnd / 2), 1e-9);
+        assertEquals(1, m.out.gain.at(x.enterEnd), 1e-9);
+        assertEquals(0.8, m.out.gain.at((x.enterEnd + x.rampEnd) / 2), 1e-6);
+        assertEquals(0.6, m.out.gain.at(x.rampEnd), 1e-6);
+        assertEquals(0, m.out.gain.at(x.releaseAt), 1e-9);
+        assertEquals(0, m.in.gain.at(0), 1e-9);
+        assertEquals(0.275, m.in.gain.at(x.enterEnd / 2), 1e-6);
+        assertEquals(0.55, m.in.gain.at(x.enterEnd), 1e-6);
+        assertEquals(1, m.in.gain.at(x.rampEnd), 1e-6);
+        assertEquals(1, m.in.gain.at(x.releaseAt), 1e-9);
+        assertEquals(20, m.out.hpHz.at(x.rampEnd), 1e-6);
+        assertEquals(1500, m.out.hpHz.at(x.releaseAt), 1e-3);
+    }
+
+    /** The bass swap: -18 dB lowshelf on both decks, swapped over one bar centred on the ramp's middle. */
+    @Test
+    public void theLoopMixSwapsTheBassOverOneBarAtTheRampsMiddle() {
+        Planner.LoopPlan lp = PlannerTest.loopPlan();
+        Planner.LoopSchedule x = Planner.loopSchedule(lp, 0);
+        Mix m = Mix.loop(lp, "a", "b", 200);
+        double from = x.mid - x.bar / 2, to = x.mid + x.bar / 2;
+        assertTrue(x.mid > x.enterEnd && x.mid < x.rampEnd);
+        assertEquals(-18, Planner.BASS_CUT_DB, 0);
+        assertEquals(0, m.out.lowDb.at(from), 1e-9);
+        assertEquals(-18, m.in.lowDb.at(from), 1e-9);
+        assertEquals(-9, m.out.lowDb.at(x.mid), 1e-6);   // half way: each at -9 dB
+        assertEquals(-9, m.in.lowDb.at(x.mid), 1e-6);
+        assertEquals(-18, m.out.lowDb.at(to), 1e-9);
+        assertEquals(0, m.in.lowDb.at(to), 1e-9);
+        assertEquals(-18, m.in.lowDb.at(0), 1e-9);       // B's bass is cut from its entry
+    }
+
     @Test
     public void loopBeatsRunToTheHandover() {
         Mix m = Mix.loop(PlannerTest.loopPlan(), "a", "b", 200);

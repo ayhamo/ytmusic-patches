@@ -53,9 +53,10 @@ def scrape_token():
     if not scripts:
         raise RuntimeError("no /assets/index-*.js script on music.apple.com/us/browse (page layout changed)")
     now = time.time()
+    # the labelled token from any script wins: an unlabelled one is only used once all are read
+    fallback = None
     for path in scripts:
         js = get("https://music.apple.com" + path)
-        fallback = None
         for jwt in re.findall(r"ey[A-Za-z0-9_-]+\.ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", js):
             try:
                 head, payload = b64(jwt.split(".")[0]), b64(jwt.split(".")[1])
@@ -67,8 +68,8 @@ def scrape_token():
             if "WebPlayKid" in head or "AMPWebPlay" in payload:
                 return jwt, int(m.group(1)), "web player token"
             fallback = fallback or (jwt, int(m.group(1)), "fallback token (not labelled WebPlayKid/AMPWebPlay)")
-        if fallback:
-            return fallback
+    if fallback:
+        return fallback
     raise RuntimeError(f"no unexpired token in {len(scripts)} index script(s)")
 
 

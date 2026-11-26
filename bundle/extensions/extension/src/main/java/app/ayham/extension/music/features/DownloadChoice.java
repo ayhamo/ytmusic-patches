@@ -62,9 +62,9 @@ public final class DownloadChoice {
     private static final long PLAYLIST_LISTED_MS = 12 * 3600_000L;
     private static WeakReference<Activity> activity = new WeakReference<>(null);
     /** Set while the answered command runs again, so it goes through. */
-    private static boolean passing;
-    private static String asking;
-    private static long askedAt;
+    private static volatile boolean passing;
+    private static volatile String asking;
+    private static volatile long askedAt;
 
     private DownloadChoice() {
     }

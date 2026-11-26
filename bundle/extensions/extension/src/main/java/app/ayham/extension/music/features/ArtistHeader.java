@@ -90,7 +90,9 @@ final class ArtistHeader {
     static boolean trusted(String u, String ext) {
         try {
             URL x = new URL(u);
-            return "https".equals(x.getProtocol()) && x.getHost().toLowerCase(Locale.ROOT).matches("(.*\\.)?(apple\\.com|mzstatic\\.com|aaplimg\\.com|cdn-apple\\.com)")
+            // https on its own port, no user info, Apple's media hosts only (canvas.md §4 rule 6's idea)
+            return "https".equals(x.getProtocol()) && (x.getPort() == -1 || x.getPort() == 443) && x.getUserInfo() == null
+                    && x.getHost().toLowerCase(Locale.ROOT).matches("(.*\\.)?(apple\\.com|mzstatic\\.com|aaplimg\\.com|cdn-apple\\.com)")
                     && (ext == null || x.getPath().endsWith(ext));
         } catch (Exception e) {
             return false;
@@ -148,12 +150,16 @@ final class ArtistHeader {
         String saved = store.getString(key, null);
         if (saved != null) {
             String[] p = saved.split("\t", -1);
-            long at = Long.parseLong(p[0]);
-            boolean shortLived = "1".equals(p[1]);
-            boolean fileGone = !p[3].isEmpty() && !new File(p[3]).exists();
-            if (!fileGone && System.currentTimeMillis() - at <= (shortLived ? MISS_MS : HIT_MS)) {
-                Log.i(TAG, "artist header: '" + name + "' from the cache (" + (p[2].isEmpty() && p[3].isEmpty() ? "none" : "image " + !p[2].isEmpty() + ", video " + !p[3].isEmpty()) + ")");
-                return new String[]{p[2], p[3]};
+            try {
+                long at = Long.parseLong(p[0]);
+                boolean shortLived = "1".equals(p[1]);
+                boolean fileGone = !p[3].isEmpty() && !new File(p[3]).exists();
+                if (!fileGone && System.currentTimeMillis() - at <= (shortLived ? MISS_MS : HIT_MS)) {
+                    Log.i(TAG, "artist header: '" + name + "' from the cache (" + (p[2].isEmpty() && p[3].isEmpty() ? "none" : "image " + !p[2].isEmpty() + ", video " + !p[3].isEmpty()) + ")");
+                    return new String[]{p[2], p[3]};
+                }
+            } catch (RuntimeException e) {
+                // a damaged entry is a miss: looked up again and written over
             }
         }
         String imageUrl = "", video = "";
@@ -212,9 +218,27 @@ final class ArtistHeader {
     private static String shownFor, asking;
     private static FrameLayout box;
     private static MediaPlayer player;
+    private static Surface surface;
+    /** canvas.md §13 rule 4, asked at most every 2 s (this runs on every frame). */
+    private static boolean onMobile;
+    private static long mobileAskedAt;
 
     static void tick(Activity a, View decor) {
+        // switched off for this run after it kept failing (Features.failed)
+        if ("0".equals(Features.props().getProperty("artistHeader"))) {
+            if (box != null) clear();
+            return;
+        }
         boolean images = imagesOn(), videos = videosOn();
+        if (videos) {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - mobileAskedAt > 2000) {
+                mobileAskedAt = now;
+                onMobile = CanvasSettings.blockedByMobile(a, Features.props());
+            }
+            // "Off on mobile data": no artist video looked up or played (the image stays)
+            if (onMobile) videos = false;
+        }
         int hid = a.getResources().getIdentifier("music_element_header_container", "id", a.getPackageName());
         View header = hid == 0 ? null : decor.findViewById(hid);
         String name = header instanceof ViewGroup && header.isShown() ? findName((ViewGroup) header) : null;
@@ -231,8 +255,9 @@ final class ArtistHeader {
         final ViewGroup host = (ViewGroup) header;
         final String q = quality();
         final File dir = a.getCacheDir();
+        final boolean vids = videos;
         new Thread(() -> {
-            String[] r = lookup(name, images, videos, q, dir);
+            String[] r = lookup(name, images, vids, q, dir);
             Bitmap bmp = null;
             if (r != null && !r[0].isEmpty()) bmp = bitmap(r[0]);
             final Bitmap img = bmp;
@@ -313,21 +338,30 @@ final class ArtistHeader {
             tv.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
                 @Override
                 public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int hh) {
+                    release(); // one player at a time
                     try {
                         MediaPlayer mp = new MediaPlayer();
                         player = mp;
                         mp.setDataSource(video);
-                        mp.setSurface(new Surface(st));
+                        surface = new Surface(st);
+                        mp.setSurface(surface);
                         mp.setLooping(true);
                         mp.setVolume(0f, 0f);
                         mp.setOnVideoSizeChangedListener((m, vw, vh) -> crop(tv, vw, vh));
                         mp.setOnPreparedListener(m -> {
+                            if (m != player) return; // released meanwhile
                             m.start();
                             tv.animate().alpha(1f).setDuration(400).start();
+                        });
+                        mp.setOnErrorListener((m, what, extra) -> {
+                            Log.w(TAG, "artist header: video error " + what + "/" + extra);
+                            if (m == player) release();
+                            return true;
                         });
                         mp.prepareAsync();
                     } catch (Throwable t) {
                         Log.w(TAG, "artist header: video not played: " + t);
+                        release();
                     }
                 }
 
@@ -373,6 +407,18 @@ final class ArtistHeader {
             } catch (Throwable ignored) {
             }
             player = null;
+        }
+        if (surface != null) {
+            surface.release();
+            surface = null;
+        }
+    }
+
+    /** The header of a destroyed activity let go: its views would keep the activity alive. */
+    static void forget(Activity a) {
+        if (box != null && box.getContext() == a) {
+            clear();
+            asking = null;
         }
     }
 

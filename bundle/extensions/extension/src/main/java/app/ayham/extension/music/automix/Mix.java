@@ -27,9 +27,19 @@ public final class Mix {
     public double takeoverSong, outEnd;
     /** The blend (or loop mix) on the mix clock. */
     public double t0, D;
+    /** B's late entry (mix-file.md rule 2): the incoming deck is silent and unstarted before this mix second; 0: from t0. */
+    public double inStart;
+    /** The speed YT's player plays the next song at once it takes over: its playlist speed, else x1. */
+    public double home = 1;
     /** YT moves to the next song; its player takes over from the incoming deck no earlier than [elementAt]. */
     public double askAt, elementAt;
     public final Deck out = new Deck(), in = new Deck();
+    /**
+     * editor.md §12: [mid] a curve moves the 1 kHz band, [fx] the decks send to the Effects returns
+     * (the echo and the delay [echoSec], [delaySec] long), [noise] the noise plays.
+     */
+    public boolean mid, fx, noise;
+    public double echoSec = 0.375, delaySec = 0.25;
     /** The mix's beats on the mix clock (the seek bar pulses on them); null: no beat (a crossfade). */
     public double[] beats;
 
@@ -120,6 +130,8 @@ public final class Mix {
         public boolean runOn;
         public double stopAt = 1e9;
         public final Lane gain = new Lane(0), lowDb = new Lane(0), highDb = new Lane(0), hpHz = new Lane(20), lpHz = new Lane(20000);
+        /** editor.md §12: the 1 kHz band, the noise, and the sends to the Effects returns. */
+        public final Lane midDb = new Lane(0), noise = new Lane(0), echoSend = new Lane(0), reverbSend = new Lane(0), delaySend = new Lane(0);
         /** Song seconds of decoded audio the deck needs. */
         public double needFrom, needTo;
 
@@ -178,8 +190,9 @@ public final class Mix {
         return c;
     }
 
+    /** x held to a..b; a NaN (a zero-length span's 0/0) is a, never passed on to a gain or a filter aim. */
     static double clamp(double x, double a, double b) {
-        return Math.max(a, Math.min(b, x));
+        return Double.isNaN(x) ? a : Math.max(a, Math.min(b, x));
     }
 
     static double glide(double a, double b, double x) {
@@ -193,7 +206,7 @@ public final class Mix {
 
     /** A plan's shape over [n] points: Automix v2's ladder shapes (drop-in, muffle) or djShape at its bass swap. */
     static float[][] djShape(Planner.Plan m, double D, int n) {
-        if ("blend".equals(m.style) && ("dropin".equals(m.shape) || "muffle".equals(m.shape))) return ladderShape(m, D, n);
+        if ("blend".equals(m.style) && ("dropin".equals(m.shape) || "muffle".equals(m.shape) || "echo".equals(m.shape))) return ladderShape(m, D, n);
         return djShape(m.style, m.clash, D, m.bpm, m.swapAt, n);
     }
 
@@ -218,6 +231,20 @@ public final class Mix {
         int beats = Math.max(1, (m.bars > 0 ? m.bars : 1) * 4);
         float[] gIn = new float[n], gOut = new float[n], inHp = new float[n], outHp = new float[n], outLp = new float[n];
         boolean dropin = "dropin".equals(m.shape);
+        if ("echo".equals(m.shape)) {
+            // echo out: the playing song's dry sound cut on the catch (10 ms), the next song in at full
+            // level with it; the echo (Engine's delay line on the outgoing deck) rings on over it
+            double ec = Math.min((m.echo != null ? m.echo.cutSec : Planner.ECHO_CUT_SEC) / D, 0.05);
+            for (int i = 0; i < n; i++) {
+                double p = i / (double) (n - 1);
+                gIn[i] = (float) clamp(p / ec, 0, 1);
+                gOut[i] = (float) (1 - clamp(p / ec, 0, 1));
+                outLp[i] = 20000;
+                outHp[i] = 20;
+                inHp[i] = 20;
+            }
+            return new float[][]{gIn, gOut, inHp, outHp, outLp};
+        }
         double e = Math.min(0.02 / D, 0.05);
         double at = m.swapAt > 0 && m.swapAt < 1 ? m.swapAt : 0.5;
         double from = Math.max(0, at - (m.muffleLead > 0 ? m.muffleLead : 0.25));
@@ -292,6 +319,11 @@ public final class Mix {
      * A blend, filter mix or crossfade (not a fallback onto Morphe's crossfade). [outDuration]: the
      * playing song's length as the player reports it.
      */
+    /** A's speed over the hand lead: its playlist speed (spotify-mixes.md rule 10), else x1. */
+    static double leadRate(Planner.Plan p) {
+        return !Double.isNaN(p.speedOut) ? p.speedOut : 1;
+    }
+
     public static Mix blend(Planner.Plan p, String outId, String inId, double outDuration) {
         Mix m = new Mix();
         m.plan = p;
@@ -302,7 +334,10 @@ public final class Mix {
         double R = p.outRate > 0 ? p.outRate : 1, b = p.beatSec, mixOut = p.mixOutTrackTime, rate = p.rate;
         int n = p.style.equals("blend") ? p.rampBeats : 0;
         double rampSong = n * (b > 0 ? b : 0);
-        m.takeoverSong = mixOut - HAND_LEAD - rampSong;
+        // A at its playlist speed (spotify-mixes.md rule 10) plays the hand lead at it, as YT played it
+        double lead = leadRate(p);
+        m.home = !Double.isNaN(p.speedIn) ? p.speedIn : 1;
+        m.takeoverSong = mixOut - HAND_LEAD * lead - rampSong;
         // outgoing: rate 1 to the ramp, one 0.75% step per beat up to R (rampOutgoing), R through the blend
         List<double[]> ok = new ArrayList<>();
         ok.add(new double[]{0, m.takeoverSong});
@@ -350,11 +385,13 @@ public final class Mix {
             shape(m, p, rate);
             return m;
         }
-        if (b > 0) {
+        // a filter mix's plan has no beatSec (plan.schema fixtures pin it): its pulse counts A's bar / 4
+        double pb = b > 0 ? b : p.style.equals("filter") && p.barSec > 0 ? p.barSec / 4 : 0;
+        if (pb > 0) {
             // the ramp's beats as laid out above, then the blend's at the outgoing song's speed
             List<Double> bt = new ArrayList<>();
             for (int k = 1; k < ok.size(); k++) bt.add(ok.get(k)[0]);
-            for (double x = m.t0 + b / R; x <= m.t0 + m.D + 1e-6; x += b / R) bt.add(x);
+            for (double x = m.t0 + pb / R; x <= m.t0 + m.D + 1e-6; x += pb / R) bt.add(x);
             m.beats = new double[bt.size()];
             for (int k = 0; k < bt.size(); k++) m.beats[k] = bt.get(k);
         }
@@ -368,25 +405,36 @@ public final class Mix {
         // incoming: [rate] through the blend, then back to its own tempo on our deck, 0.25% every
         // 0.25 s (the extension's deckGlideBack, and the plan's curves): a smooth glide, not steps
         double mixIn = p.mixInTrackTime;
+        // (a late entry: B's first point that long into the mix, crossfade.js inStartOf; the curves still from t0)
+        double late = p.inDelaySec > 0 ? Math.min(p.inDelaySec, m.D) : 0;
+        if (late > 0) m.inStart = m.t0 + late;
         List<double[]> ik = new ArrayList<>();
-        ik.add(new double[]{m.t0, mixIn});
-        double it = m.t0 + m.D, ip = mixIn + m.D * rate;
+        ik.add(new double[]{m.t0 + late, mixIn});
+        double it = m.t0 + m.D, ip = mixIn + (m.D - late) * rate;
         ik.add(new double[]{it, ip});
-        if (Math.abs(rate - 1) < 0.002) {
+        // (B at a playlist speed glides back to it, not to x1: spotify-mixes.md rule 10)
+        double home = m.home;
+        if (Math.abs(home - 1) < 1e-9 ? Math.abs(rate - 1) < 0.002 : Math.abs(rate - home) < 1e-9) {
             ik.add(new double[]{it + 0.5, ip + 0.5 * rate});
             it += 0.5;
         } else {
-            int steps = (int) Math.ceil(Math.abs(rate - 1) / GLIDE_STEP);
+            int steps = Math.max(1, (int) Math.ceil(Math.abs(rate - home) / GLIDE_STEP));
             double r = rate;
             for (int i = 1; i <= steps; i++) {
                 it += GLIDE_STEP_SEC;
                 ip += GLIDE_STEP_SEC * r;
                 ik.add(new double[]{it, ip});
-                r = i == steps ? 1 : rate + (1 - rate) * i / (double) steps;
+                r = i == steps ? home : rate + (home - rate) * i / (double) steps;
             }
-            // ...and on at x1.0 to the takeover
-            ik.add(new double[]{it + 0.5, ip + 0.5});
+            // ...and on at its own speed to the takeover
+            ik.add(new double[]{it + 0.5, ip + 0.5 * home});
             it += 0.5;
+        }
+        // B at its playlist speed runs on at it for as long as YT may take to take over (past its
+        // last knot the renderer runs on at x1)
+        if (Math.abs(m.home - 1) > 1e-9) {
+            double[] l = ik.get(ik.size() - 1);
+            ik.add(new double[]{l[0] + 120, l[1] + 120 * m.home});
         }
         m.in.knots(ik);
         m.in.runOn = true;
@@ -406,7 +454,8 @@ public final class Mix {
             planned(m, p);
         }
         String name = p.v3 ? "Automix v2" : m.v2 ? "Automix Classic" : "Automix";
-        String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : p.glide != null ? " · glide" : "";
+        String kind = "dropin".equals(p.shape) ? " · drop-in" : "muffle".equals(p.shape) ? " · muffle" : "echo".equals(p.shape) ? " · echo out"
+                : p.glide != null ? " · glide" : "";
         m.title = p.style.equals("blend") ? name + kind : p.style.equals("filter") ? name + " · filter mix"
                 : p.handoff ? "Automix v2 · hand-over" : p.bridge ? "Automix v2 · beatless bridge" : "Automix · crossfade";
         m.sub = p.style.equals("crossfade")
@@ -471,6 +520,40 @@ public final class Mix {
         play(m.in.hpHz, c.in.get("highpassHz"), m.t0, P, m.D, true, null);
         play(m.out.lpHz, c.out.get("lowpassHz"), m.t0, P, m.D, true, null);
         play(m.in.lpHz, c.in.get("lowpassHz"), m.t0, P, m.D, true, null);
+        // editor.md §12: the mid band, then the noise and the sends, 0 after the window (the noise
+        // plays to the window's end; the returns' tails ring on)
+        play(m.out.midDb, c.out.get("midDb"), m.t0, P, m.D, false, null);
+        play(m.in.midDb, c.in.get("midDb"), m.t0, P, m.D, false, null);
+        m.mid = !m.out.midDb.empty() || !m.in.midDb.empty();
+        String[] keys = {"noise", "echoSend", "reverbSend", "delaySend"};
+        for (int side = 0; side < 2; side++) {
+            Deck d = side == 0 ? m.out : m.in;
+            Lane[] lanes = {d.noise, d.echoSend, d.reverbSend, d.delaySend};
+            for (int k = 0; k < keys.length; k++) {
+                double[][] pts = (side == 0 ? c.out : c.in).get(keys[k]);
+                if (pts == null || pts.length == 0) continue;
+                play(lanes[k], pts, m.t0, P, m.D, false, null);
+                lanes[k].set(0, m.t0 + m.D + 0.002);
+                if (k == 0) m.noise = true;
+                else m.fx = true;
+            }
+        }
+        if (c.fxTime != null) {
+            m.echoSec = c.fxTime[0];
+            m.delaySec = c.fxTime[1];
+        }
+        if (m.fx) {
+            // the tails ring on after the window: the next song's player takes over once they have
+            m.elementAt = Math.max(m.elementAt, m.t0 + m.D + FxBus.tailSec(m));
+            m.in.needTo = Math.max(m.in.needTo, m.in.trackAt(m.elementAt) + 30);
+        }
+        // the Looping lane (editor.md §13): from the mix-out A plays its first loopSec seconds again
+        // and again until it ends; a glide plays no loop (its rate steps every beat)
+        if (p.loopSec > 0 && p.glide == null && !Double.isNaN(p.mixOutTrackTime)) {
+            m.out.loopA = p.mixOutTrackTime;
+            m.out.loopB = p.mixOutTrackTime + p.loopSec;
+            m.out.release = 1e18;
+        }
     }
 
     /**
@@ -498,6 +581,8 @@ public final class Mix {
             }
             if (n == 0) v0 = v1 = Overview.value(pts, tt, 0);
             if (first) {
+                // held from the window's start up to the first point (editor.md §3), as the overview draws it
+                if (tt > 0) lane.set(v0 * k, t0);
                 lane.set(v0 * k, t0 + tt * fit);
                 first = false;
             } else if (geo && v0 > 0) {
@@ -545,6 +630,8 @@ public final class Mix {
         m.askAt = Math.min(Math.min(x.handoffAt, x.elementAt - 1.5 - NEXT_LEAD), m.outEnd - 1.5);
 
         double cut = Planner.BASS_CUT_DB;
+        // the baseline's gains (the extension's d26dc16): A 1 through the enter bars, to 0.6 over the
+        // ramp, to 0 at the release; B to 0.55 over the enter bars, to 1 over the ramp
         m.out.gain.set(0, -H).lin(1, 0).set(1, x.enterEnd).lin(0.6, x.rampEnd).lin(0, x.releaseAt);
         m.in.gain.set(0, 0).lin(0.55, x.enterEnd).lin(1, x.rampEnd);
         m.in.lowDb.set(cut, 0).set(cut, x.mid - x.bar / 2).lin(0, x.mid + x.bar / 2);

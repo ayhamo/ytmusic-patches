@@ -31,12 +31,23 @@ public final class Json {
         while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
     }
 
+    /** The next character; a body cut short is bad input, not an index error. */
+    private char at() {
+        if (i >= s.length()) throw new IllegalArgumentException("unexpected end at " + i);
+        return s.charAt(i);
+    }
+
+    private void expect(char c) {
+        if (at() != c) throw new IllegalArgumentException("expected '" + c + "' at " + i);
+        i++;
+    }
+
     /** Nesting so far: a body of "[[[[..." from an addon must not overflow the stack. */
     private int depth;
     private static final int MAX_DEPTH = 64;
 
     private Object value() {
-        char c = s.charAt(i);
+        char c = at();
         if (c == '{' || c == '[') {
             if (++depth > MAX_DEPTH) throw new IllegalArgumentException("nested deeper than " + MAX_DEPTH + " at " + i);
             try {
@@ -52,24 +63,31 @@ public final class Json {
         int start = i;
         while (i < s.length() && "+-0123456789.eE".indexOf(s.charAt(i)) >= 0) i++;
         if (start == i) throw new IllegalArgumentException("unexpected '" + c + "' at " + i);
-        return Double.parseDouble(s.substring(start, i));
+        try {
+            return Double.parseDouble(s.substring(start, i));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("bad number at " + start);
+        }
     }
 
     private Map<String, Object> object() {
         Map<String, Object> m = new LinkedHashMap<>();
         i++;
         ws();
-        if (s.charAt(i) == '}') { i++; return m; }
+        if (at() == '}') { i++; return m; }
         while (true) {
             ws();
+            if (at() != '"') throw new IllegalArgumentException("expected a key at " + i);
             String k = string();
             ws();
-            i++; // ':'
+            expect(':');
             ws();
             m.put(k, value());
             ws();
-            char c = s.charAt(i++);
+            char c = at();
+            i++;
             if (c == '}') return m;
+            if (c != ',') throw new IllegalArgumentException("expected ',' or '}' at " + (i - 1));
         }
     }
 
@@ -77,13 +95,15 @@ public final class Json {
         List<Object> l = new ArrayList<>();
         i++;
         ws();
-        if (s.charAt(i) == ']') { i++; return l; }
+        if (at() == ']') { i++; return l; }
         while (true) {
             ws();
             l.add(value());
             ws();
-            char c = s.charAt(i++);
+            char c = at();
+            i++;
             if (c == ']') return l;
+            if (c != ',') throw new IllegalArgumentException("expected ',' or ']' at " + (i - 1));
         }
     }
 
@@ -91,17 +111,31 @@ public final class Json {
         StringBuilder b = new StringBuilder();
         i++;
         while (true) {
-            char c = s.charAt(i++);
+            char c = at();
+            i++;
             if (c == '"') return b.toString();
             if (c == '\\') {
-                char e = s.charAt(i++);
+                char e = at();
+                i++;
                 switch (e) {
                     case 'n': b.append('\n'); break;
                     case 't': b.append('\t'); break;
                     case 'r': b.append('\r'); break;
                     case 'b': b.append('\b'); break;
                     case 'f': b.append('\f'); break;
-                    case 'u': b.append((char) Integer.parseInt(s.substring(i, i + 4), 16)); i += 4; break;
+                    case 'u': {
+                        // exactly four hex digits (parseInt alone takes "+12f", and a cut-off end throws)
+                        int u = 0;
+                        for (int k = 0; k < 4; k++) {
+                            char h = at();
+                            int d = h <= 'f' ? Character.digit(h, 16) : -1; // (ASCII only: digit() takes other scripts' digits)
+                            if (d < 0) throw new IllegalArgumentException("bad escape at " + i);
+                            u = u * 16 + d;
+                            i++;
+                        }
+                        b.append((char) u);
+                        break;
+                    }
                     default: b.append(e);
                 }
             } else {

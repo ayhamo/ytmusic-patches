@@ -1,6 +1,7 @@
 package app.ayham.extension.music.automix;
 
 import app.ayham.extension.music.features.Features;
+import app.ayham.extension.music.features.MusicVideoType;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -86,6 +87,7 @@ public final class Automix {
         started = true;
         main.postDelayed(Automix::tick, 2000);
         AddonDirect.start(app);
+        SungLyrics.defaultToPcOrder(app);
         Log.i(TAG, "automix ready (" + (enabled() ? "on" : "off") + ")");
     }
 
@@ -104,16 +106,50 @@ public final class Automix {
         AddonDirect.onPause();
         Engine e = engine;
         if (e == null || !e.running()) return;
-        // our own "next" pauses too, 10-50 ms before the stop: the next song's start isn't a pause
-        if (SystemClock.elapsedRealtime() - askedAt < 3000) return;
-        main.post(() -> e.stopNow("paused"));
+        // our own "next" pauses too, 10-50 ms before the stop, and the next song's load can: a pause
+        // between our Next and the new song isn't the listener's (spec playback.md, the queue during
+        // a mix, rule 3). The listener's stops the mix at once in every phase (rule 5): a tap on the
+        // play button to pause, or YT's session reading paused (never over our Next: it buffers) for
+        // PAUSED_READS checks in a row. Watched past the grace, plus YT's ~1 s lag after a tap.
+        final long since = SystemClock.elapsedRealtime() - askedAt, from = SystemClock.elapsedRealtime();
+        main.post(new Runnable() {
+            int reads;
+
+            @Override
+            public void run() {
+                if (engine != e || !e.running()) return;
+                reads = Features.ytSessionPaused() ? reads + 1 : 0;
+                if (listenersPause(since, Features.ytTapPaused(), reads)) {
+                    e.stopNow("paused");
+                    return;
+                }
+                if (SystemClock.elapsedRealtime() - from < NEXT_GRACE_MS - since + 1500) main.postDelayed(this, PAUSE_CHECK_MS);
+            }
+        });
+    }
+
+    /** Our Next's grace (rule 3), how often a pause in it is checked, and how many paused reads hold. */
+    static final long NEXT_GRACE_MS = 3000, PAUSE_CHECK_MS = 120;
+    static final int PAUSED_READS = 2;
+
+    /**
+     * A YT pause [sinceNextMs] after our Next is the listener's: away from our Next, a tap on the play
+     * button to pause, or YT's session paused [pausedReads] checks in a row.
+     */
+    static boolean listenersPause(long sinceNextMs, boolean tapPaused, int pausedReads) {
+        return sinceNextMs >= NEXT_GRACE_MS || tapPaused || pausedReads >= PAUSED_READS;
     }
 
     /** Morphe's crossfade length while a mix plays: short, out of the way (our gate holds both players). */
     public static long crossfadeMs() {
         Engine e = engine;
-        return e != null && e.running() ? 300 : 0;
+        if (e != null && e.running()) return 300;
+        // No transition for the pair coming up (editor.md §2): no crossfade either, -1 says so
+        return noTransition && enabled() ? -1 : 0;
     }
+
+    /** The playing song's pair is set to No transition: A plays to its end, then B from its start. */
+    private static volatile boolean noTransition;
 
     static volatile long askedAt;
 
@@ -194,7 +230,8 @@ public final class Automix {
                     nextTitle = nextItem == null ? null : (String) title.invoke(access, nextItem);
                     nextArtist = nextItem == null ? null : (String) artist.invoke(access, nextItem);
                     curId = cur;
-                    if (next != null && !next.equals(nextId)) Features.lookAhead(next);
+                    MusicVideoType.request(cur);
+                    MusicVideoType.request(next);
                     // the next two songs' canvas loops, fetched ahead (Prism's CanvasAhead)
                     java.util.List<String[]> ahead = new java.util.ArrayList<>();
                     Object[] auto = null;
@@ -221,6 +258,173 @@ public final class Automix {
             queueBusy = false;
             Log.w(TAG, "queue read failed", t);
         }
+    }
+
+    /** playNext's answer when YT's queue has no playing song to add after. */
+    static final String NOTHING_PLAYING = "nothing playing";
+
+    /**
+     * Play these mixes (mix-file.md rule 7): a fresh queue of [ids]. The queue before it goes (all
+     * but the playing song), [ids] are added behind the playing song with YT's own "Play next" (each
+     * one right after it, so last first), and the first plays; when it is the playing song, it plays
+     * on, else the old song is removed once the first plays. [done] gets null, or why not
+     * (NOTHING_PLAYING when nothing is), on the main thread.
+     */
+    static void playNext(java.util.List<String> ids, java.util.function.Consumer<String> done) {
+        try {
+            Class<?> bridge = Class.forName(JAM);
+            java.lang.reflect.Field f = bridge.getDeclaredField("queue");
+            f.setAccessible(true);
+            Object access = ((java.lang.ref.WeakReference<?>) f.get(null)).get();
+            if (access == null) {
+                main.post(() -> done.accept(NOTHING_PLAYING));
+                return;
+            }
+            Class<?> type = Class.forName(JAM + "$QueueAccess");
+            Method encode = Class.forName(JAM.substring(0, JAM.lastIndexOf('.')) + ".QueueCommand").getMethod("encode", String.class, boolean.class);
+            Method enqueue = type.getMethod("patch_jamEnqueue", byte[].class);
+            java.util.concurrent.Executor exec = (java.util.concurrent.Executor) type.getMethod("patch_jamExecutor").invoke(access);
+            exec.execute(() -> {
+                try {
+                    String cur = queuedAt(access, type, 0);
+                    if (cur == null) {
+                        main.post(() -> done.accept(NOTHING_PLAYING));
+                        return;
+                    }
+                    // the fresh queue: all but the playing song goes, so nothing queued before is
+                    // merged with the file's songs or plays between them
+                    Object[] items = (Object[]) type.getMethod("patch_jamItems").invoke(access);
+                    int current = (int) type.getMethod("patch_jamCurrent").invoke(access);
+                    Object playing = items[current];
+                    Method remove = type.getMethod("patch_jamRemoveItem", Object.class);
+                    for (int i : MixFile.clearOrder(items.length, current)) remove.invoke(access, items[i]);
+                    java.util.List<String> add = MixFile.freshAdds(ids, cur);
+                    // one at a time, the last first: YT adds each once its server answers, so songs
+                    // sent together land in whatever order the answers come
+                    addInOrder(access, type, exec, enqueue, encode, add, add.size() - 1, 0, () -> {
+                        if (cur.equals(ids.get(0))) {
+                            // plays on (or starts, when YT's restored queue holds it paused)
+                            main.post(() -> {
+                                ytControls(context(), t -> t.play());
+                                done.accept(null);
+                            });
+                        } else skipWhenNext(access, type, exec, ids.get(0), ids.contains(cur) ? null : playing, 0, done);
+                    });
+                } catch (Throwable t) {
+                    Log.w(TAG, "play next failed", t);
+                    main.post(() -> done.accept("YouTube Music's queue refused the songs"));
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "play next failed", t);
+            main.post(() -> done.accept(NOTHING_PLAYING));
+        }
+    }
+
+    /**
+     * Adds add[i] right after the playing song, waits (3 s at most) until YT lists it there, then
+     * add[i - 1]; [then] once all are in. A song YT lists under another id only costs the wait.
+     */
+    private static void addInOrder(Object access, Class<?> type, java.util.concurrent.Executor exec, Method enqueue, Method encode,
+                                   java.util.List<String> add, int i, int tries, Runnable then) {
+        if (i < 0) {
+            then.run();
+            return;
+        }
+        exec.execute(() -> {
+            try {
+                if (tries == 0) enqueue.invoke(access, (Object) encode.invoke(null, add.get(i), true));
+                String next = queuedAt(access, type, 1);
+                if (add.get(i).equals(next) || tries >= 30) {
+                    if (tries >= 30) Log.w(TAG, "play next: " + add.get(i) + " not listed after 3 s");
+                    addInOrder(access, type, exec, enqueue, encode, add, i - 1, 0, then);
+                } else main.postDelayed(() -> addInOrder(access, type, exec, enqueue, encode, add, i, tries + 1, then), 100);
+            } catch (Throwable t) {
+                Log.w(TAG, "play next failed", t);
+                then.run();
+            }
+        });
+    }
+
+    /** The video id [k] places after the playing song in YT's queue (0: the playing song), or null. */
+    private static String queuedAt(Object access, Class<?> type, int k) throws Exception {
+        int current = (int) type.getMethod("patch_jamCurrent").invoke(access);
+        Object[] items = (Object[]) type.getMethod("patch_jamItems").invoke(access);
+        int i = current + k;
+        if (items == null || current < 0 || i >= items.length) return null;
+        return (String) type.getMethod("patch_jamVideoId", Object.class).invoke(access, items[i]);
+    }
+
+    /**
+     * Next (the listener's, not automix's) once [first] is next in line; 6 s at most. Then [old] (the
+     * song that was playing, null to keep it) leaves the queue once [first] plays.
+     */
+    private static void skipWhenNext(Object access, Class<?> type, java.util.concurrent.Executor exec, String first, Object old,
+                                     int tries, java.util.function.Consumer<String> done) {
+        main.postDelayed(() -> exec.execute(() -> {
+            String next;
+            try {
+                next = queuedAt(access, type, 1);
+            } catch (Throwable t) {
+                next = null;
+            }
+            if (first.equals(next)) {
+                main.post(() -> {
+                    ytControls(context(), t -> {
+                        t.skipToNext();
+                        t.play();
+                    });
+                    if (old != null) removeWhenPlaying(access, type, exec, first, old, 0);
+                    done.accept(null);
+                });
+            } else if (tries < 30) skipWhenNext(access, type, exec, first, old, tries + 1, done);
+            else main.post(() -> done.accept("the songs were added after this one, but YouTube Music didn't list them in time to play the first"));
+        }), 200);
+    }
+
+    /** Removes [old] from YT's queue once [first] is the playing song; 3 s at most, else it stays. */
+    private static void removeWhenPlaying(Object access, Class<?> type, java.util.concurrent.Executor exec, String first, Object old, int tries) {
+        main.postDelayed(() -> exec.execute(() -> {
+            try {
+                if (first.equals(queuedAt(access, type, 0))) {
+                    Object[] items = (Object[]) type.getMethod("patch_jamItems").invoke(access);
+                    int current = (int) type.getMethod("patch_jamCurrent").invoke(access);
+                    for (int i = 0; i < items.length; i++)
+                        if (items[i] == old && i != current) type.getMethod("patch_jamRemoveItem", Object.class).invoke(access, old);
+                } else if (tries < 15) removeWhenPlaying(access, type, exec, first, old, tries + 1);
+            } catch (Throwable t) {
+                Log.w(TAG, "play these mixes: the old song stayed", t);
+            }
+        }), 200);
+    }
+
+    /**
+     * YT Music's own transport controls (main thread), as the listener's own press: its media session,
+     * reached through its MediaBrowserService. Not the system's media keys, which go to whichever app
+     * played last (another player's, while YT is paused).
+     */
+    private static void ytControls(Context c, java.util.function.Consumer<android.media.session.MediaController.TransportControls> act) {
+        android.content.ComponentName service = new android.content.ComponentName(c.getPackageName(),
+                "com.google.android.apps.youtube.music.mediabrowser.MusicBrowserService");
+        android.media.browse.MediaBrowser[] b = new android.media.browse.MediaBrowser[1];
+        b[0] = new android.media.browse.MediaBrowser(c, service, new android.media.browse.MediaBrowser.ConnectionCallback() {
+            @Override
+            public void onConnected() {
+                try {
+                    act.accept(new android.media.session.MediaController(c, b[0].getSessionToken()).getTransportControls());
+                } catch (Throwable t) {
+                    Log.w(TAG, "YT's controls failed", t);
+                } finally {
+                    b[0].disconnect();
+                }
+            }
+
+            @Override
+            public void onConnectionFailed() {
+                Log.w(TAG, "YT's media session not reached");
+            }
+        }, null);
+        b[0].connect();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -297,7 +501,15 @@ public final class Automix {
         String id = curId, next = nextId;
         if (id == null) return;
         Engine e = engine;
+        String hold = hold();
+        if (!java.util.Objects.equals(hold, lastHold)) {
+            if (hold != null) Log.i(TAG, "no mix: " + hold);
+            lastHold = hold;
+        }
+        // a mix armed but not begun is let go (playback.md: the sleep timer plays the song to its end)
+        if (hold != null && e != null && e.running() && amx.state.equals("armed") && id.equals(e.m.outId)) e.abort(hold, false);
         if (e != null && e.running()) return;
+        playSpeed(player, id, next);
         double pos = position(player) / 1000.0, dur = duration(player) / 1000.0;
         if (pos < 0 || !(dur > 0)) return;
         if (!id.equals(amx.id)) amx = new Song(id);
@@ -310,7 +522,7 @@ public final class Automix {
             amx.state = "idle";
             amx.shown = null;
         }
-        if (dur < 30 || repeatOne()) return;
+        if (dur < 30 || repeatOne() || hold != null) return;
 
         Analyzer.request(app, id, true);
         if (next != null && !next.equals(id)) Analyzer.request(app, next, false);
@@ -332,21 +544,31 @@ public final class Automix {
         // the editor's override for this pair: Loop asks for the loop mix (planned as Auto besides);
         // anything else means no loop mix (crossfade.js: loopPicked, noLoop)
         MixOverride ov = next == null ? null : override(id + ">" + next);
-        boolean noLoop = ov != null && !ov.loop();
-        Planner.Plan p = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, noLoop ? ov : null);
+        noTransition = ov != null && ov.noTransition();
+        // each song's playlist speed (spotify-mixes.md rule 10); the loop mix has its own tempo: none then
+        double sOut = songSpeed(id, next), sIn = next == null ? 1 : MixOverride.songSpeed(ov, null);
+        boolean speeds = Math.abs(sOut - 1) >= 1e-4 || Math.abs(sIn - 1) >= 1e-4;
+        boolean noLoop = ov != null && !ov.loop() || speeds;
+        MixOverride pick = ov != null && !ov.loop() ? ov : null;
+        Planner.Plan usual = Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, pick, sOut, sIn);
         // a pair is looked at again when its lyrics arrive
         String pair = id + ">" + next + "|" + (sung.out != null ? "L" : "m") + (sung.in != null ? "L" : "m");
         if (!noLoop && next != null && from != null && to != null && !lyricsWait && (!pair.equals(loopKey)
-                || (loopState.equals("missing") && SystemClock.elapsedRealtime() >= loopRetryAt))) prepareLoop(s.version, id, next, from, to, pos, sung, pair);
+                || (loopState.equals("missing") && SystemClock.elapsedRealtime() >= loopRetryAt))) prepareLoop(s.version, id, next, from, to, pos, loopSung(id, next), pair);
         boolean loopPending = !noLoop && (lyricsWait || pair.equals(loopKey) && (loopState.equals("loading") || loopState.equals("missing")));
         Planner.LoopPlan lp = !noLoop && pair.equals(loopKey) && loopState.equals("ready") ? loopPlan : null;
         amx.loopPending = loopPending;
         amx.noLoopWhy = noLoopWhy(noLoop, pair.equals(loopKey) ? loopState : null);
         // Automix v2: the loop mix plays only when it scores over the blend (automix.js loopOrBlend)
-        Planner.Choice choice = lp != null && ov != null && ov.loop() ? Planner.Choice.picked(lp.none == null) : Planner.loopOrBlend(s.version, p, lp);
+        Planner.Choice choice = lp != null && ov != null && ov.loop() ? Planner.Choice.picked(lp.none == null) : Planner.loopOrBlend(s.version, usual, lp);
+        // Automix v2, Auto's blend and not the loop mix (decided on the usual blend's numbers): the curator
+        // blend (analysis-cases.md "The curator blend"; the planner falls back to the usual blend where it doesn't fit)
+        Planner.Plan curator = s.version == 3 && "blend".equals(usual.style) && usual.shape == null && !loopPending && !(lp != null && choice.loop)
+                ? Planner.plan(s, id, next, from, to, dur, pos, pos + EARLIEST_LEAD, sung, pick, sOut, sIn, true) : null;
+        Planner.Plan p = curator != null && curator.curator ? curator : usual;
         boolean loop = lp != null && choice.loop && lp.out.loopStart > pos + EARLIEST_LEAD;
         amx.choice = lp != null ? choice.why : null;
-        double takeover = loop ? lp.out.loopStart : p.mixOutTrackTime - Mix.HAND_LEAD - (p.style.equals("blend") ? p.rampSongSec : 0);
+        double takeover = loop ? lp.out.loopStart : p.mixOutTrackTime - Mix.HAND_LEAD * Mix.leadRate(p) - (p.style.equals("blend") ? p.rampSongSec : 0);
         String shown = (loop ? lp.toString() : p.toString()) + (amx.choice != null ? " [" + amx.choice + "]" : "");
         if (!shown.equals(amx.shown)) {
             amx.shown = shown;
@@ -358,6 +580,7 @@ public final class Automix {
         amx.loop = loop ? lp : null;
         amx.takeover = takeover;
         amx.dur = dur;
+        if (noTransition) return;   // no mix and no crossfade (crossfadeMs)
         if (!loop && (p.fallback || next == null)) return;   // Morphe's crossfade, as the extension's plain one
         if (!loop && !(p.durationSec >= 1)) return;
         if (pos < takeover - TAIL_LEAD || (loopPending && pos < takeover - 8)) return;
@@ -506,6 +729,18 @@ public final class Automix {
         return overrides;
     }
 
+    /** Every saved override by pair, copies (the mix files' import and export, MixFilesPreference). */
+    public static synchronized java.util.LinkedHashMap<String, MixOverride> savedOverrides() {
+        java.util.LinkedHashMap<String, MixOverride> m = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, MixOverride> e : overrides().entrySet()) m.put(e.getKey(), e.getValue().copy());
+        return m;
+    }
+
+    /** Whether the overrides can be read and saved (the app's activity has started). */
+    public static boolean ready() {
+        return app != null;
+    }
+
     /** The user's override for a pair ("a>b"), or null: Auto. */
     public static synchronized MixOverride override(String pairKey) {
         MixOverride o = overrides().get(pairKey);
@@ -628,22 +863,39 @@ public final class Automix {
         }
         o.pairKey = o.fromId + ">" + o.toId;
         o.override = override(o.pairKey);
+        if (!live && o.override != null && o.override.noTransition()) {
+            o.why = "No transition: this song plays to its end, then the next from its start";
+            return o;
+        }
         if (app != null) {
             Analysis fa = Analyzer.get(app, o.fromId), ta = Analyzer.get(app, o.toId);
             o.outGrid = editorGrid(fa, true);
             o.inGrid = editorGrid(ta, false);
+            // the editor shows and saves the override on this app's grid (mix-file.md rule 4)
+            if (o.override != null && o.outGrid != null) o.override = MixOverride.fold(o.override, o.outGrid[2]).ov;
             o.outDur = fa != null ? fa.durationSec : Double.NaN;
             o.inDur = ta != null ? ta.durationSec : Double.NaN;
             o.outEnd = fa != null ? Planner.musicEnd(fa).durationSec : Double.NaN;
         }
         if (!live) {
-            Object[] pf = Analyzer.progress(o.fromId), pt = Analyzer.progress(o.toId);
-            if (pf != null || pt != null) {
-                Object[] pr = pf != null ? pf : pt;
-                o.waiting = "Analysing " + (pf != null ? "this song" : "the next song") + ": " + pr[0];
-                o.waitDone = (Float) pr[1];
-                o.waitingFor = pf != null ? o.fromId : o.toId;
-            } else if (o.fromId.equals(id) && amx.loopPending) {
+            // editor.md §11: one row, this song before the next; analysis only, hidden during a live mix
+            String[] ids = {o.fromId, o.toId}, names = {"this song", "the next song"};
+            for (int k = 0; k < 2 && o.waiting == null; k++) {
+                Object[] pr = Analyzer.progress(ids[k]);
+                String[] out = pr == null ? Analyzer.outcome(ids[k]) : null;
+                if (pr != null) {
+                    o.waiting = "Analysing " + names[k] + ": " + pr[0];
+                    o.waitDone = (Float) pr[1];
+                } else if (out != null && "tooLong".equals(out[0])) {
+                    o.waiting = (k == 0 ? "This song" : "The next song") + " is over 8 minutes: not analysed, a plain crossfade";
+                    o.waitNoBar = true;
+                } else if (out != null) {
+                    o.waiting = "Analysis of " + names[k] + " failed: " + out[1];
+                    o.waitNoBar = true;
+                } else continue;
+                o.waitingFor = ids[k];
+            }
+            if (o.waiting == null && o.fromId.equals(id) && amx.loopPending) {
                 o.waiting = "Looking for a loop mix";
                 o.waitDone = -1;
             }
@@ -673,7 +925,7 @@ public final class Automix {
             o.toArtist = b[1];
         }
         double start = loop != null ? loop.out.loopStart : plan.mixOutTrackTime;
-        double takeover = loop != null ? loop.out.loopStart : plan.mixOutTrackTime - Mix.HAND_LEAD - ("blend".equals(plan.style) ? plan.rampSongSec : 0);
+        double takeover = loop != null ? loop.out.loopStart : plan.mixOutTrackTime - Mix.HAND_LEAD * Mix.leadRate(plan) - ("blend".equals(plan.style) ? plan.rampSongSec : 0);
         if (live) {
             double t = e.mixNow();
             o.at = Double.isNaN(t) ? Double.NaN : t - e.m.t0;
@@ -691,7 +943,7 @@ public final class Automix {
         }
         o.editable = !live && o.fromId.equals(id);
         // a fade planned because the analysis isn't there yet, with time left for it: only for now
-        o.provisional = !live && loop == null && plan.fallback && o.waiting != null && o.waitingFor != null
+        o.provisional = !live && loop == null && plan.fallback && o.waiting != null && !o.waitNoBar && o.waitingFor != null
                 && (Double.isNaN(o.left) || o.left > TAIL_LEAD);
         o.previewAt = loop != null ? start - Mix.HAND_LEAD - 8 : start - Mix.HAND_LEAD - (TAIL_LEAD + 3 + plan.rampSongSec);
         if (loopKey.startsWith(o.pairKey + "|")) {
@@ -797,12 +1049,17 @@ public final class Automix {
         @Override
         public void onMixStarted(Engine e) {
             if (amx.id.equals(e.m.outId)) amx.state = "mixing";
+            // the song this mix brings in keeps the speed it gives it (spotify-mixes.md rule 10)
+            cameId = e.m.inId;
+            cameFrom = e.m.outId;
         }
 
         @Override
         public void onFinished(Engine e, boolean ok, String why) {
             if (engine == e) engine = null;
             if (why != null && !why.equals("stale") && !why.equals("built too late")) Log.i(TAG, "mix ended" + (ok ? "" : ": " + why));
+            // the moves heard, for "no effect three times running": only a mix that played to its end counts
+            Planner.ended(e.m.loopPlan != null ? "loop" : Planner.moveOf(e.m.plan), ok, e.handedOver());
             if (amx.id.equals(e.m.outId)) {
                 // not started (a seek past its takeover): planned again from here; else this song is done
                 amx.state = e.tookOverOnce() ? "done" : "idle";
@@ -814,6 +1071,15 @@ public final class Automix {
     private static Planner.Sung sung(String id, String next) {
         Planner.Sung s = new Planner.Sung();
         double[][] a = SungLyrics.cached(app, id), b = next != null ? SungLyrics.cached(app, next) : null;
+        s.out = a != null && a.length > 0 ? a : null;
+        s.in = b != null && b.length > 0 ? b : null;
+        return s;
+    }
+
+    /** The loop mix's sung spans: the same lyrics read as the baseline reads them (loopSpansFromLines). */
+    private static Planner.Sung loopSung(String id, String next) {
+        Planner.Sung s = new Planner.Sung();
+        double[][] a = SungLyrics.cachedLoop(app, id), b = next != null ? SungLyrics.cachedLoop(app, next) : null;
         s.out = a != null && a.length > 0 ? a : null;
         s.in = b != null && b.length > 0 ? b : null;
         return s;
@@ -886,6 +1152,7 @@ public final class Automix {
                         plan = Planner.planLoopMix(version, cur, outAudio, to, inAudio, pos + Planner.LOOP_SETUP_SEC, sung);
                         if (plan == null || plan.none != null) {
                             Log.i(TAG, "no loop mix for this pair: " + (plan == null ? "no beat grid to loop on" : plan.none));
+                            if (plan != null && plan.none.contains("opening of the next song")) Log.i(TAG, Planner.openingWhy(to, inAudio, sung.in));
                             plan = null;
                         } else {
                             state = "ready";
@@ -938,7 +1205,7 @@ public final class Automix {
     // ---------------------------------------------------------------------------------------------
     // YT's player and the screen
 
-    private static Method posMethod, durMethod;
+    private static volatile Method posMethod, durMethod;
 
     /** The length of the song YT's player has now, or -1 (no player yet). */
     public static long durationMs() {
@@ -962,8 +1229,10 @@ public final class Automix {
 
     static long position(Object player) {
         try {
-            if (posMethod == null || posMethod.getDeclaringClass() != player.getClass()) posMethod = player.getClass().getMethod("patch_getCurrentPosition");
-            return (long) posMethod.invoke(player);
+            // read once: another thread may swap the cache for another player's class meanwhile
+            Method m = posMethod;
+            if (m == null || m.getDeclaringClass() != player.getClass()) posMethod = m = player.getClass().getMethod("patch_getCurrentPosition");
+            return (long) m.invoke(player);
         } catch (Throwable t) {
             return -1;
         }
@@ -971,10 +1240,77 @@ public final class Automix {
 
     static long duration(Object player) {
         try {
-            if (durMethod == null || durMethod.getDeclaringClass() != player.getClass()) durMethod = player.getClass().getMethod("patch_getDuration");
-            return (long) durMethod.invoke(player);
+            Method m = durMethod;
+            if (m == null || m.getDeclaringClass() != player.getClass()) durMethod = m = player.getClass().getMethod("patch_getDuration");
+            return (long) m.invoke(player);
         } catch (Throwable t) {
             return -1;
+        }
+    }
+
+    private static String lastHold;
+
+    /**
+     * Why no mix is made now, or null (playback.md): the sleep timer set to "end of song" (Morphe's
+     * crossfade hears it, CrossfadePatch.onSleepTimerStateChanged), or a playback speed other than x1
+     * (Morphe's "Playback speed"; the phone's plans aren't converted by the speed, so it mixes nothing).
+     */
+    private static String hold() {
+        try {
+            java.lang.reflect.Field f = Class.forName("app.morphe.extension.music.patches.CrossfadePatch").getDeclaredField("sleepTimerEndOfTrack");
+            f.setAccessible(true);
+            if (f.getBoolean(null)) return "the sleep timer stops at the end of this song";
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object setting = Class.forName("app.morphe.extension.music.settings.Settings").getField("PLAYBACK_SPEED").get(null);
+            int pct = ((Number) setting.getClass().getMethod("get").invoke(setting)).intValue();
+            if (pct != 100) return String.format(Locale.US, "playback speed x%.2f (mixes are planned at x1)", pct / 100f);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // each song's playlist speed (spotify-mixes.md rule 10)
+
+    /** The song the last mix brought in, and the one it came from. */
+    private static volatile String cameId = "", cameFrom = "";
+    /** The speed this code put on YT's player for a song's playlist speed (0: none). */
+    private static float speedSet;
+
+    /** A song's speed while it plays: the one the mix that brought it in gives it, else the one the mix taking it out gives it, else 1. */
+    static double songSpeed(String id, String next) {
+        MixOverride in = id.equals(cameId) ? override(cameFrom + ">" + id) : null;
+        return MixOverride.songSpeed(in, next != null ? override(id + ">" + next) : null);
+    }
+
+    /**
+     * Between mixes, YT's player plays the song at its playlist speed, pitch kept; never over a speed
+     * the user set in Morphe's Playback speed (that song isn't mixed either, hold()).
+     */
+    private static void playSpeed(Object player, String id, String next) {
+        if (morpheSpeedPct() != 100) return;
+        double want = songSpeed(id, next);
+        float now = Engine.speedOf(player);
+        boolean off = Math.abs(want - 1) >= 1e-4;
+        if (off && Math.abs(now - want) > 1e-6) {
+            Engine.speed(player, (float) want);
+            speedSet = (float) want;
+            Log.i(TAG, String.format(Locale.US, "%s plays at its playlist speed x%.5f", id, want));
+        } else if (!off && speedSet != 0 && Math.abs(now - 1) > 1e-6 && Math.abs(now - speedSet) < 1e-6) {
+            Engine.speed(player, 1f);
+            speedSet = 0;
+        }
+    }
+
+    /** Morphe's Playback speed in percent (100: x1, also when it can't be read). */
+    private static int morpheSpeedPct() {
+        try {
+            Object setting = Class.forName("app.morphe.extension.music.settings.Settings").getField("PLAYBACK_SPEED").get(null);
+            return ((Number) setting.getClass().getMethod("get").invoke(setting)).intValue();
+        } catch (Throwable t) {
+            return 100;
         }
     }
 

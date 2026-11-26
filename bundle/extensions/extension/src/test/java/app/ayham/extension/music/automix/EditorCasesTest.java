@@ -33,6 +33,13 @@ public class EditorCasesTest {
         throw new AssertionError("spec/automix/editor-cases.json not found above " + new File("").getAbsolutePath());
     }
 
+    /** Every group of editor-cases.json is run here: a new group fails until it is, so "passes" never means "skipped". */
+    @Test
+    public void everyGroupOfTheCasesIsRun() throws Exception {
+        List<String> run = java.util.Arrays.asList("notes", "curves", "windows", "plans", "draw");
+        for (String group : cases().keySet()) assertTrue("editor-cases.json group \"" + group + "\" is not run by EditorCasesTest", run.contains(group));
+    }
+
     @Test
     public void presetAndLaneCurvesMatchTheCases() throws Exception {
         List<String> diffs = new ArrayList<>();
@@ -106,7 +113,7 @@ public class EditorCasesTest {
     public void overridesPlayTheWindowsTheCasesSay() throws Exception {
         List<String> diffs = new ArrayList<>();
         List<Object> cases = (List<Object>) cases().get("plans");
-        assertEquals(9, cases.size());
+        assertEquals(11, cases.size());
         for (Object o : cases) {
             Map<String, Object> c = (Map<String, Object>) o;
             int engine = ((Number) c.get("engine")).intValue();
@@ -114,7 +121,11 @@ public class EditorCasesTest {
             s.version = engine;
             Analysis from = steady("a", (Map<String, Object>) c.get("out")), to = steady("b", (Map<String, Object>) c.get("in"));
             double pos = ((Number) c.get("pos")).doubleValue();
-            Planner.Plan p = Planner.plan(s, "a", "b", from, to, from.durationSec, pos, pos + 4.5, null, MixOverride.fromJson(c.get("override")));
+            // an override with a speed is planned with it (spotify-mixes.md rule 10, editor-cases notes)
+            MixOverride ov = MixOverride.fromJson(c.get("override"));
+            boolean speeds = ov != null && ov.hasSpeed();
+            Planner.Plan p = speeds ? Planner.plan(s, "a", "b", from, to, from.durationSec, pos, pos + 4.5, null, ov, ov.speedOut, ov.speedIn)
+                    : Planner.plan(s, "a", "b", from, to, from.durationSec, pos, pos + 4.5, null, ov);
             Map<String, Object> got = new LinkedHashMap<>();
             got.put("style", p.style);
             got.put("bars", (double) p.bars);
@@ -124,10 +135,131 @@ public class EditorCasesTest {
             got.put("glide", p.glide != null);
             got.put("kickLock", engine == 3 && Planner.kickLockAllowed(p));
             got.put("warnings", p.warnings != null ? new ArrayList<Object>(p.warnings) : new ArrayList<>());
+            if (speeds) {
+                got.put("outRate", Math.round((p.outRate > 0 ? p.outRate : 1) * 1e6) / 1e6);
+                got.put("rate", Math.round(p.rate * 1e6) / 1e6);
+                got.put("speedOut", p.speedOut);
+                got.put("speedIn", p.speedIn);
+            }
             Object want = c.get("expect");
             if (!same(want, got)) diffs.add(c.get("name") + ":\n  got  " + Json.write(got) + "\n  want " + Json.write(want));
         }
         assertTrue(diffs.size() + " of " + cases.size() + " differ:\n" + String.join("\n", diffs), diffs.isEmpty());
+    }
+
+    private static double num(Object v) {
+        return ((Number) v).doubleValue();
+    }
+
+    private static Planner.Glide glideOf(Object json) {
+        if (!(json instanceof Map)) return null;
+        Map<String, Object> g = (Map<String, Object>) json;
+        return new Planner.Glide(num(g.get("q")), (int) num(g.get("beats")), num(g.get("beatOutSec")));
+    }
+
+    /** editor_cases.mjs counted: each drawing as the number of points (volume) or curves kept per deck. */
+    private static Object counted(Map<String, Object> o) {
+        if (o == null || !(o.get("lanes") instanceof Map)) return o;
+        Map<String, Object> lanes = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : ((Map<String, Object>) o.get("lanes")).entrySet()) {
+            Object v = e.getValue();
+            if (v instanceof Map) {
+                Map<String, Object> d = (Map<String, Object>) v, n = new LinkedHashMap<>();
+                for (String side : new String[]{"out", "in"}) {
+                    Object deck = d.get(side);
+                    n.put(side, (double) (deck instanceof List ? ((List<?>) deck).size() : ((Map<?, ?>) deck).size()));
+                }
+                v = n;
+            }
+            lanes.put(e.getKey(), v);
+        }
+        Map<String, Object> r = new LinkedHashMap<>(o);
+        r.put("lanes", lanes);
+        return r;
+    }
+
+    @Test
+    public void drawnCurvesMatchTheCases() throws Exception {
+        List<String> diffs = new ArrayList<>();
+        int n = 0;
+        for (Object o : (List<Object>) cases().get("draw")) {
+            Map<String, Object> c = (Map<String, Object>) o;
+            if (c.get("name") == null) continue; // the group's _about
+            n++;
+            String fn = (String) c.get("fn");
+            Object got;
+            switch (fn) {
+                case "pointCurves": {
+                    Planner.Glide glide = glideOf(c.get("glide"));
+                    double D = c.get("D") instanceof Number ? num(c.get("D")) : Planner.glideSteps(glide.q, glide.beats, glide.beatOutSec).total;
+                    Map<String, Object> lanes = (Map<String, Object>) c.get("lanes");
+                    MixOverride.Drawing[] drawn = new MixOverride.Drawing[3];
+                    for (int k = 0; k < 3; k++) drawn[k] = MixOverride.Drawing.read(MixOverride.LANES[k], lanes.get(MixOverride.LANES[k]));
+                    Curves pc = MixOverride.pointCurves(drawn, D, num(c.get("beatSec")), glide);
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("out", side(pc.out));
+                    m.put("in", side(pc.in));
+                    got = m;
+                    break;
+                }
+                case "presetCurves": {
+                    double beat = num(c.get("beatSec"));
+                    Curves pc = MixOverride.presetCurves(MixOverride.fromJson(c.get("override")), num(c.get("D")), beat, beat, null);
+                    got = pc == null ? null : asJson(pc);
+                    break;
+                }
+                case "normalizeOverride": {
+                    MixOverride ov = MixOverride.fromJson(c.get("override"));
+                    Map<String, Object> m = ov == null ? null : (Map<String, Object>) Json.parse(Json.write(ov.toJson()));
+                    got = Boolean.TRUE.equals(c.get("count")) ? counted(m) : m;
+                    break;
+                }
+                case "shapeDrawing": {
+                    Object d = MixOverride.shapeDrawing((String) c.get("lane"), (String) c.get("shape"), num(c.get("D")), num(c.get("beatSec")), null, (String) c.get("unit"));
+                    got = d instanceof MixOverride.Drawing ? Json.parse(Json.write(((MixOverride.Drawing) d).toJson((String) c.get("lane")))) : d;
+                    break;
+                }
+                case "plan": {
+                    Planner.Settings s = new Planner.Settings();
+                    s.version = 2; // editor_cases.mjs load(null): the extension's default engine
+                    Analysis from = steady("a", (Map<String, Object>) c.get("out")), to = steady("b", (Map<String, Object>) c.get("in"));
+                    double pos = num(c.get("pos"));
+                    Planner.Plan p = Planner.plan(s, "a", "b", from, to, from.durationSec, pos, pos + 4.5, null, MixOverride.fromJson(c.get("override")));
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("style", p.style);
+                    m.put("bars", (double) p.bars);
+                    m.put("durationSec", Math.round(p.durationSec * 1e6) / 1e6);
+                    m.put("outRate", Math.round((p.outRate > 0 ? p.outRate : 1) * 1e6) / 1e6);
+                    m.put("rate", Math.round(p.rate * 1e6) / 1e6);
+                    Map<String, Object> out = side(p.curves.out), in = side(p.curves.in);
+                    m.put("gainOut", out.get("gain"));
+                    m.put("gainIn", in.get("gain"));
+                    got = m;
+                    break;
+                }
+                default:
+                    throw new AssertionError("unknown fn " + fn);
+            }
+            if (!same(c.get("expect"), got)) diffs.add(c.get("name") + ":\n  got  " + Json.write(got) + "\n  want " + Json.write(c.get("expect")));
+        }
+        assertEquals(17, n);
+        assertTrue(diffs.size() + " of " + n + " differ:\n" + String.join("\n", diffs), diffs.isEmpty());
+    }
+
+    @Test
+    public void aDrawingSurvivesItsJsonAndAShapePickedOverItDropsIt() {
+        MixOverride o = ov("{\"preset\":\"custom\",\"lanes\":{\"volume\":{\"unit\":\"beat\",\"out\":[[0,1],[8,1],[8,0]],\"in\":[[0,0],[8,0],[8,1]]},\"eq\":\"centerBassSwap\",\"effect\":{\"unit\":\"sec\",\"out\":{\"hp\":[[0,20],[4,1000]]},\"in\":{}}}}");
+        assertTrue(o.hasDrawing());
+        String text = Json.write(o.toJson());
+        assertEquals(text, Json.write(MixOverride.fromJson(Json.parse(text)).toJson()));
+        assertEquals(text, Json.write(o.copy().toJson()));
+        assertTrue(text, text.contains("\"effect\":{\"unit\":\"sec\",\"out\":{\"hp\":[[0.0,20.0],[4.0,1000.0]]},\"in\":{}}")
+                || text.contains("\"effect\":{\"unit\":\"sec\",\"out\":{\"hp\":[[0,20],[4,1000]]},\"in\":{}}"));
+        o.drawn[0] = null;
+        o.volume = "smooth";
+        MixOverride n = MixOverride.normalize(o);
+        assertFalse(n.lanes()[0], MixOverride.DRAW.equals(n.lanes()[0]));
+        assertTrue(n.hasDrawing()); // the effect drawing stays
     }
 
     /** Curves as editor-cases.json writes them: durationSec, then out and in, each curve name in the case's order. */
@@ -286,11 +418,13 @@ public class EditorCasesTest {
     }
 
     @Test
-    public void slamDefaultsToTwoBarsWithItsCutOnTheCentre() {
+    public void slamKeepsThePairsLengthWithItsCutOnTheCentre() {
         Planner.Settings s = new Planner.Settings();
         s.version = 3;
-        Planner.Plan p = plan(s, PlannerTest.song("a", 120, 200, 0.9), PlannerTest.song("b", 120, 180, 0.9), ov("{\"preset\":\"slam\"}"));
-        assertEquals(2, p.bars);
+        Analysis a = PlannerTest.song("a", 120, 200, 0.9), b = PlannerTest.song("b", 120, 180, 0.9);
+        Planner.Plan p = plan(s, a, b, ov("{\"preset\":\"slam\"}"));
+        // no preset sets a length (editor.md §2): Auto's own
+        assertEquals(plan(s, a, b, null).bars, p.bars);
         double[][] g = p.curves.out.get("gain");
         assertEquals(p.durationSec / 2, g[1][0], 1e-6);
         assertEquals(p.durationSec / 2 + MixOverride.CUT_RAMP_SEC, g[2][0], 1e-6);

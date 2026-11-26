@@ -44,7 +44,8 @@ final class StreamDeck {
     /** How late a seek of the deck lands (learnt, kept for the next song's deck). */
     private static double startLag;
 
-    private static StreamDeck current;
+    // set on the main thread, read by the download threads in keep()
+    private static volatile StreamDeck current;
 
     final String id;
     final Object player;
@@ -53,7 +54,8 @@ final class StreamDeck {
     private volatile boolean ready;
     /** Song seconds the deck is heard from / until (NaN: not set). */
     private volatile double takeAt = Double.NaN, releaseAt = Double.NaN;
-    private volatile double seekTo = Double.NaN;
+    /** A seek the servo asks of the writer: cleared by the writer only if no newer one came meanwhile. */
+    private final java.util.concurrent.atomic.AtomicReference<Double> seekTo = new java.util.concurrent.atomic.AtomicReference<>(Double.NaN);
     private volatile boolean paused;
     private volatile int trim;  // -1 drop, +1 repeat, 0 none
     private volatile float level = 1;
@@ -69,7 +71,11 @@ final class StreamDeck {
     private double clockShift;
     private long heardSince;
     private Thread thread;
-    private AudioTrack track;
+    // built, driven and (while run() lives) released by the deck's thread alone; read on main for the clock
+    private volatile AudioTrack track;
+    /** run() has ended (guarded by trackLock): close() frees the track then, else run() does. */
+    private boolean runEnded;
+    private final Object trackLock = new Object();
     private int rate;
     // what was written: track frame -> song second, per block
     private final long[] markFrame = new long[512];
@@ -283,7 +289,7 @@ final class StreamDeck {
     private void start() {
         askedAt = SystemClock.elapsedRealtime();
         long p = Automix.position(player);
-        seekTo = Math.max(0, p / 1000.0 + startLag);
+        seekTo.set(Math.max(0, p / 1000.0 + startLag));
         thread = new Thread(this::run, "Automix-deck");
         thread.setPriority(Thread.MAX_PRIORITY);
         thread.start();
@@ -331,7 +337,7 @@ final class StreamDeck {
             return;
         }
         double heard = heardSec();
-        if (Double.isNaN(heard) || !Double.isNaN(seekTo)) return;
+        if (Double.isNaN(heard) || !Double.isNaN(seekTo.get())) return;
         if (logClocks && !Double.isNaN(takeAt) && Math.abs(heard - takeAt) < 2.5) logClocks(heard, p, now);
         double err = heard - p / 1000.0 - clockShift, abs = Math.abs(err);
         if (abs > SEEK_ERROR && abs < 0.3 && !Double.isNaN(takeAt) && clockShift == 0 && now - heardSince < 1500) {
@@ -371,7 +377,7 @@ final class StreamDeck {
                 alignSeeks++;
                 inStep = false;
                 recentN = 0;
-                seekTo = p / 1000.0 + startLag;
+                seekTo.set(p / 1000.0 + startLag);
             } else {
                 inStep = true;
                 trim = m > 0 ? -1 : 1;
@@ -392,7 +398,7 @@ final class StreamDeck {
             lastSilentSeek = now;
             recentN = 0;
             trim = 0;
-            seekTo = pos + startLag;
+            seekTo.set(pos + startLag);
             return;
         }
         int n = 0;
@@ -415,7 +421,7 @@ final class StreamDeck {
             Log.i(TAG, String.format(Locale.US, "stream deck: off by %.0f ms (a seek?): YT plays while it lines up again", lastErr * 1000));
             retake = true;
         }
-        seekTo = pos + startLag;
+        seekTo.set(pos + startLag);
     }
 
     private final boolean logClocks = clockLog();
@@ -474,13 +480,16 @@ final class StreamDeck {
         try {
             ex.setDataSource(file.getAbsolutePath());
             int ti = -1;
-            for (int i = 0; i < ex.getTrackCount(); i++)
-                if (ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME).startsWith("audio/")) ti = i;
+            for (int i = 0; i < ex.getTrackCount() && ti < 0; i++) {
+                String mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) ti = i;
+            }
             if (ti < 0) throw new Exception("no audio track");
             ex.selectTrack(ti);
             MediaFormat fmt = ex.getTrackFormat(ti);
             rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE);
             int ch = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+            if (ch <= 0) throw new Exception(ch + " channels");
             boolean floatPcm = false;
             codec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME));
             codec.configure(fmt, null, null, 0);
@@ -507,7 +516,8 @@ final class StreamDeck {
             boolean inputDone = false, trackPaused = false;
             int sinceTrim = 0;
             while (!"closed".equals(state)) {
-                double want = seekTo;
+                Double asked = seekTo.get();
+                double want = asked;
                 if (!Double.isNaN(want)) {
                     ex.seekTo((long) (want * 1e6), MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
                     codec.flush();
@@ -519,7 +529,8 @@ final class StreamDeck {
                         written = 0;
                     }
                     skipUntil = want;
-                    seekTo = Double.NaN;
+                    // a newer seek asked during this one stays for the next turn
+                    seekTo.compareAndSet(asked, Double.NaN);
                     if (!paused) track.play();
                 }
                 if (paused) {
@@ -557,7 +568,8 @@ final class StreamDeck {
                         main.post(() -> handBack("the deck's audio decodes at " + r + " Hz, not " + was + " Hz"));
                         break;
                     }
-                    ch = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+                    if (f.containsKey(MediaFormat.KEY_CHANNEL_COUNT) && f.getInteger(MediaFormat.KEY_CHANNEL_COUNT) > 0)
+                        ch = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
                     floatPcm = f.containsKey(MediaFormat.KEY_PCM_ENCODING) && f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT;
                     continue;
                 }
@@ -589,6 +601,9 @@ final class StreamDeck {
                     if (Double.isNaN(firstSec)) firstSec = t;
                     float l = floatPcm ? fb.get(i * ch) : sb.get(i * ch) / 32768f;
                     float r = ch < 2 ? l : floatPcm ? fb.get(i * ch + 1) : sb.get(i * ch + 1) / 32768f;
+                    // held to ±1 before its level, as YT holds a song (a lossy file's overs)
+                    l = Math.max(-1f, Math.min(1f, l));
+                    r = Math.max(-1f, Math.min(1f, r));
                     // heard from takeAt, faded out from releaseAt, both in song seconds
                     double g = Double.isNaN(tk) || t < tk ? 0 : Math.min(1, (t - tk) / FADE);
                     if (!Double.isNaN(rl)) g *= Math.max(0, 1 - (t - rl) / FADE);
@@ -619,12 +634,17 @@ final class StreamDeck {
             Log.w(TAG, "stream deck failed", t);
             main.post(() -> handBack("the deck could not play the audio (" + t.getMessage() + ")"));
         } finally {
-            // closed before the track was built (a hand-back while loading): close() never saw it
-            if ("closed".equals(state)) {
-                AudioTrack t = track;
-                track = null;
-                releaseTrack(t);
+            // closed already (or before the track was built): the track is freed here, on its own
+            // thread, never under a write; not closed yet: close() frees it once it comes
+            AudioTrack t = null;
+            synchronized (trackLock) {
+                runEnded = true;
+                if ("closed".equals(state)) {
+                    t = track;
+                    track = null;
+                }
             }
+            releaseTrack(t);
             ex.release();
             if (codec != null) {
                 try {
@@ -650,9 +670,16 @@ final class StreamDeck {
 
     private void close() {
         String was = state;
-        state = "closed";
-        AudioTrack t = track;
-        track = null;
+        AudioTrack t = null;
+        synchronized (trackLock) {
+            state = "closed";
+            // the writer may be in track.write() now: it sees "closed", leaves its loop and frees the
+            // track itself; only a writer already gone leaves it to us
+            if (runEnded) {
+                t = track;
+                track = null;
+            }
+        }
         releaseTrack(t);
         if (!"released".equals(was) && !"handed-back".equals(was) && current == this) current = null;
     }

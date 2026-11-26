@@ -68,6 +68,7 @@ public class AnalysisSignalsTest {
         List<String> diffs = new ArrayList<>();
         int checked = 0;
         for (AnalysisCases.Case c : AnalysisCases.cases()) {
+            if (!c.rendered()) continue;
             float[] a = AnalysisSignals.render(c.song, 44100);
             assertEquals(c.name + " length", Math.round(c.song.sec * 44100), a.length);
             for (int sr : new int[]{44100, 22050}) {

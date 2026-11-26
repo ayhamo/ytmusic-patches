@@ -84,6 +84,7 @@ public final class AudioDecode {
             int rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE), channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
             int enc = AudioFormat.ENCODING_PCM_16BIT;
             boolean told = false, inputDone = false;
+            int toldChannels = 0;
             long frames = 0;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             float[][] planar = null;
@@ -123,7 +124,11 @@ public final class AudioDecode {
                 lastOut = android.os.SystemClock.elapsedRealtime();
                 if (!told) {
                     told = true;
+                    toldChannels = channels;
                     sink.format(rate, channels);
+                } else if (channels != toldChannels) {
+                    // the sink sized its meters by the first channel count: more channels mid-stream overran them
+                    throw new IOException("the channel count changed mid-stream (" + toldChannels + " to " + channels + ")");
                 }
                 ByteBuffer buf = codec.getOutputBuffer(out);
                 if (buf != null && info.size > 0) {
@@ -159,7 +164,9 @@ public final class AudioDecode {
                     }
                     long s0 = android.os.SystemClock.elapsedRealtime();
                     sink.block(planar, n);
-                    inSink += android.os.SystemClock.elapsedRealtime() - s0;
+                    // the sink may wait out a mix (waitWhileHeld): that time is not the decoder stalling
+                    lastOut = android.os.SystemClock.elapsedRealtime();
+                    inSink += lastOut - s0;
                     frames += n;
                     if (frames > MAX_SEC * rate) throw new IOException("over " + (int) MAX_SEC + " s");
                 }

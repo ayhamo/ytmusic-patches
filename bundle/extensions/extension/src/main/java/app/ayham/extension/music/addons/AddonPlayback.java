@@ -20,10 +20,11 @@ public final class AddonPlayback {
      * re-locked, then stopped) neither takes the badge nor clears it for the song heard.
      */
     private static final class Entry {
-        String addon;
-        boolean audible, ownAtmos, held;
+        // set under the lock, read by now() outside it
+        volatile String addon;
+        volatile boolean audible, ownAtmos, held;
         /** The last {badge, line} while it was heard: kept through a re-lock (hold). */
-        Object[] last;
+        volatile Object[] last;
     }
 
     private static final java.util.LinkedHashMap<Object, Entry> players = new java.util.LinkedHashMap<>();
@@ -118,6 +119,10 @@ public final class AddonPlayback {
                 } catch (Throwable t) {
                     Log.w(TAG, "addon format read failed", t);
                 }
+                // the newest heard one keeps its reading while it buffers (a resync's seek): an older
+                // one still winding down would take it (phone, 2026-11-24: FLAC 24/44.1, then the song
+                // before's 16/44.1 for 2 s, then 24 again)
+                if (e.last != null) return e.last;
             }
             if (held == null && e.held && e.last != null) held = e.last;
         }
@@ -138,7 +143,8 @@ public final class AddonPlayback {
         }
     }
 
-    private static int intField(Object f, String name) throws Exception {
+    /** Synchronized: two threads could otherwise see rateField set before encodingField. */
+    private static synchronized int intField(Object f, String name) throws Exception {
         if (fieldsFailed) return name.equals("M") ? -1 : 0;
         try {
             if (rateField == null) {

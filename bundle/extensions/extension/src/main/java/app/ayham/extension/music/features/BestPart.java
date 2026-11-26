@@ -20,7 +20,8 @@ final class BestPart {
     }
 
     private static void toast(Activity a, String s) {
-        Toast.makeText(a, s, Toast.LENGTH_SHORT).show();
+        // the app's context: this may come after a search, when the page is gone
+        Toast.makeText(a.getApplicationContext(), s, Toast.LENGTH_SHORT).show();
     }
 
     /**

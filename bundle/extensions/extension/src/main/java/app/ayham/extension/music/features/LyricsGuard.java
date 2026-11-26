@@ -158,7 +158,8 @@ public final class LyricsGuard {
      * not letters: Chinese rap mixes in English words, and one character is a word, not a letter.
      */
     static boolean scriptMismatch(String title, String artist, List<String> lines) {
-        int[] meta = count(title + " " + artist);
+        // a missing name is no name, not the Latin word "null"
+        int[] meta = count((title == null ? "" : title) + " " + (artist == null ? "" : artist));
         if (meta[0] + meta[1] + meta[2] > 0 || meta[3] == 0) return false;
         int sung = 0, chinese = 0, otherCjk = 0;
         for (String l : lines) {

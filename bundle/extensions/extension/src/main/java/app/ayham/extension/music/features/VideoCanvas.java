@@ -266,20 +266,26 @@ final class VideoCanvas {
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setConnectTimeout(10_000);
             c.setReadTimeout(15_000);
-            if (c.getResponseCode() >= 400) break;
+            if (c.getResponseCode() >= 400) {
+                c.disconnect();
+                break;
+            }
             byte[] img = read(c.getInputStream());
             bytes += img.length;
             android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeByteArray(img, 0, img.length);
             if (bmp == null) break;
-            int[] px = new int[bmp.getWidth() * bmp.getHeight()];
-            bmp.getPixels(px, 0, bmp.getWidth(), 0, 0, bmp.getWidth(), bmp.getHeight());
-            for (int i = 0; i < px.length; i++) px[i] = (((px[i] >> 16) & 255) * 3 + ((px[i] >> 8) & 255) * 6 + (px[i] & 255)) / 10;
-            for (int i = 0; i < per && n * per + i < count; i++) {
-                int x0 = (i % cols) * w, y0 = (i / cols) * h;
-                if (x0 + w > bmp.getWidth() || y0 + h > bmp.getHeight()) break;
-                b.frames.add(ClipJudge.grid(px, bmp.getWidth(), x0, y0, w, h));
+            try {
+                int[] px = new int[bmp.getWidth() * bmp.getHeight()];
+                bmp.getPixels(px, 0, bmp.getWidth(), 0, 0, bmp.getWidth(), bmp.getHeight());
+                for (int i = 0; i < px.length; i++) px[i] = (((px[i] >> 16) & 255) * 3 + ((px[i] >> 8) & 255) * 6 + (px[i] & 255)) / 10;
+                for (int i = 0; i < per && n * per + i < count; i++) {
+                    int x0 = (i % cols) * w, y0 = (i / cols) * h;
+                    if (x0 + w > bmp.getWidth() || y0 + h > bmp.getHeight()) break;
+                    b.frames.add(ClipJudge.grid(px, bmp.getWidth(), x0, y0, w, h));
+                }
+            } finally {
+                bmp.recycle();
             }
-            bmp.recycle();
         }
         return b.frames.size() < 3 ? null : b;
     }
@@ -899,6 +905,11 @@ final class VideoCanvas {
         try {
             double base = range[2] / 1e6;
             return base + remux(raw, out, start - base, end - base) / 1e6;
+        } catch (Exception e) {
+            // a half-written loop is no loop
+            //noinspection ResultOfMethodCallIgnored
+            out.delete();
+            throw e;
         } finally {
             //noinspection ResultOfMethodCallIgnored
             raw.delete();
@@ -912,12 +923,15 @@ final class VideoCanvas {
 
         static Sidx parse(byte[] b, int at) {
             ByteBuffer bb = ByteBuffer.wrap(b);
-            if (at + 8 > b.length || bb.getInt(at + 4) != 0x73696478) return null; // 'sidx'
+            if (at < 0 || at + 12 > b.length || bb.getInt(at + 4) != 0x73696478) return null; // 'sidx'
             int p = at + 8;
             int version = b[p] & 0xFF;
+            // a truncated box is no index: the header, then every entry, must fit
+            if (p + 8 + 4 + (version == 0 ? 8 : 16) + 4 > b.length) return null;
             p += 4 + 4; // version/flags, reference id
             Sidx s = new Sidx();
             s.timescale = bb.getInt(p) & 0xFFFFFFFFL;
+            if (s.timescale == 0) return null;
             p += 4;
             long firstOffset;
             if (version == 0) {
@@ -933,6 +947,7 @@ final class VideoCanvas {
             p += 2;
             int count = bb.getShort(p) & 0xFFFF;
             p += 2;
+            if (count == 0 || p + (long) count * 12 > b.length) return null;
             s.sizes = new long[count];
             s.durations = new long[count];
             for (int i = 0; i < count; i++) {
@@ -1035,7 +1050,11 @@ final class VideoCanvas {
         c.setConnectTimeout(10_000);
         c.setReadTimeout(20_000);
         c.setRequestProperty("User-Agent", userAgent());
-        if (c.getResponseCode() >= 400) throw new Exception("HTTP " + c.getResponseCode() + " for bytes " + from + "-" + to);
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            c.disconnect();
+            throw new Exception("HTTP " + code + " for bytes " + from + "-" + to);
+        }
         return read(c.getInputStream());
     }
 
@@ -1101,8 +1120,12 @@ final class VideoCanvas {
             out.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
         int code = c.getResponseCode();
-        byte[] b = read(code < 400 ? c.getInputStream() : c.getErrorStream());
-        if (code >= 400) throw new Exception("HTTP " + code);
+        if (code >= 400) {
+            // the error body is not read (it may be null): the code is the answer
+            c.disconnect();
+            throw new Exception("HTTP " + code);
+        }
+        byte[] b = read(c.getInputStream());
         return new JSONObject(new String(b, StandardCharsets.UTF_8));
     }
 

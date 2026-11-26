@@ -85,7 +85,6 @@ public final class AddonDirect {
     private static Context ctx;
     private static boolean started;
     private static long lastQueue;
-    private static volatile boolean pausedByYt;
     /** The Dolby Atmos switch at the last step. */
     private static boolean atmosWas;
     /** When YT paused: its last reading or two still arrive just after, they aren't a resume. */
@@ -98,6 +97,9 @@ public final class AddonDirect {
     private AddonDirect() {
     }
 
+    /** The adb test hooks (app.ayham.ADDON_TEST) on in every build when true; false for a phone release. */
+    static final boolean TEST_HOOKS = false;
+
     /** From Automix.onActivityCreate. */
     static void start(Context c) {
         ctx = c.getApplicationContext();
@@ -107,7 +109,7 @@ public final class AddonDirect {
         AddonPrep.clearCache(ctx);
         TRACE = "1".equals(Features.prop("directTrace"));
         DUO = "1".equals(Features.prop("directDuo"));
-        if ("1".equals(Features.prop("directTest"))) registerTest();
+        if (TEST_HOOKS || "1".equals(Features.prop("directTest"))) registerTest();
         main.postDelayed(AddonDirect::tick, 2000);
     }
 
@@ -145,8 +147,10 @@ public final class AddonDirect {
 
     /** Automix changed YT's player's speed: ours changes in the same moment. */
     static void onSpeed(Object host, float speed) {
-        Shadow s = get(host);
-        if (s != null && Looper.myLooper() == Looper.getMainLooper()) s.followSpeed(speed, SystemClock.elapsedRealtime());
+        final Shadow s = get(host);
+        if (s == null) return;
+        if (Looper.myLooper() == Looper.getMainLooper()) s.followSpeed(speed, SystemClock.elapsedRealtime());
+        else main.post(() -> s.followSpeed(speed, SystemClock.elapsedRealtime()));
     }
 
     /** The song's addon audio is heard now (the mix decks use it for this song's end). */
@@ -198,7 +202,11 @@ public final class AddonDirect {
     /** Morphe's onPauseVideo: our players stop with YT's at once (the clock check is the backup). */
     static void onPause() {
         pausedAt = SystemClock.elapsedRealtime();
-        pausedByYt = true;
+        // each player clears its own mark when its YT player moves again: during a mix one of them
+        // moving isn't the other one's resume
+        for (Shadow s : list()) s.pausedByYt = true;
+        Shadow a = armed;
+        if (a != null) a.pausedByYt = true;
         main.post(() -> {
             for (Shadow s : list()) s.play(false);
         });
@@ -401,6 +409,11 @@ public final class AddonDirect {
         /** A silent speed nudge runs until then (0: none); a start's seek may buffer until then. */
         long nudgeUntil, startGraceUntil;
         boolean lastWasSeek, pausedJump;
+        /** YT paused this player's host (Morphe's onPauseVideo) and it hasn't moved since; one begun just after the pause starts so. */
+        volatile boolean pausedByYt = SystemClock.elapsedRealtime() - pausedAt < 400;
+        /** The host's patch_getPlaybackState, looked up once per host class (read every tick). */
+        private Method hostState;
+        private Class<?> hostStateOf;
         /** Our player's audio session (the equalizers), 0 when none yet, -1 when it can't be read. */
         int session;
         private Method sessionOf;
@@ -684,7 +697,12 @@ public final class AddonDirect {
                 setShare(fadeFrom + (fadeTo - fadeFrom) * x);
                 if (k >= 1) fadeMs = 0;
             }
-            int hs = (int) host.getClass().getMethod("patch_getPlaybackState").invoke(host);
+            Class<?> hc = host.getClass();
+            if (hostState == null || hostStateOf != hc) {
+                hostState = hc.getMethod("patch_getPlaybackState");
+                hostStateOf = hc;
+            }
+            int hs = (int) hostState.invoke(host);
             if (hs == 1) {
                 end("YT's player stopped", false);
                 return;

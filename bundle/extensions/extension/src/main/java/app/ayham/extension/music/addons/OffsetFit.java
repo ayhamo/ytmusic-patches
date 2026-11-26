@@ -536,6 +536,7 @@ public final class OffsetFit {
                     gn++;
                 }
             }
+            if (gn == 0) return Double.NEGATIVE_INFINITY;   // only non-finite blocks (a damaged decode): not NaN
             return L(gs / gn);
         }
     }

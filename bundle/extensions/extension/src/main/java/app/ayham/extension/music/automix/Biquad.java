@@ -2,34 +2,54 @@ package app.ayham.extension.music.automix;
 
 /**
  * A stereo biquad with the Web Audio API's BiquadFilterNode formulas (the extension's filters):
- * lowshelf / highshelf (shelf slope 1, gain in dB), lowpass / highpass (Q in dB). Direct form I in
- * doubles, so a 20 Hz corner at 48 kHz stays stable.
+ * lowshelf / highshelf (shelf slope 1, gain in dB), peaking (gain in dB, Q linear), lowpass /
+ * highpass (Q in dB). Direct form I in doubles, so a 20 Hz corner at 48 kHz stays stable.
  */
 final class Biquad {
-    static final int LOWSHELF = 0, HIGHSHELF = 1, LOWPASS = 2, HIGHPASS = 3;
+    static final int LOWSHELF = 0, HIGHSHELF = 1, LOWPASS = 2, HIGHPASS = 3, PEAKING = 4;
     /** The extension's high/low-pass Q (Web Audio: dB). */
     static final double Q_DB = 0.7;
 
     private final int type;
-    private final double sr, freq;
+    private final double sr, freq, q;
     private double b0 = 1, b1, b2, a1, a2;
     private double x1l, x2l, y1l, y2l, x1r, x2r, y1r, y2r;
     private double value = Double.NaN;
 
-    /** [freq]: fixed for the shelves (their value is the gain), unused for the passes (their value is the corner). */
+    /** [freq]: fixed for the shelves and the peak (their value is the gain), unused for the passes (their value is the corner). */
     Biquad(int type, double sr, double freq) {
+        this(type, sr, freq, type == PEAKING ? 0.7 : Q_DB);
+    }
+
+    /** [q]: a pass's Q in dB, the peak's linear Q (as Web Audio reads each). */
+    Biquad(int type, double sr, double freq, double q) {
         this.type = type;
         this.sr = sr;
         this.freq = freq;
+        this.q = q;
+    }
+
+    private boolean gainType() {
+        return type == LOWSHELF || type == HIGHSHELF || type == PEAKING;
     }
 
     void setValue(double v) {
-        if (v == value) return;
+        // a NaN (or an infinite gain) would turn the coefficients, then the filter's state, to NaN
+        // for good; a pass's infinite corner is clamped below like any other
+        if (v == value || Double.isNaN(v) || (Double.isInfinite(v) && gainType())) return;
         value = v;
-        double f = type == LOWSHELF || type == HIGHSHELF ? freq : Math.max(10, Math.min(sr / 2 * 0.999, v));
+        double f = gainType() ? freq : Math.max(10, Math.min(sr / 2 * 0.999, v));
         double w0 = 2 * Math.PI * f / sr, cos = Math.cos(w0), sin = Math.sin(w0);
         double nb0, nb1, nb2, na0, na1, na2;
-        if (type == LOWSHELF || type == HIGHSHELF) {
+        if (type == PEAKING) {
+            double A = Math.pow(10, v / 40), alpha = sin / (2 * q);
+            nb0 = 1 + alpha * A;
+            nb1 = -2 * cos;
+            nb2 = 1 - alpha * A;
+            na0 = 1 + alpha / A;
+            na1 = -2 * cos;
+            na2 = 1 - alpha / A;
+        } else if (type == LOWSHELF || type == HIGHSHELF) {
             double A = Math.pow(10, v / 40), alpha = sin / 2 * Math.sqrt(2), sq = 2 * Math.sqrt(A) * alpha;
             if (type == LOWSHELF) {
                 nb0 = A * ((A + 1) - (A - 1) * cos + sq);
@@ -47,7 +67,7 @@ final class Biquad {
                 na2 = (A + 1) - (A - 1) * cos - sq;
             }
         } else {
-            double alpha = sin / (2 * Math.pow(10, Q_DB / 20));
+            double alpha = sin / (2 * Math.pow(10, q / 20));
             if (type == LOWPASS) {
                 nb0 = (1 - cos) / 2;
                 nb1 = 1 - cos;

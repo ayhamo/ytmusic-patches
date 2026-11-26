@@ -15,7 +15,8 @@ import app.ayham.extension.music.automix.Json;
 
 /**
  * The shared lyrics cases (spec/lyrics/lyrics-cases.json, lyrics.md) run against the phone's strip.
- * Groups for the full lyrics view only are counted as skipped, with the reason.
+ * Groups for code that isn't ours are counted apart, with the reason: the full view's, and Morphe's
+ * own (its lyrics parser, providers, cache and full view: the rulebook covers what we built).
  */
 public class LyricsCasesTest {
     private static File dir() {
@@ -64,21 +65,23 @@ public class LyricsCasesTest {
                         got = String.valueOf(r);
                         break;
                     }
-                    case "offset": {
-                        long off = LyricTiming.offset(lng(in.get("song")), lng(in.get("global")));
-                        long lyr = LyricTiming.lyricsPos(lng(in.get("player")), off);
-                        long seek = LyricTiming.seekFor(in.containsKey("lyricTime") ? lng(in.get("lyricTime")) : lyr, off);
-                        Map<String, Object> w = map(want);
-                        ok = off == lng(w.get("offset")) && lyr == lng(w.get("lyrics")) && seek == lng(w.get("seekTo"));
-                        got = off + "/" + lyr + "/" + seek;
-                        break;
-                    }
                     case "gaps": {
                         List<Object> ls = list(in.get("lines"));
                         long[] st = new long[ls.size()], en = new long[ls.size()];
                         for (int i = 0; i < st.length; i++) {
-                            st[i] = lng(map(ls.get(i)).get("start"));
-                            en[i] = lng(map(ls.get(i)).get("end"));
+                            Map<String, Object> l = map(ls.get(i));
+                            long[] ws = null, we = null;
+                            if (l.get("words") != null) {
+                                List<Object> w = list(l.get("words"));
+                                ws = new long[w.size()];
+                                we = new long[w.size()];
+                                for (int k = 0; k < ws.length; k++) {
+                                    ws[k] = lng(map(w.get(k)).get("start"));
+                                    we[k] = lng(map(w.get(k)).get("end"));
+                                }
+                            }
+                            st[i] = LyricTiming.startOf(lng(l.get("start")), ws, we);
+                            en[i] = lng(l.get("end"));
                         }
                         List<long[]> r = LyricTiming.gaps(st, en);
                         StringBuilder b = new StringBuilder("[");
@@ -89,16 +92,19 @@ public class LyricsCasesTest {
                     }
                     default:
                         gs++;
-                        continue; // sides: the full view's (the strip has one line, lyrics.md §5.5)
+                        // sides: the full view's (the strip has one line, lyrics.md §5.5); parse and
+                        // lrcOffset: Morphe's own, not ours (the strip reads lines from Morphe's parser);
+                        // offset: Morphe's own (the strip is on Morphe's offsets and its position)
+                        continue;
                 }
                 if (ok) gp++;
                 else fails.add(g.getKey() + " '" + c.get("name") + "': got " + got + ", expected " + Json.write(want));
             }
             pass += gp;
             skip += gs;
-            report.append(String.format("  %-12s %d pass, %d skipped%n", g.getKey(), gp, gs));
+            report.append(String.format("  %-12s %d pass, %d not ours%n", g.getKey(), gp, gs));
         }
-        report.append("  total ").append(pass).append(" pass, ").append(skip).append(" skipped, ").append(fails.size()).append(" failed\n");
+        report.append("  total ").append(pass).append(" pass, ").append(skip).append(" not ours (Morphe's own or the full view's), ").append(fails.size()).append(" failed\n");
         for (String f : fails) report.append("  FAIL ").append(f).append('\n');
         System.out.println(report);
         assertTrue(report.toString(), fails.isEmpty());

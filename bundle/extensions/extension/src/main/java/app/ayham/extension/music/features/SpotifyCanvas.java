@@ -12,7 +12,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.HashSet;
@@ -24,18 +23,19 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Spotify Canvas, Metrolist's DirectCanvasProvider (getSpotifyCanvas) without a login: an anonymous
- * web-player token (spotlib's Auth and Totp), Spotify's search (the pathfinder searchTopResultsList
- * query), Metrolist's match rules, and the canvas URL from the public mirror (publicSpotifyCanvas).
- * Only scdn.co media over https is taken (trustedMedia). The clip is saved in the canvas cache.
- * Off the main thread.
+ * Spotify Canvas, Metrolist's DirectCanvasProvider (getSpotifyCanvas): an anonymous web-player token
+ * (spotlib's Auth and Totp), Spotify's search (the pathfinder searchTopResultsList query),
+ * Metrolist's match rules, and the canvas from pathfinder's "canvas" query (canvas.md §4 rule 5).
+ * With the listener's own Spotify sign-in (SpotifySession) the canvas is asked with their token
+ * first, then anonymously (§4 rule 0). Only scdn.co media over https is taken (trustedMedia). The
+ * clip is saved in the canvas cache. Off the main thread.
  */
 final class SpotifyCanvas {
     private static final String TAG = "Ayham";
     private static final String TOKEN_URL = "https://open.spotify.com/api/token";
     private static final String CLIENT_TOKEN_URL = "https://clienttoken.spotify.com/v1/clienttoken";
     private static final String PATHFINDER_URL = "https://api-partner.spotify.com/pathfinder/v2/query";
-    private static final String MIRROR_URL = "https://spotify-canva.vercel.app/api/canvas?trackId=";
+    private static final String CANVAS_HASH = "575138ab27cd5c1b3e54da54d0a7cc8d85485402de26340c2145f0f6bb5e7a9f";
     private static final String SEARCH_HASH = "12d940b3f7381506a82ff5382eb59b0ed65118656e6bcdfbe4cebc528f75d29d";
     private static final String USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0";
     private static final String APP_VERSION = "1.2.96.390.gd46a85db";
@@ -47,6 +47,12 @@ final class SpotifyCanvas {
 
     private static String accessToken, clientToken;
     private static long accessExpires;
+    /** The listener's own web-player token (from their sp_dc session), and when it expires. */
+    private static volatile String userToken;
+    private static volatile long userExpires;
+    /** Bumped by every sign-in and sign-out: a token asked for before it is not kept (no old session back). */
+    private static int userGen;
+    private static final Object userLock = new Object();
     private static final String deviceId = UUID.randomUUID().toString();
 
     private SpotifyCanvas() {
@@ -141,7 +147,7 @@ final class SpotifyCanvas {
             long foundMs = length == null ? 0 : length.optLong("totalMilliseconds", 0);
             seen.append("; '").append(name).append("' by ").append(names);
             if (!matches(title, artist, album, durationMs, name, names.toString(), foundAlbum, foundMs, primary, first)) continue;
-            String canvas = publicCanvas(id);
+            String canvas = trackCanvas(id);
             if (trusted(canvas)) {
                 Log.i(TAG, "canvas spotify: '" + name + "' by " + names + " (" + id + ") has a canvas");
                 return canvas;
@@ -152,34 +158,49 @@ final class SpotifyCanvas {
         return null;
     }
 
-    /** Metrolist's publicSpotifyCanvas: the public mirror's canvas for the track. */
-    private static String publicCanvas(String trackId) throws Exception {
+    /**
+     * The track's canvas (canvas.md §4 rule 0): with the listener's sign-in, asked with their token
+     * first; nothing found or a failure there, then anonymously. null: no canvas.
+     */
+    private static String trackCanvas(String trackId) throws Exception {
         if (!trackId.matches("[A-Za-z0-9]{22}")) return null;
-        HttpURLConnection h = open(MIRROR_URL + URLEncoder.encode(trackId, "UTF-8"));
-        try {
-            int code = h.getResponseCode();
-            if (code == 404) return null; // the mirror has none
-            // busy or down (429, 5xx): an error, so the song is asked again later instead of saved as "no canvas"
-            if (code != 200) throw new java.io.IOException("canvas mirror: HTTP " + code);
-            JSONArray list = new JSONObject(read(h)).optJSONArray("canvasesList");
-            for (int i = 0; list != null && i < list.length(); i++) {
-                JSONObject c = list.optJSONObject(i);
-                if (c != null && ("spotify:track:" + trackId).equals(c.optString("trackUri")) && trusted(c.optString("canvasUrl", null)))
-                    return c.optString("canvasUrl");
+        if (SpotifySession.signedIn()) {
+            try {
+                String c = canvasQuery(trackId, true);
+                if (c != null) return c;
+                Log.i(TAG, "canvas spotify: signed-in lookup found none, asking anonymously");
+            } catch (Exception e) {
+                Log.i(TAG, "canvas spotify: signed-in lookup failed (" + e.getMessage() + "), asking anonymously");
             }
-            return null;
-        } finally {
-            h.disconnect();
         }
+        return canvasQuery(trackId, false);
     }
 
-    /** A pathfinder persisted query with the anonymous tokens (fetched again once on a 401). */
+    /** Pathfinder's "canvas" query (Metrolist 460a3168a): data.trackUnion.canvas.url when trusted. */
+    private static String canvasQuery(String trackId, boolean signed) throws Exception {
+        JSONObject answer = query("canvas", CANVAS_HASH, new JSONObject().put("trackUri", "spotify:track:" + trackId), signed);
+        JSONObject data = answer.optJSONObject("data");
+        JSONObject track = data == null ? null : data.optJSONObject("trackUnion");
+        JSONObject canvas = track == null ? null : track.optJSONObject("canvas");
+        Object url = canvas == null ? null : canvas.opt("url");
+        return url instanceof String && trusted((String) url) ? (String) url : null;
+    }
+
     private static JSONObject query(String operation, String hash, JSONObject variables) throws Exception {
+        return query(operation, hash, variables, false);
+    }
+
+    /**
+     * A pathfinder persisted query with the anonymous tokens, or [signed] the listener's own token
+     * (both fetched again once on a 401; a 429 is not retried: a failed lookup, never a miss).
+     */
+    private static JSONObject query(String operation, String hash, JSONObject variables, boolean signed) throws Exception {
         String body = new JSONObject().put("variables", variables).put("operationName", operation)
                 .put("extensions", new JSONObject().put("persistedQuery", new JSONObject().put("version", 1).put("sha256Hash", hash)))
                 .toString();
         for (int attempt = 0; attempt < 2; attempt++) {
             auth();
+            String bearer = signed ? userAuth() : accessToken;
             HttpURLConnection h = open(PATHFINDER_URL);
             try {
                 h.setRequestMethod("POST");
@@ -190,14 +211,16 @@ final class SpotifyCanvas {
                 h.setRequestProperty("Referer", "https://open.spotify.com/");
                 h.setRequestProperty("app-platform", "WebPlayer");
                 h.setRequestProperty("spotify-app-version", APP_VERSION);
-                h.setRequestProperty("Authorization", "Bearer " + accessToken);
+                h.setRequestProperty("Authorization", "Bearer " + bearer);
                 h.setRequestProperty("client-token", clientToken);
                 try (OutputStream o = h.getOutputStream()) {
                     o.write(body.getBytes(StandardCharsets.UTF_8));
                 }
                 int code = h.getResponseCode();
                 if (code == 401 && attempt == 0) {
-                    accessToken = clientToken = null;
+                    if (signed) userToken = null;
+                    else accessToken = null;
+                    clientToken = null;
                     continue;
                 }
                 if (code >= 400) throw new java.io.IOException(operation + ": HTTP " + code);
@@ -209,6 +232,51 @@ final class SpotifyCanvas {
             }
         }
         throw new java.io.IOException(operation + ": session expired");
+    }
+
+    /**
+     * The web-player token of the listener's own session: /api/token with their sp_dc cookie (sent
+     * only to Spotify, in the cookie header; never logged). An anonymous answer means the session
+     * has ended.
+     */
+    private static String userAuth() throws Exception {
+        int gen;
+        synchronized (userLock) {
+            if (userToken != null && System.currentTimeMillis() < userExpires - 60_000) return userToken;
+            gen = userGen;
+        }
+        String cookie = SpotifySession.cookie();
+        if (cookie == null) throw new java.io.IOException("not signed in");
+        String code = totp(System.currentTimeMillis());
+        HttpURLConnection h = open(TOKEN_URL + "?reason=transport&productType=web-player&totp=" + code + "&totpServer=" + code + "&totpVer=" + TOTP_VERSION);
+        try {
+            h.setRequestProperty("Accept", "*/*");
+            h.setRequestProperty("Referer", "https://open.spotify.com/");
+            h.setRequestProperty("Cookie", "sp_dc=" + cookie);
+            int status = h.getResponseCode();
+            if (status >= 400) throw new java.io.IOException("/api/token (signed in): HTTP " + status);
+            JSONObject t = new JSONObject(read(h));
+            String token = t.optString("accessToken", "");
+            if (token.isEmpty() || t.optBoolean("isAnonymous", false)) throw new java.io.IOException("the Spotify session has ended");
+            synchronized (userLock) {
+                // signed out (or in again) while this was asked: that session's token is not used
+                if (gen != userGen) throw new java.io.IOException("the Spotify session changed");
+                userToken = token;
+                userExpires = t.optLong("accessTokenExpirationTimestampMs", System.currentTimeMillis() + 30 * 60_000);
+            }
+            return token;
+        } finally {
+            h.disconnect();
+        }
+    }
+
+    /** After Sign out: the listener's token is dropped with the session. */
+    static void forgetUser() {
+        synchronized (userLock) {
+            userGen++;
+            userToken = null;
+            userExpires = 0;
+        }
     }
 
     /** spotlib's AuthHttp: the anonymous web-player token (TOTP), then the client token. */
@@ -275,6 +343,20 @@ final class SpotifyCanvas {
         String s = Integer.toString(bin % 1_000_000);
         while (s.length() < 6) s = "0" + s;
         return s;
+    }
+
+    /**
+     * The canvas in a pathfinder "canvas" answer (canvas.md §4 rule 5): data.trackUnion.canvas.url,
+     * kept only when trusted; null: none.
+     */
+    @SuppressWarnings("unchecked")
+    static String canvasOf(Object answer) {
+        Object o = answer;
+        for (String k : new String[]{"data", "trackUnion", "canvas", "url"}) {
+            if (!(o instanceof java.util.Map)) return null;
+            o = ((java.util.Map<String, Object>) o).get(k);
+        }
+        return o instanceof String && trusted((String) o) ? (String) o : null;
     }
 
     /** Metrolist's trustedMedia for Spotify: https on 443, no user info, a scdn.co host. */

@@ -208,6 +208,7 @@ public final class AddonPrep {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();   // kept for the caller to see
                 return;
             }
         }
@@ -290,8 +291,11 @@ public final class AddonPrep {
     }
 
     private static final Map<String, Pass> passes = new HashMap<>();
-    /** Copies replaced while our player was on them: released when it leaves them (retire). */
-    private static final Map<String, Prepared> replaced = new HashMap<>();
+    /**
+     * Copies replaced while our player was on them: released when it leaves them (retire). A list:
+     * a second pass before the player moved would otherwise drop the first copy unreleased.
+     */
+    private static final Map<String, List<Prepared>> replaced = new HashMap<>();
     /** Songs whose lossless pass ran (once per song). */
     private static final java.util.Set<String> passDone = new java.util.HashSet<>();
 
@@ -321,10 +325,11 @@ public final class AddonPrep {
 
     /** Our player left a copy a better one replaced: its stream and files go. */
     public static synchronized void retire(Prepared old) {
-        if (old != null && replaced.get(old.id) == old) {
-            replaced.remove(old.id);
-            deleteFiles(old);
-        }
+        List<Prepared> l = old == null ? null : replaced.get(old.id);
+        if (l == null || !l.contains(old)) return;
+        // the player is on the ready copy now: every copy replaced before it goes
+        replaced.remove(old.id);
+        for (Prepared x : l) deleteFiles(x);
     }
 
     /** The rows tried for a song (host, a tab, rowId), for "Upgrade quality". */
@@ -394,7 +399,7 @@ public final class AddonPrep {
      */
     public static void findAhead(Context c, String id, String title, String artist, boolean isVideo) {
         if (c == null || id == null || title == null || artist == null || !AddonSettings.on()) return;
-        if (ready.containsKey(id) || failed(id)) return;
+        if (get(id) != null || failed(id)) return;   // ready is read under the lock
         if (foundAhead.size() > 64) foundAhead.clear();
         if (!foundAhead.add(id)) return;
         final Context app = c.getApplicationContext();
@@ -425,6 +430,18 @@ public final class AddonPrep {
     }
 
     private static void work() {
+        try {
+            workLoop();
+        } finally {
+            // a throw past the loop's own catches ends this thread: the next request starts another
+            synchronized (AddonPrep.class) {
+                if (worker == Thread.currentThread()) worker = null;
+                working = null;
+            }
+        }
+    }
+
+    private static void workLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
         while (true) {
             String id;
@@ -481,7 +498,7 @@ public final class AddonPrep {
                     working = null;
                     if (p != null && ready.get(id) == ps.old) {
                         ready.put(id, p);
-                        if (app.ayham.extension.music.automix.AddonDirect.inUse(id)) replaced.put(id, ps.old);
+                        if (app.ayham.extension.music.automix.AddonDirect.inUse(id)) replaced.computeIfAbsent(id, k -> new ArrayList<>()).add(ps.old);
                         else deleteFiles(ps.old);
                     } else if (p != null) {
                         deleteFiles(p);   // the song went meanwhile
@@ -630,6 +647,7 @@ public final class AddonPrep {
         final OffsetFit.Side ytSide = new OffsetFit.Side();
         final YtDecode ytDecode = new YtDecode(id, yt, ytSide, t0);
         double known = containerSec(yt);
+        ytDecode.knownSec = known;
         if (Double.isNaN(known)) ytDecode.run();   // no length in the container: the decode gives it
         else new Thread(ytDecode, "addon-prep-yt").start();
         Prepared got = null;
@@ -649,6 +667,8 @@ public final class AddonPrep {
         final OffsetFit.Side side;
         final long t0;
         volatile boolean cancelled;
+        /** The container's length, read before the decode starts (it deletes a downloads copy when done). */
+        volatile double knownSec = Double.NaN;
         private boolean finished;
         private Throwable failed;
 
@@ -873,7 +893,7 @@ public final class AddonPrep {
      */
     private static Prepared streamAndFit(Context c, String id, AddonClient.Opened o, Protocol.Stream s, YtDecode yt) throws Exception {
         long t0 = SystemClock.elapsedRealtime();
-        StreamCache.Entry e = StreamCache.open(c, StreamCache.key(o.addon.host, (o.row == null ? id : o.row.id) + "_" + s.codec));
+        StreamCache.Entry e = StreamCache.open(c, StreamCache.rowKey(o.addon.host, o.row == null ? id : o.row.id, o.addon.tier, o.addon.quality, s.codec));
         boolean kept = false;
         try {
             e.source(s.url, s.headers);
@@ -960,7 +980,7 @@ public final class AddonPrep {
         p.rowId = o.row == null ? null : o.row.id;
         p.rate = fmt[0];
         p.channels = fmt[1];
-        double known = containerSec(yt.yt);
+        double known = yt.knownSec;
         p.ytDurationSec = Double.isNaN(known) ? ytSide.durationSec() : known;
         String bad = Fetch.mimeRefusal(s, range.mime);
         if (bad != null) {

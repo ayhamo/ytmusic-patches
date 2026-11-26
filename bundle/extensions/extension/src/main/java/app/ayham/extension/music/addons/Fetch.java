@@ -60,11 +60,29 @@ final class Fetch {
             for (int attempt = 0; attempt <= RESUMES && !done; attempt++) {
                 HttpURLConnection h = HttpTransport.open(Protocol.audio(s.url, s.headers, total > 0 ? "bytes=" + total + "-" : null));
                 h.setReadTimeout(30_000);
+                // the code first: getInputStream throws on a 4xx, which read as a dropped connection
+                int code;
+                try {
+                    code = h.getResponseCode();
+                } catch (IOException e) {
+                    h.disconnect();
+                    last = e;
+                    Log.w(TAG, String.format(Locale.US, "%s: fetch dropped at %d KB, resuming: %s", out.getName(), total / 1024, Protocol.scrub(String.valueOf(e))));
+                    continue;
+                }
+                if (total > 0 && code != 206 || code >= 400 && code < 500 && code != 408 && code != 429) {
+                    // a refused resume, or a link the server refuses for good: no retry
+                    h.disconnect();
+                    last = new IOException(total > 0 && code != 206 ? "resume refused: HTTP " + code : "audio: HTTP " + code);
+                    break;
+                }
                 try (InputStream in = h.getInputStream(); OutputStream w = new FileOutputStream(part, total > 0)) {
-                    int code = h.getResponseCode();
-                    if (total > 0 && code != 206) throw new IOException("resume refused: HTTP " + code);
                     if (code != 200 && code != 206) throw new IOException("audio: HTTP " + code);
-                    if (expected < 0) expected = h.getContentLengthLong();
+                    if (expected < 0) {
+                        // a 206 says only what is left: the whole is what we have plus that
+                        long len = h.getContentLengthLong();
+                        if (len >= 0) expected = code == 206 ? total + len : len;
+                    }
                     byte[] b = new byte[1 << 16];
                     for (int n; (n = in.read(b)) > 0; ) {
                         w.write(b, 0, n);
@@ -77,7 +95,6 @@ final class Fetch {
                     done = true;
                 } catch (IOException e) {
                     last = e;
-                    if (e.getMessage() != null && e.getMessage().startsWith("resume refused")) break;
                     Log.w(TAG, String.format(Locale.US, "%s: fetch dropped at %d KB, resuming: %s", out.getName(), total / 1024, Protocol.scrub(String.valueOf(e))));
                 } finally {
                     h.disconnect();
@@ -196,7 +213,7 @@ final class Fetch {
             if (b[i] == 'a' && b[i + 1] == 'l' && b[i + 2] == 'a' && b[i + 3] == 'c') {
                 int j = i + 4;
                 // the second 'alac' (the magic cookie box): version(4) frameLength(4) compat(1) bitDepth(1)... sampleRate at +20
-                for (int k = j; k + 28 < n; k++) {
+                for (int k = j; k + 31 < n; k++) {   // reads up to b[k + 31]
                     if (b[k] == 'a' && b[k + 1] == 'l' && b[k + 2] == 'a' && b[k + 3] == 'c') {
                         int c = k + 4 + 4;
                         int bits = b[c + 5] & 0xff;

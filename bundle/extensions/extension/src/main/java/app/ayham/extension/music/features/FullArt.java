@@ -518,7 +518,11 @@ final class FullArt {
         }
         u0 = Math.max(0f, Math.min(1f, u0));
         u1 = Math.max(u0 + 0.001f, Math.min(1.001f, u1));
-        long key = Math.round(u0 * 4000) * 10000L + Math.round(u1 * 4000) + (smooth ? 1L << 40 : 0);
+        // a bright cover's banner is shaded as the backdrop below it (ArtMesh.glare): half at the top,
+        // all of it where it fades out (white status bar, controls and title stayed white on white);
+        // Apple's tall clip too (Fortnight's is the white sleeve moving)
+        int g = ArtBackdrop.glare();
+        long key = Math.round(u0 * 4000) * 10000L + Math.round(u1 * 4000) + (smooth ? 1L << 40 : 0) + ((long) g << 41);
         boolean same = key == fadeKey && fadeH == v.getHeight();
         if (same && Math.abs(e - fadeFor) < 0.02f && e != 1f && e != 0f) return;
         if (same && e == fadeFor) return;
@@ -537,8 +541,13 @@ final class FullArt {
         // opaque above u0, faded (as far as e) below u1: the gradient clamps its end colours
         float y0 = top + h * u0, y1 = top + h * u1;
         Shader mask = new LinearGradient(0, y0, 0, y1, colors, stops, Shader.TileMode.CLAMP);
-        v.setRenderEffect(RenderEffect.createBlendModeEffect(
-                RenderEffect.createOffsetEffect(0, 0), RenderEffect.createShaderEffect(mask), BlendMode.DST_IN));
+        RenderEffect art = RenderEffect.createOffsetEffect(0, 0);
+        int ge = Math.round(g * e);
+        if (ge > 0) {
+            Shader shade = new LinearGradient(0, top, 0, y1, (ge / 2) << 24, ge << 24, Shader.TileMode.CLAMP);
+            art = RenderEffect.createBlendModeEffect(art, RenderEffect.createShaderEffect(shade), BlendMode.SRC_ATOP);
+        }
+        v.setRenderEffect(RenderEffect.createBlendModeEffect(art, RenderEffect.createShaderEffect(mask), BlendMode.DST_IN));
     }
 
     /** YT's layouts we stopped clipping the card (each was clipping before). */

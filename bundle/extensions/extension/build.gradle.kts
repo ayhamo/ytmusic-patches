@@ -11,6 +11,8 @@ android {
     // JVM unit tests (src/test) for the pure logic; android.util.Log and the like return defaults there.
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // the Spotify bench analyses several songs at once (scripts/spotify-bench.ps1 -Threads)
+        unitTests.all { it.maxHeapSize = System.getenv("TEST_HEAP") ?: "2g" }
     }
 }
 

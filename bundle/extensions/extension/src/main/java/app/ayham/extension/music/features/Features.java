@@ -36,8 +36,6 @@ import java.util.Properties;
 @SuppressWarnings("unused")
 public final class Features {
     private static final String TAG = "Ayham";
-    private static final String MORPHE_RESOLVER =
-            "app.morphe.extension.shared.spoof.requests.StreamingDataRequest$VideoIdResolver";
     private static final String MORPHE_STREAMING =
             "app.morphe.extension.shared.spoof.requests.StreamingDataRequest";
     private static final String MORPHE_LYRICS =
@@ -89,7 +87,7 @@ public final class Features {
     }
 
     /** The feature switches in Morphe's settings ("Fork settings"), all on by default. */
-    static final String[] SWITCHES = {"ui", "fullArt", "artistArt", "canvas", "canvasSpotify", "lyricLine", "stats", "autoSong", "native", "eq"};
+    static final String[] SWITCHES = {"ui", "fullArt", "artistArt", "canvas", "canvasSpotify", "lyricLine", "stats", "native", "eq"};
 
     /**
      * The features' configuration: the settings switches (Morphe's settings screen, "Ayham
@@ -183,7 +181,7 @@ public final class Features {
             if (!started) {
                 started = true;
                 checkMorpheReachable();
-                rewrapCurrentResolver();
+                MusicVideoType.migrateAutoSong(appContext);
                 startLyricsPoll();
                 EqPresets.register(appContext);
                 watchLifecycle(activity.getApplication());
@@ -217,6 +215,7 @@ public final class Features {
             if (fade > 0) result = (int) fade;
             long blend = app.ayham.extension.music.automix.Automix.crossfadeMs();
             if (blend > 0) result = (int) blend;
+            else if (blend < 0) result = 0; // No transition: Morphe's crossfade is off for this pair
         } catch (Throwable t) {
             Log.e(TAG, "overrideCrossfadeDurationMs failed", t);
         }
@@ -339,162 +338,31 @@ public final class Features {
         }, 500);
     }
 
-    // ---- Item 8: song version, wrapping Morphe's resolver ----
+    // ---- the music-video flag for automix; songs come from Morphe's "Always play the song version" ----
 
-    /** The queue's next video: find its song version now, so the swap costs nothing when it starts. */
+    /** YT's session says paused (not buffering); false when it is not found. Automix's pause check. */
+    public static boolean ytSessionPaused() {
+        return PlayerScreen.sessionPaused();
+    }
+
+    /** A tap on YT's play button to pause that its session has not confirmed yet. Automix's pause check. */
+    public static boolean ytTapPaused() {
+        return PlayerScreen.tapPaused();
+    }
+
     /** For automix: the extension's music-video rule (no loop mix over a video's own intro/outro). */
     public static boolean isMusicVideo(String videoId) {
-        return videoId != null && SongVersion.musicVideo(videoId);
+        return videoId != null && MusicVideoType.musicVideo(videoId);
     }
 
     /** The next songs in the queue ({id, title, artist}): their canvas loops fetched ahead. */
     public static void canvasAhead(java.util.List<String[]> next) {
         Properties p = props();
-        // the loops are Canvas: with it off (canvasSpotify 0) none is shown, so none is cut ahead
-        if (!"1".equals(p.getProperty("canvas")) || "0".equals(p.getProperty("canvasSpotify")) || "0".equals(p.getProperty("canvasVideo"))) return;
+        // the loops are Canvas's music video source (canvas.md §13 rule 1): with it or the Canvas switch
+        // off none is shown, so none is cut ahead; Animated covers (Apple) has no say
+        if (!CanvasSettings.on(p, CanvasSettings.VIDEO) || "0".equals(p.getProperty("canvasVideo"))
+                || CanvasSettings.blockedByMobile(appContext, p)) return;
         AnimatedCover.ahead(next);
-    }
-
-    public static void lookAhead(String videoId) {
-        if (videoId == null || !"1".equals(props().getProperty("autoSong"))) return;
-        SongVersion.prefetch(videoId);
-    }
-
-    private static final class OurResolver implements InvocationHandler {
-        final Object inner;
-
-        OurResolver(Object inner) {
-            this.inner = inner;
-        }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            switch (method.getName()) {
-                case "resolveVideoIdToFetch": {
-                    String videoId = (String) args[0];
-                    String result = videoId;
-                    if (inner != null) {
-                        result = (String) method.invoke(inner, videoId);
-                    }
-                    String morphe = result;
-                    if (Objects.equals(result, videoId)) {
-                        String mapped = props().getProperty("map." + videoId);
-                        if (mapped != null && !mapped.trim().isEmpty()) result = mapped.trim();
-                        else if ("1".equals(props().getProperty("autoSong"))) {
-                            String song = SongVersion.songFor(videoId);
-                            if (song != null) result = song;
-                        }
-                    }
-                    if ("1".equals(props().getProperty("autoSong"))) {
-                        try {
-                            app.ayham.extension.music.automix.Automix.refreshQueue();
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                    Log.i(TAG, "resolve " + videoId + " -> morphe=" + morphe + " final=" + result);
-                    return result;
-                }
-                case "hashCode":
-                    return System.identityHashCode(proxy);
-                case "equals":
-                    return proxy == args[0];
-                case "toString":
-                    return "AyhamResolver(" + inner + ")";
-                default:
-                    return null;
-            }
-        }
-    }
-
-    /** Injection point: Morphe StreamingDataRequest.setVideoIdResolver(resolver). */
-    public static Object wrapResolver(Object morpheResolver) {
-        try {
-            if (morpheResolver != null && Proxy.isProxyClass(morpheResolver.getClass())
-                    && Proxy.getInvocationHandler(morpheResolver) instanceof OurResolver) {
-                return morpheResolver;
-            }
-            Class<?> type = Class.forName(MORPHE_RESOLVER);
-            Object proxy = Proxy.newProxyInstance(Features.class.getClassLoader(),
-                    new Class<?>[]{type}, new OurResolver(morpheResolver));
-            Log.i(TAG, "wrapped resolver, inner=" + morpheResolver);
-            return proxy;
-        } catch (Throwable t) {
-            Log.e(TAG, "wrapResolver failed", t);
-            return morpheResolver;
-        }
-    }
-
-    /** Puts our wrapper in place even if Morphe set its resolver before we were loaded, or never. */
-    private static void rewrapCurrentResolver() {
-        try {
-            Class<?> sdr = Class.forName(MORPHE_STREAMING);
-            Field f = sdr.getDeclaredField("videoIdResolver");
-            f.setAccessible(true);
-            Object current = f.get(null);
-            sdr.getMethod("setVideoIdResolver", Class.forName(MORPHE_RESOLVER)).invoke(null, current);
-        } catch (Throwable t) {
-            Log.e(TAG, "rewrapCurrentResolver failed", t);
-        }
-        try {
-            Class<?> spoof = Class.forName(MORPHE_SPOOF);
-            Field f = spoof.getDeclaredField("videoLengthResolver");
-            f.setAccessible(true);
-            Object current = f.get(null);
-            spoof.getMethod("setVideoLengthResolver", Class.forName(MORPHE_LENGTH_RESOLVER)).invoke(null, current);
-        } catch (Throwable t) {
-            Log.e(TAG, "rewrap length resolver failed", t);
-        }
-    }
-
-    // ---- Item 8 rough edge: the length of the song served under the video ----
-
-    private static final String MORPHE_SPOOF = "app.morphe.extension.shared.spoof.SpoofVideoStreamsPatch";
-    private static final String MORPHE_LENGTH_RESOLVER = MORPHE_SPOOF + "$VideoLengthResolver";
-
-    private static final class OurLengthResolver implements InvocationHandler {
-        final Object inner;
-
-        OurLengthResolver(Object inner) {
-            this.inner = inner;
-        }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            switch (method.getName()) {
-                case "getVideoLengthSeconds": {
-                    String videoId = (String) args[0];
-                    long morphe = inner == null ? 0 : (long) method.invoke(inner, videoId);
-                    long ours = morphe > 0 ? morphe : SongVersion.lengthFor(videoId);
-                    if (ours > 0) Log.i(TAG, "length " + videoId + " -> morphe=" + morphe + " final=" + ours);
-                    return ours;
-                }
-                case "hashCode":
-                    return System.identityHashCode(proxy);
-                case "equals":
-                    return proxy == args[0];
-                case "toString":
-                    return "AyhamLengthResolver(" + inner + ")";
-                default:
-                    return null;
-            }
-        }
-    }
-
-    /** Injection point: Morphe SpoofVideoStreamsPatch.setVideoLengthResolver(resolver). */
-    public static Object wrapLengthResolver(Object morpheResolver) {
-        try {
-            if (morpheResolver != null && Proxy.isProxyClass(morpheResolver.getClass())
-                    && Proxy.getInvocationHandler(morpheResolver) instanceof OurLengthResolver) {
-                return morpheResolver;
-            }
-            Object proxy = Proxy.newProxyInstance(Features.class.getClassLoader(),
-                    new Class<?>[]{Class.forName(MORPHE_LENGTH_RESOLVER)}, new OurLengthResolver(morpheResolver));
-            Log.i(TAG, "wrapped length resolver, inner=" + morpheResolver);
-            return proxy;
-        } catch (Throwable t) {
-            Log.e(TAG, "wrapLengthResolver failed", t);
-            return morpheResolver;
-        }
     }
 
     // ---- Item 7: player page hook ----
@@ -518,8 +386,8 @@ public final class Features {
             public void onActivityDestroyed(Activity a) {
                 try {
                     AnimatedCover.forget(a);
-                    SongCover.forget(a);
                     ArtistArt.forget(a);
+                    ArtistHeader.forget(a);
                     TextView tv = overlayView;
                     if (tv != null && tv.getContext() == a) overlayView = null;
                 } catch (Throwable t) {

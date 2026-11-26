@@ -8,3 +8,6 @@ node_modules/
 local.properties
 __pycache__/
 graphify-out/
+
+# agent audit reports (local, never committed)
+agent-audit/

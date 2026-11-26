@@ -44,6 +44,8 @@ public final class Overview {
     public String waiting;
     /** How far [waiting] is, 0..1, or -1 when unknown. */
     public float waitDone = -1;
+    /** [waiting] is an outcome (a failed or skipped analysis): no bar, no %. */
+    public boolean waitNoBar;
     /** The song being analysed, or null. */
     public String waitingFor;
     /** The plan is a stand-in fade until the analysis lands (it is planned again then). */
@@ -60,7 +62,7 @@ public final class Overview {
     /** "Auto · Blend": what the planner chose, as the preset row names it with no override (editor.md §7). */
     /** Every name autoName gives (the editor's first chip is as wide as the widest). */
     public static final String[] AUTO_NAMES = {"Auto", "Auto · Loop", "Auto · Hand-over", "Auto · Bridge", "Auto · Fade",
-            "Auto · Filter", "Auto · Drop-in", "Auto · Muffle", "Auto · Glide", "Auto · Blend"};
+            "Auto · Filter", "Auto · Drop-in", "Auto · Muffle", "Auto · Echo out", "Auto · Glide", "Auto · Blend"};
 
     public String autoName() {
         if (loop != null) return "Auto · Loop";
@@ -69,6 +71,7 @@ public final class Overview {
         if ("filter".equals(plan.style)) return "Auto · Filter";
         if ("dropin".equals(plan.shape)) return "Auto · Drop-in";
         if ("muffle".equals(plan.shape)) return "Auto · Muffle";
+        if ("echo".equals(plan.shape)) return "Auto · Echo out";
         return plan.glide != null ? "Auto · Glide" : "Auto · Blend";
     }
 
@@ -89,7 +92,7 @@ public final class Overview {
                 ? Math.round(outBpm) + "→" + Math.round(plan.inBpm) + " BPM"
                 : Math.round(plan.bpm) + " BPM";
         String kind = "filter".equals(plan.style) ? "Filter mix" : "dropin".equals(plan.shape) ? "Drop-in" : "muffle".equals(plan.shape) ? "Muffle"
-                : plan.glide != null ? "Glide blend" : "Blend";
+                : "echo".equals(plan.shape) ? "Echo out" : plan.glide != null ? "Glide blend" : "Blend";
         return String.format(Locale.ROOT, "%s · %d bars · %s · %.1f s", kind, plan.bars, bpm, D);
     }
 
@@ -100,7 +103,7 @@ public final class Overview {
             return t < x.releaseAt ? seg(x.outChanges, t) : Double.NaN;
         }
         if (t < 0) return plan.mixOutTrackTime + t;
-        if (plan.glide != null) return t <= D ? KickLock.blendClocks(plan).out.applyAsDouble(t) : Double.NaN;
+        if (plan.glide != null) return t <= D ? clocks().out.applyAsDouble(t) : Double.NaN;
         return t <= D ? plan.mixOutTrackTime + t * plan.outRate : Double.NaN;
     }
 
@@ -108,9 +111,21 @@ public final class Overview {
     public double inTrack(double t) {
         if (t < 0) return Double.NaN;
         if (x != null) return t < x.releaseAt ? seg(x.inChanges, t) : loop.in.loopEnd + (t - x.releaseAt);
-        if ("blend".equals(plan.style) && plan.glide != null) return KickLock.blendClocks(plan).in.applyAsDouble(t);
+        if ("blend".equals(plan.style) && plan.glide != null) return clocks().in.applyAsDouble(t);
         double rate = "blend".equals(plan.style) ? plan.rate : 1;
         return t <= D ? plan.mixInTrackTime + t * rate : plan.mixInTrackTime + D * rate + (t - D);
+    }
+
+    /** The glide's clocks, made once per plan: the waveform asks for them on every column. */
+    private Planner.Plan clocksOf;
+    private KickLock.Clocks clocks;
+
+    private KickLock.Clocks clocks() {
+        if (clocks == null || clocksOf != plan) {
+            clocks = KickLock.blendClocks(plan);
+            clocksOf = plan;
+        }
+        return clocks;
     }
 
     private static double seg(List<Planner.Change> changes, double t) {

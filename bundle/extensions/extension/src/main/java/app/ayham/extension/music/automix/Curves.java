@@ -17,8 +17,15 @@ import java.util.Map;
  */
 public final class Curves {
     public double durationSec;
-    /** Curve name (gain, lowpassHz, highpassHz, bassDb, highDb, rate) → its [t, v] points. */
+    /**
+     * Curve name (gain, lowpassHz, highpassHz, bassDb, midDb, highDb, noise, echoSend, reverbSend,
+     * delaySend, rate) → its [t, v] points.
+     */
     public final Map<String, double[][]> out = new LinkedHashMap<>(), in = new LinkedHashMap<>();
+    /** The echo's and the delay's time in seconds, set at the window's start (editor.md §12), {echoSec, delaySec}; null: no Effects lane. */
+    public double[] fxTime;
+    /** The Looping lane's length in beats (editor.md §13), 0: none. */
+    public int loopBeats;
 
 
     /** A blend, filter mix or crossfade plan's curves (automix.js blendCurves). */
@@ -75,6 +82,13 @@ public final class Curves {
                 if (i == 0 || p[0] != pts.get(i - 1)[0] || p[1] != pts.get(i - 1)[1]) kept.add(p);
             }
             c.out.put("rate", kept.toArray(new double[0][]));
+        }
+        // each song's playlist speed (spotify-mixes.md rule 10): A at speedOut, B at speedIn, both held
+        boolean speeds = !Double.isNaN(m.speedIn);
+        if (speeds) {
+            if (Math.abs(m.outRate - 1) > 1e-9) c.out.put("rate", new double[][]{{0, m.outRate}, {D, m.outRate}});
+            if (Math.abs(m.rate - 1) > 1e-9) c.in.put("rate", new double[][]{{0, m.rate}, {D, m.rate}});
+            return c;
         }
         double rate = style.equals("blend") ? m.rate : 1;
         if (style.equals("blend") && m.glide != null) {

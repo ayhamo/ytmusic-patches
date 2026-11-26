@@ -102,23 +102,43 @@ final class HlsClip {
             if (!whole) //noinspection ResultOfMethodCallIgnored
                 tmp.delete();
         }
-        if (!tmp.renameTo(out)) return null;
+        if (!tmp.renameTo(out)) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            return null;
+        }
         if (trim) trim(dir, out);
         Log.i(TAG, "canvas: clip " + segments + " segments, " + Math.round(seconds) + " s, " + bytes / 1024
                 + " KB in " + (System.currentTimeMillis() - start) + " ms");
         return out;
     }
 
-    /** Keep the cache under CACHE_BYTES: the least recently shown clips go first. */
-    static void trim(File dir, File keep) {
-        File[] files = dir.listFiles();
+    /**
+     * Keep the cache under CACHE_BYTES: the least recently shown clips go first. Only the clips
+     * count: a .part is a download still being written (by another thread), and a clip's .crop and
+     * .info go with it, not on their own date (a clip shown again is touched, they are not).
+     */
+    static synchronized void trim(File dir, File keep) {
+        // a .part an hour old is a download the app was closed in the middle of
+        File[] parts = dir.listFiles((d, n) -> n.endsWith(".part"));
+        if (parts != null) for (File p : parts)
+            if (System.currentTimeMillis() - p.lastModified() > 3_600_000L) //noinspection ResultOfMethodCallIgnored
+                p.delete();
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".mp4"));
         if (files == null) return;
         java.util.Arrays.sort(files, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
         long total = 0;
         int removed = 0;
         for (File f : files) {
             total += f.length();
-            if (total > CACHE_BYTES && !f.equals(keep) && f.delete()) removed++;
+            if (total > CACHE_BYTES && !f.equals(keep) && f.delete()) {
+                removed++;
+                String base = f.getPath().substring(0, f.getPath().length() - 4);
+                //noinspection ResultOfMethodCallIgnored
+                new File(base + ".crop").delete();
+                //noinspection ResultOfMethodCallIgnored
+                new File(base + ".info").delete();
+            }
         }
         if (removed > 0) Log.i(TAG, "canvas: cache over " + CACHE_BYTES / 1048576 + " MB, removed " + removed + " old clips");
     }
@@ -207,7 +227,11 @@ final class HlsClip {
             long from = Long.parseLong(off);
             c.setRequestProperty("Range", "bytes=" + from + "-" + (from + Long.parseLong(len) - 1));
         }
-        if (c.getResponseCode() >= 400) throw new IllegalStateException("http " + c.getResponseCode());
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            c.disconnect();
+            throw new IllegalStateException("http " + code);
+        }
         return c;
     }
 

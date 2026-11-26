@@ -13,7 +13,7 @@ import java.util.List;
  */
 public final class AddonSettings {
     public static final String KEY_ON = "ayham_addons", KEY_LINKS = "ayham_addon_links", KEY_SLACK = "ayham_addon_slack",
-            KEY_ATMOS = "ayham_addon_atmos";
+            KEY_ATMOS = "ayham_addon_atmos", KEY_MOBILE = "ayham_addon_mobile";
     private static volatile Context ctx;
 
     private AddonSettings() {
@@ -51,10 +51,36 @@ public final class AddonSettings {
         return c.getSharedPreferences("morphe_prefs", Context.MODE_PRIVATE);
     }
 
-    /** On, with at least one link. */
+    /** On, with at least one link, and not held off by mobile data (the "Off on mobile data" switch). */
     public static boolean on() {
         Context c = ctx;
-        return c != null && prefs(c).getBoolean(KEY_ON, false) && !links(c).isEmpty();
+        return c != null && prefs(c).getBoolean(KEY_ON, false) && !links(c).isEmpty() && !offForMobile(c);
+    }
+
+    private static volatile long mobileReadAt;
+    private static volatile boolean mobileWas;
+
+    /**
+     * The switch is on and the phone is on mobile data (cellular without Wi-Fi), as canvas.md §13
+     * rule 4 does for the canvas: the song stays on YouTube's audio, no addon is asked. Downloads
+     * aren't affected. Read at most every 2 s (this is asked from the mix's control loop).
+     */
+    static boolean offForMobile(Context c) {
+        if (!prefs(c).getBoolean(KEY_MOBILE, false)) return false;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - mobileReadAt < 2000) return mobileWas;
+        boolean mobile = false;
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) c.getSystemService(Context.CONNECTIVITY_SERVICE);
+            android.net.NetworkCapabilities nc = cm == null ? null : cm.getNetworkCapabilities(cm.getActiveNetwork());
+            mobile = nc != null && nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
+                    && !nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (Throwable ignored) {
+        }
+        if (mobile != mobileWas || mobileReadAt == 0) android.util.Log.i("AyhamAddons", mobile ? "on mobile data: addons off (the setting)" : "not on mobile data: addons on");
+        mobileWas = mobile;
+        mobileReadAt = now;
+        return mobile;
     }
 
     /**

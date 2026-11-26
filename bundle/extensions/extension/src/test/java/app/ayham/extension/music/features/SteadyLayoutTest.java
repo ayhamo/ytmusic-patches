@@ -21,6 +21,6 @@ public class SteadyLayoutTest {
     public void theFirstChipIsAsWideAsItsWidestName() {
         // by characters here; the editor measures with the chip's own paint
         assertEquals("Auto · Hand-over", SteadyLayout.widest(Overview.AUTO_NAMES, String::length));
-        assertEquals(10, Overview.AUTO_NAMES.length);
+        assertEquals(11, Overview.AUTO_NAMES.length);
     }
 }

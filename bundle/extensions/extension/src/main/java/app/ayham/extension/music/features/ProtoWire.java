@@ -43,8 +43,10 @@ final class ProtoWire {
                     fields.add(new Field(number, 1, 0, slice(bytes, pos, 8)));
                     break;
                 case 2: {
-                    int length = (int) readVarint(bytes, pos);
-                    fields.add(new Field(number, 2, 0, slice(bytes, pos, length)));
+                    // the length checked as a long: a huge varint must not wrap into a small int
+                    long length = readVarint(bytes, pos);
+                    if (length < 0 || length > bytes.length - pos[0]) throw new IllegalArgumentException("bad length");
+                    fields.add(new Field(number, 2, 0, slice(bytes, pos, (int) length)));
                     break;
                 }
                 case 5:
@@ -147,6 +149,8 @@ final class ProtoWire {
         long result = 0;
         int shift = 0;
         while (true) {
+            // truncated or over-long input is malformed, not an index error
+            if (pos[0] >= b.length || shift >= 64) throw new IllegalArgumentException("bad varint");
             byte x = b[pos[0]++];
             result |= (long) (x & 0x7f) << shift;
             if ((x & 0x80) == 0) return result;
@@ -155,7 +159,7 @@ final class ProtoWire {
     }
 
     private static byte[] slice(byte[] b, int[] pos, int length) {
-        if (length < 0 || pos[0] + length > b.length) throw new IllegalArgumentException("bad length");
+        if (length < 0 || length > b.length - pos[0]) throw new IllegalArgumentException("bad length");
         byte[] out = new byte[length];
         System.arraycopy(b, pos[0], out, 0, length);
         pos[0] += length;

@@ -1,5 +1,6 @@
 package app.ayham.extension.music.automix;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -177,6 +178,52 @@ public class PlannerTest {
         assertEquals(0, Planner.vocalOverlap(a, b, 100, 8, 0, 1, sung), 1e-9);
         // neither lyrics nor a mask: unknown
         assertTrue(Double.isNaN(Planner.vocalOverlap(a, b, 100, 8, 0, 1, new Planner.Sung())));
+    }
+
+    /** The loop reads lines as the baseline does: padded -0.15 / +0.35 s, to the last word, its end, the next line, 10 s at most. */
+    @Test
+    public void theLoopReadsLyricLinesAsTheBaseline() {
+        java.util.List<Planner.LineShape> l = java.util.Arrays.asList(
+                new Planner.LineShape(10, Double.NaN, 3, new double[][]{{10.1, 10.5}, {10.6, 11.2}}),
+                new Planner.LineShape(12, 13.5, 4, null),
+                new Planner.LineShape(15, Double.NaN, 4, null),
+                new Planner.LineShape(40, Double.NaN, 2, null));
+        double[][] s = Planner.loopSpansFromLines(l);
+        assertEquals(4, s.length);
+        assertArrayEquals(new double[]{9.85, 11.55}, s[0], 1e-9);   // the last word's end
+        assertArrayEquals(new double[]{11.85, 13.85}, s[1], 1e-9);  // its own end
+        assertArrayEquals(new double[]{14.85, 25.35}, s[2], 1e-9);  // the next line, cut at 10 s
+        assertArrayEquals(new double[]{39.85, 50.35}, s[3], 1e-9);  // the last line: 10 s
+    }
+
+    /** Credit and tag lines aren't sung: titles, artists, credits in several languages, symbols only. */
+    @Test
+    public void creditLinesAreKnown() {
+        String title = "SI NO ES CONTIGO", artist = "Cris Mj";
+        for (String t : new String[]{"作曲: Cristopher Andrés Álvarez Garcia", "作词 : Maksym Kondratenko", "作詞：someone", "编曲: x",
+                "Letra: Juan", "Lyrics by Someone", "Written by A & B", "Prod. by Tainy", "Producer: X", "Composer - Y",
+                "♪", "...", " ♫ ♪ ", "Cris Mj", "SI NO ES CONTIGO", "Cris MJ - Si No Es Contigo", "(Mixed by Z)"}) {
+            assertTrue(t, Planner.creditLine(t, title, artist));
+        }
+        for (String t : new String[]{"Ey, ey", "Si no e' contigo, amor", "Yo no quiero a nadie má' (Má')", "Music is my life",
+                "Written in the stars", "Producer of my dreams", "Letra de amor", "曲终人散"}) {
+            assertFalse(t, Planner.creditLine(t, title, artist));
+        }
+    }
+
+    /** The loop leaves credit lines and lines before the song out, and a sung line never ends at a credit. */
+    @Test
+    public void theLoopLeavesCreditLinesOut() {
+        java.util.List<Planner.LineShape> l = java.util.Arrays.asList(
+                new Planner.LineShape(-1, Double.NaN, 2, null),               // a line before the song
+                new Planner.LineShape(0, Double.NaN, 4, null, true),          // 作曲: ... at 0:00, no end
+                new Planner.LineShape(14.41, Double.NaN, 2, null),            // a sung ad-lib
+                new Planner.LineShape(18, Double.NaN, 3, null, true),         // a credit in between
+                new Planner.LineShape(20.09, Double.NaN, 5, null));
+        double[][] s = Planner.loopSpansFromLines(l);
+        assertEquals(2, s.length);
+        assertArrayEquals(new double[]{14.26, 20.44}, s[0], 1e-9);  // to the next sung line, past the credit
+        assertArrayEquals(new double[]{19.94, 30.44}, s[1], 1e-9);
     }
 
     @Test

@@ -49,10 +49,10 @@ final class Analyzer {
     static final double VOCAL_WINDOW_SEC = (958 * 1024) / 44100.0;
     /** The decoded opening and end kept for the decks. */
     static final double HEAD_SEC = 150, TAIL_SEC = 120;
-    /** Longer songs (DJ sets, albums in one) are not analysed. */
-    static final double MAX_SONG_SEC = 12 * 60;
+    /** Longer songs (DJ sets, albums in one) are not analysed: a plain crossfade (versions.md, 8 minutes). */
+    static final double MAX_SONG_SEC = 480;
 
-    /** A song over MAX_SONG_SEC: not analysed, and not downloaded again to retry. */
+    /** A song over MAX_SONG_SEC: not analysed, never retried, and not a failure (status "tooLong"). */
     static final class TooLong extends IOException {
         TooLong(String message) {
             super(message);
@@ -69,6 +69,8 @@ final class Analyzer {
     };
     private static final Map<String, String> status = new HashMap<>();
     private static final Map<String, Long> failedAt = new HashMap<>();
+    /** Why a song's analysis failed, for the overview's progress row (editor.md §11 rule 3). */
+    private static final Map<String, String> failedWhy = new HashMap<>();
     private static final Deque<String> queue = new ArrayDeque<>();
     private static Thread worker;
     private static Context ctx;
@@ -90,6 +92,7 @@ final class Analyzer {
         ctx = c.getApplicationContext();
         String s = status.get(id);
         if ("ready".equals(s) && pcmReady(id)) return;
+        if ("tooLong".equals(s)) return;
         if ("failed".equals(s)) {
             Long at = failedAt.get(id);
             if (at != null && SystemClock.elapsedRealtime() - at < RETRY_FAILED_MS) return;
@@ -148,6 +151,22 @@ final class Analyzer {
     }
 
     private static final Map<String, Object[]> stages = new HashMap<>();
+
+    /** A song's analysis that won't come: {"failed", reason} or {"tooLong"}, else null. */
+    static synchronized String[] outcome(String id) {
+        String s = status.get(id);
+        if ("tooLong".equals(s)) return new String[]{"tooLong"};
+        if ("failed".equals(s)) {
+            String why = failedWhy.get(id);
+            return new String[]{"failed", why != null ? why : "no reason given"};
+        }
+        return null;
+    }
+
+    private static String reasonOf(Throwable t) {
+        String m = t.getMessage();
+        return m != null && !m.trim().isEmpty() ? m.trim() : t.getClass().getSimpleName();
+    }
 
     /** An analysis given up between stages: its song is neither playing nor next, and another waits. */
     private static final class Superseded extends RuntimeException {
@@ -217,8 +236,14 @@ final class Analyzer {
                 f.delete();
         }
         results.clear();
-        status.clear();
+        // the queued and running analyses go on (their songs are playing or next): only their status stays
+        for (java.util.Iterator<String> it = status.values().iterator(); it.hasNext(); ) {
+            String s = it.next();
+            if (!"pending".equals(s) && !"analyzing".equals(s)) it.remove();
+        }
         failedAt.clear();
+        failedWhy.clear();
+        missed.clear();
         SungLyrics.clear(c);
     }
 
@@ -255,8 +280,10 @@ final class Analyzer {
                 synchronized (Analyzer.class) {
                     if (fresh == null) {
                         status.put(id, "failed");
+                        failedWhy.put(id, "no analysis came back");
                         failedAt.put(id, SystemClock.elapsedRealtime());
                     } else {
+                        failedWhy.remove(id);
                         results.put(id, fresh);
                         status.put(id, "ready");
                     }
@@ -268,10 +295,17 @@ final class Analyzer {
                     status.remove(id);
                 }
                 Log.i(TAG, "analysis of " + id + " dropped after " + (SystemClock.elapsedRealtime() - t0) + " ms: no longer playing or next");
+            } catch (TooLong t) {
+                Log.i(TAG, "analysis of " + id + " skipped: " + t.getMessage());
+                synchronized (Analyzer.class) {
+                    status.put(id, "tooLong");
+                    failedWhy.remove(id);
+                }
             } catch (Throwable t) {
                 Log.e(TAG, "analysis of " + id + " failed", t);
                 synchronized (Analyzer.class) {
                     status.put(id, "failed");
+                    failedWhy.put(id, reasonOf(t));
                     failedAt.put(id, SystemClock.elapsedRealtime());
                 }
             }
@@ -362,7 +396,11 @@ final class Analyzer {
                 if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     MediaFormat of = codec.getOutputFormat();
                     channels = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
-                    rate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+                    int newRate = of.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+                    // the opening's header, the end's ring and the mono fold are all at the first rate
+                    // (not an IOException: another download would decode the same way)
+                    if (configured && newRate != rate) throw new IllegalStateException("the sample rate changed mid-song (" + rate + " to " + newRate + " Hz)");
+                    rate = newRate;
                     floatPcm = of.containsKey(MediaFormat.KEY_PCM_ENCODING)
                             && of.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT;
                 } else if (outIndex < 0) {
@@ -371,6 +409,7 @@ final class Analyzer {
                 } else {
                     lastOut = SystemClock.elapsedRealtime();
                     if (!configured) {
+                        if (channels <= 0 || rate <= 0) throw new IllegalStateException("the decoder gave no channels or sample rate");
                         configured = true;
                         fold = new Fold(rate);
                         headFrames = Math.round(HEAD_SEC * rate);
@@ -565,6 +604,13 @@ final class Analyzer {
         Map<String, Long> newest = new HashMap<>();
         for (File f : files) {
             String n = f.getName();
+            // a decode cut off (the app killed) left its parts: no analysis runs now, so they are stale
+            if (n.endsWith(".head.part") || n.endsWith(".tail.part")) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                continue;
+            }
+            if (n.endsWith(".part")) continue; // an addon's opening or end being written
             int dot = n.lastIndexOf('.');
             if (dot <= 0) continue;
             String id = n.substring(0, dot);
@@ -589,6 +635,11 @@ final class Analyzer {
     private static Analysis analyze(Context c, String id, Analysis known) throws Exception {
         Models.loadNative();
         long t0 = SystemClock.elapsedRealtime();
+        // the player's length when it has this song: a long one isn't even downloaded
+        if (id.equals(Automix.currentId())) {
+            long ms = Automix.durationMs();
+            if (ms > MAX_SONG_SEC * 1000) throw new TooLong(String.format(Locale.US, "%.0f s long, not analysed", ms / 1000.0));
+        }
         stage(id, "downloading", 0f);
         File file = download(c, id);
         long tDl = SystemClock.elapsedRealtime() - t0;
@@ -619,10 +670,9 @@ final class Analyzer {
             else //noinspection ResultOfMethodCallIgnored
                 file.delete();
         }
-        //noinspection ResultOfMethodCallIgnored
-        headTmp.renameTo(headFile(c, id));
-        //noinspection ResultOfMethodCallIgnored
-        tailTmp.renameTo(tailFile(c, id));
+        // a part not put in place would leave no opening or end (or an older song's) for the decks
+        if (!headTmp.renameTo(headFile(c, id)) || !tailTmp.renameTo(tailFile(c, id)))
+            throw new IOException("the decoded audio could not be kept");
         trimPcm(c, id);
         long tDec = SystemClock.elapsedRealtime() - t0 - tDl;
         if (known != null) {
@@ -667,10 +717,16 @@ final class Analyzer {
         stage(id, "finding the key", 0.82f);
         JSONObject nat = new JSONObject(TrackFeatures.nativeAnalyze(resampleMono(d, ar), ar, dur));
         tn = SystemClock.elapsedRealtime() - tn;
-        // the key as the extension finds it (whole-song profile correlation, strength on its scale);
-        // the native one only when there is no chroma, with no confidence so the clash rule ignores it
+        // the key the PC's way (analysis-cases.md "The key": Essentia's KeyExtractor on the whole song
+        // at 44.1 kHz); the native one only if that fails, with no confidence so the clash rule ignores it
         String nativeKey = nat.optString("key", null);
-        KeyStrength.Key found = KeyStrength.detect(d.mono, d.monoLength, d.monoRate);
+        EssentiaKey.Key found = null;
+        try {
+            float[] m44 = resampleMono(d, EssentiaKey.SR);
+            found = EssentiaKey.of(m44, m44.length);
+        } catch (Throwable t) {
+            Log.w(TAG, id + ": key failed", t);
+        }
         if (found != null && BeatGrid.camelot(found.name, a)) {
             a.keyName = found.name;
             a.keyConfidence = Math.max(0, found.strength);
@@ -720,6 +776,8 @@ final class Analyzer {
         stage(id, "finding the vocals", 0.85f);
         long tv = SystemClock.elapsedRealtime();
         double W = VOCAL_WINDOW_SEC;
+        // gone when the settings' Clear ran meanwhile: failed, and asked again (not saved without its vocals)
+        if (headPcm == null || tailPcm == null) throw new IOException("the decoded audio is gone");
         java.util.List<Double> starts = new java.util.ArrayList<>();
         for (double s : new double[]{0, W}) if (s + W <= dur) starts.add(s);
         for (int k = 1; k <= 3; k++) if (dur - k * W >= 2 * W) starts.add(dur - k * W);
@@ -733,6 +791,7 @@ final class Analyzer {
             if (w != null) a.vocals.add(w);
         }
         tv = SystemClock.elapsedRealtime() - tv;
+        Analysis.barPhase(a);
         Log.i(TAG, String.format(Locale.US, "%s: %.1f s, %d Hz | grid %.2f BPM (conf %.2f) from %.2f s, end grid %s | key %s (%.2f) | "
                         + "intro ends %.1f, music ends %.2f | %d vocal windows | download %d ms, decode %d ms, beats %d ms, native %d ms, vocals %d ms",
                 id, dur, d.rate, a.bpm, a.gridConfidence, a.firstDownbeatSec,

@@ -33,8 +33,6 @@ private const val MORPHE_LYRICS_CACHE = "Lapp/morphe/extension/music/patches/lyr
 private const val MORPHE_LYRICS_MODEL = "Lapp/morphe/extension/music/patches/lyrics/model/Lyrics;"
 private const val MORPHE_CROSSFADE = "Lapp/morphe/extension/music/patches/CrossfadePatch;"
 private const val MORPHE_EXO_ACCESS = "Lapp/morphe/extension/music/patches/CrossfadePatch\$ExoPlayerAccess;"
-private const val MORPHE_STREAMING = "Lapp/morphe/extension/shared/spoof/requests/StreamingDataRequest;"
-private const val MORPHE_RESOLVER = "Lapp/morphe/extension/shared/spoof/requests/StreamingDataRequest\$VideoIdResolver;"
 
 internal object MusicActivityOnCreateFingerprint : Fingerprint(
     definingClass = "Lcom/google/android/apps/youtube/music/activities/MusicActivity;",
@@ -80,7 +78,7 @@ val playerFeaturesPatch = patch(
                         method.addInstructions(
                             index,
                             """
-                                invoke-static { v$register }, $FEATURES->overrideCrossfadeDurationMs(I)I
+                                invoke-static/range { v$register .. v$register }, $FEATURES->overrideCrossfadeDurationMs(I)I
                                 move-result v$register
                             """,
                         )
@@ -121,25 +119,36 @@ val playerFeaturesPatch = patch(
                 root.insertChild(0, "PreferenceScreen") {
                 setAttribute("android:key", "ayham_screen")
                 setAttribute("android:title", "Fork settings")
-                setAttribute("android:summary", "BitChord's player screen, automix, animated covers, artist colours, lyric line, downloads and equalizer")
-                // One switch per feature, stored by Morphe's settings screen in its own prefs file.
-                appendChild("PreferenceCategory") {
-                    setAttribute("android:key", "ayham_features")
-                    setAttribute("android:title", "Player")
-                    listOf(
+                setAttribute("android:summary", "Player screen, artwork and canvas, lyrics, playback, downloads, automix and addons")
+                // One switch per feature, stored by Morphe's settings screen in its own prefs file, in
+                // groups (the keys are the same as before the groups, so nothing set is lost).
+                listOf(
+                    Triple("ayham_features", "Player screen", listOf(
                         Triple("ayham_ui", "BitChord player screen", "The now-playing screen laid out like BitChord: info lines, title, lyric line, seek bar, big controls, volume and output. YT's own buttons and menus stay underneath, so Morphe's settings still apply to them."),
                         Triple("ayham_fullArt", "Fullscreen cover art", "On the BitChord screen in portrait, the cover fills the top of the screen and fades into the colours below while a song plays (or its animated cover shows); paused, it goes back to a card. Also in the player's … menu."),
-                        Triple("ayham_artistArt", "Artist colours", "The player takes the artist's colours and photo from their Apple Music page."),
+                        Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
+                        Triple("ayham_bestPartButton", "Best part button", "A button under the seek bar jumps to the song's best part (the part people replay most, or the one you set by holding it) early in the song. Off: only the mark on the bar and the menu's Play from the best part stay."),
+                    )),
+                    Triple("ayham_cat_art", "Artwork and canvas", listOf(
                         Triple("ayham_canvas", "Animated covers", "The album's motion art from Apple Music plays muted over YT's art, where the album has one. Off: Apple is never asked. Also in the player's … menu."),
                         Triple("ayham_canvasSpotify", "Canvas", "A full-screen video behind the player where the song has one (its Spotify canvas, or a loop of its music video). Off: neither is looked up. Also in the player's … menu."),
-                        Triple("ayham_bestPartButton", "Best part button", "A button under the seek bar jumps to the song's best part (the part people replay most, or the one you set by holding it) early in the song. Off: only the mark on the bar and the menu's Play from the best part stay."),
+                        Triple("ayham_artistArt", "Artist colours", "The player takes the artist's colours and photo from their Apple Music page."),
+                    )),
+                    Triple("ayham_cat_lyrics", "Lyrics", listOf(
                         Triple("ayham_lyricLine", "Lyric line", "The current synced lyric line under the title (Morphe's lyrics; needs its third-party lyrics on). Tap it to open the lyrics."),
-                        Triple("ayham_lyricsRealTiming", "Lyrics by real timing", "The lyric line changes exactly on each line's start, with no lead for its slide. The lyrics' timing (this song's and all songs') is in the player's … menu."),
-                        Triple("ayham_stats", "Stats lines", "The audio format (codec, bitrate, channels, itag) and automix's status for this and the next song."),
-                        Triple("ayham_autoSong", "Always play the song version", "A music video plays as its album song, from anywhere: search, home, playlists, radio."),
-                        Triple("ayham_native", "Download popup", "Every download asks: the lossless file from your addons or YouTube's, and whether its lyrics, animated art and canvas are saved for offline. Off: YouTube's download only. Smart downloads are always YouTube's alone."),
+                        Triple("ayham_lyricsRealTiming", "Lyrics by real timing", "The lyric line changes exactly on each line's start, with no lead for its slide. The line follows Morphe's lyrics offsets (its Lyrics offset setting and each song's offset in its lyrics panel)."),
+                    )),
+                    Triple("ayham_cat_playback", "Playback", listOf(
                         Triple("ayham_eq", "Equalizer", "A preset on YT's audio output and on automix's mixes. A change applies at once."),
-                    ).forEach { (key, title, summary) ->
+                    )),
+                    Triple("ayham_cat_downloads", "Downloads", listOf(
+                        Triple("ayham_native", "Download popup", "Every download asks: the lossless file from your addons or YouTube's, and whether its lyrics, animated art and canvas are saved for offline. Off: YouTube's download only. Smart downloads are always YouTube's alone."),
+                    )),
+                ).forEach { (catKey, catTitle, switches) ->
+                appendChild("PreferenceCategory") {
+                    setAttribute("android:key", catKey)
+                    setAttribute("android:title", catTitle)
+                    switches.forEach { (key, title, summary) ->
                         appendChild("SwitchPreference") {
                             setAttribute("android:key", key)
                             setAttribute("android:title", title)
@@ -150,6 +159,11 @@ val playerFeaturesPatch = patch(
                         if (key == "ayham_canvasSpotify") {
                             appendChild("app.ayham.extension.music.features.CanvasSourcesPreference") {
                                 setAttribute("android:key", "ayham_canvas_sources")
+                            }
+                            // canvas.md §13 rule 9: the listener's own Spotify sign-in, asked first (§4 rule 0)
+                            appendChild("app.ayham.extension.music.features.SpotifySignInPreference") {
+                                setAttribute("android:key", "ayham_spotify_signin")
+                                setAttribute("android:dependency", "ayham_canvasSpotify")
                             }
                             appendChild("SwitchPreference") {
                                 setAttribute("android:key", "ayham_canvas_mobile")
@@ -204,14 +218,15 @@ val playerFeaturesPatch = patch(
                         if (key == "ayham_native") appendChild("app.ayham.extension.music.features.ExportDownloadsPreference") {
                             setAttribute("android:key", "ayham_export_downloads")
                         }
+                        if (key == "ayham_eq") appendChild("$AUTOMIX.AutomixVersionPreference") {
+                            setAttribute("android:key", "ayham_eq_preset")
+                            setAttribute("android:title", "Equalizer preset")
+                            setAttribute("android:summary", "%s")
+                            setAttribute("android:defaultValue", "bass")
+                            setAttribute("android:dependency", "ayham_eq")
+                        }
                     }
-                    appendChild("$AUTOMIX.AutomixVersionPreference") {
-                        setAttribute("android:key", "ayham_eq_preset")
-                        setAttribute("android:title", "Equalizer preset")
-                        setAttribute("android:summary", "%s")
-                        setAttribute("android:defaultValue", "bass")
-                        setAttribute("android:dependency", "ayham_eq")
-                    }
+                }
                 }
                 // Automix, as in the YT Music Extension's popup.
                 appendChild("PreferenceCategory") {
@@ -246,6 +261,9 @@ val playerFeaturesPatch = patch(
                     appendChild("$AUTOMIX.AnalysedSongsPreference") {
                         setAttribute("android:key", "ayham_automix_saved")
                     }
+                    appendChild("$AUTOMIX.MixFilesPreference") {
+                        setAttribute("android:key", "ayham_automix_mix_files")
+                    }
                 }
                 // Addons: songs played from the user's own addons, fitted to YouTube's audio.
                 appendChild("PreferenceCategory") {
@@ -259,6 +277,13 @@ val playerFeaturesPatch = patch(
                     }
                     appendChild("app.ayham.extension.music.addons.AddonLinksPreference") {
                         setAttribute("android:key", "ayham_addon_links_ui")
+                        setAttribute("android:dependency", "ayham_addons")
+                    }
+                    appendChild("SwitchPreference") {
+                        setAttribute("android:key", "ayham_addon_mobile")
+                        setAttribute("android:title", "Off on mobile data")
+                        setAttribute("android:summary", "On mobile data songs play YouTube's audio: no addon is asked or streamed, and addon downloads wait for Wi-Fi.")
+                        setAttribute("android:defaultValue", "false")
                         setAttribute("android:dependency", "ayham_addons")
                     }
                     appendChild("$AUTOMIX.AutomixVersionPreference") {
@@ -380,46 +405,14 @@ val playerFeaturesPatch = patch(
             if (!gated) log.warning("Features: setVolume not found (bridge=$bridge, ref=$volumeRef), no volume gate")
         } ?: log.warning("Features: no class implements Morphe's ExoPlayerAccess, seek skipped")
 
-        // Item 8: wrap whatever resolver Morphe installs, so ours runs after Morphe's.
-        mutableClassDefByOrNull(MORPHE_STREAMING)?.methods?.firstOrNull {
-            it.name == "setVideoIdResolver" &&
-                    it.parameterTypes.map(CharSequence::toString) == listOf(MORPHE_RESOLVER)
-        }?.let { method ->
-            method.addInstructions(
-                0,
-                """
-                    invoke-static/range { p0 .. p0 }, $FEATURES->wrapResolver(Ljava/lang/Object;)Ljava/lang/Object;
-                    move-result-object p0
-                    check-cast p0, $MORPHE_RESOLVER
-                """,
-            )
-            log.info("Features: hooked setVideoIdResolver")
-        } ?: log.warning("Features: setVideoIdResolver not found")
-
-        // Item 8 rough edge: the length of the song, wrapping Morphe's length resolver the same way.
-        val lengthResolver = "Lapp/morphe/extension/shared/spoof/SpoofVideoStreamsPatch\$VideoLengthResolver;"
-        mutableClassDefByOrNull("Lapp/morphe/extension/shared/spoof/SpoofVideoStreamsPatch;")?.methods?.firstOrNull {
-            it.name == "setVideoLengthResolver" &&
-                    it.parameterTypes.map(CharSequence::toString) == listOf(lengthResolver)
-        }?.let { method ->
-            method.addInstructions(
-                0,
-                """
-                    invoke-static/range { p0 .. p0 }, $FEATURES->wrapLengthResolver(Ljava/lang/Object;)Ljava/lang/Object;
-                    move-result-object p0
-                    check-cast p0, $lengthResolver
-                """,
-            )
-            log.info("Features: hooked setVideoLengthResolver")
-        } ?: log.warning("Features: setVideoLengthResolver not found")
-
         // Lyrics: refuse wrong-language matches, and let a missed song be looked up once more.
         mutableClassDefByOrNull(MORPHE_LYRICS_MATCH)?.methods?.firstOrNull {
-            it.name == "isValidLyrics" && it.parameterTypes.size == 2 && it.returnType == "Z"
+            it.name == "isValidLyrics" && it.parameterTypes.size == 2 && it.returnType == "Z" &&
+                AccessFlags.STATIC.isSet(it.accessFlags)
         }?.takeIf { (it.implementation?.registerCount ?: 0) > 2 }?.addInstructionsWithLabels(
             0,
             """
-                invoke-static { p0, p1 }, $LYRICS_GUARD->refuses(Ljava/lang/Object;Ljava/lang/Object;)Z
+                invoke-static/range { p0 .. p1 }, $LYRICS_GUARD->refuses(Ljava/lang/Object;Ljava/lang/Object;)Z
                 move-result v0
                 if-eqz v0, :check
                 const/4 v0, 0x0
@@ -431,15 +424,16 @@ val playerFeaturesPatch = patch(
             ?: log.warning("Features: Morphe isValidLyrics not found")
 
         mutableClassDefByOrNull(MORPHE_LYRICS_CACHE)?.methods?.firstOrNull {
-            it.name == "get" && it.parameterTypes.size == 3 && it.returnType == MORPHE_LYRICS_MODEL
+            it.name == "get" && it.parameterTypes.size == 3 && it.returnType == MORPHE_LYRICS_MODEL &&
+                AccessFlags.STATIC.isSet(it.accessFlags)
         }?.takeIf { (it.implementation?.registerCount ?: 0) > 3 }?.addInstructionsWithLabels(
             0,
             """
-                invoke-static { p0, p1, p2 }, $LYRICS_GUARD->aroundCacheGet(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/Object;
+                invoke-static/range { p0 .. p2 }, $LYRICS_GUARD->aroundCacheGet(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/Object;
                 move-result-object v0
                 if-eqz v0, :original
-                # p1 (the source) is free here: the original code is skipped
-                const/4 p1, 0x0
+                # p1 (the source) is free here: the original code is skipped (const/16: p1 may be past v15)
+                const/16 p1, 0x0
                 aget-object v0, v0, p1
                 check-cast v0, $MORPHE_LYRICS_MODEL
                 return-object v0

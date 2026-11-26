@@ -30,4 +30,5 @@ if ($LASTEXITCODE -ne 0) { throw "Patching failed (see work\out\result.json)" }
 
 if ($Install) {
     & "D:\LDPlayer\LDPlayer14\adb.exe" install -r "$work\out\ytm-patched.apk"
+    if ($LASTEXITCODE -ne 0) { throw "adb install failed" }
 }

@@ -122,6 +122,7 @@ public class ExportDownloadsPreference extends Preference {
         public void onActivityResult(int request, int result, Intent data) {
             if (request != PICK) return;
             Uri tree = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (getActivity() == null) return;
             Context app = getActivity().getApplicationContext();
             done();
             if (tree == null) return;
@@ -199,7 +200,11 @@ public class ExportDownloadsPreference extends Preference {
                 n += k;
             }
         } catch (Exception e) {
-            DocumentsContract.deleteDocument(r, doc);
+            // the half copy goes; failing that, the copy's own error is still the one told
+            try {
+                DocumentsContract.deleteDocument(r, doc);
+            } catch (Exception ignored) {
+            }
             throw e;
         }
         return n;

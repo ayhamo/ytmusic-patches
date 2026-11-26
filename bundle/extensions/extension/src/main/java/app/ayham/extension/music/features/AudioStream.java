@@ -80,8 +80,9 @@ public final class AudioStream {
 
     /** {loudnessDb, kbps} kept beside YouTube's copy, or asked for; NaN when not known. */
     private static double[] known(android.content.Context c, String videoId) {
-        File f = new File(c.getCacheDir(), "automix/loudness/" + videoId);
         double[] out = {Double.NaN, Double.NaN};
+        if (!plainId(videoId)) return out;
+        File f = new File(c.getCacheDir(), "automix/loudness/" + videoId);
         try {
             if (f.exists()) {
                 String[] t = new String(java.nio.file.Files.readAllBytes(f.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim().split(" ");
@@ -141,8 +142,14 @@ public final class AudioStream {
         return best;
     }
 
+    /** YouTube's ids are letters, digits, - and _: anything else is not put in a file path. */
+    private static boolean plainId(String videoId) {
+        return videoId != null && videoId.matches("[A-Za-z0-9_-]+");
+    }
+
     /** Fetches the song's best audio into {@code dir}; throws when no stream is found or a range fails. */
     public static File download(File dir, String videoId) throws Exception {
+        if (!plainId(videoId)) throw new IOException("not a video id: " + videoId);
         byte[] response = playerResponse(videoId);
         if (response == null) throw new IOException("no stream for " + videoId);
         Pick pick = best(response);
@@ -170,7 +177,12 @@ public final class AudioStream {
                     conn.setRequestProperty("User-Agent", USER_AGENT);
                     conn.setRequestProperty("Referer", "https://music.youtube.com/");
                     conn.setRequestProperty("Range", "bytes=" + start + "-" + end);
-                    code = conn.getResponseCode();
+                    try {
+                        code = conn.getResponseCode();
+                    } catch (IOException e) {
+                        conn.disconnect();
+                        throw e;
+                    }
                     String to = code / 100 == 3 ? conn.getHeaderField("Location") : null;
                     if (to == null || hop == 5) break;
                     conn.disconnect();
@@ -179,7 +191,9 @@ public final class AudioStream {
                     Log.i(TAG, videoId + ": HTTP " + code + " at byte " + start + ", followed to " + new URL(url).getHost());
                 }
                 try {
-                    if (code != HttpURLConnection.HTTP_PARTIAL) {
+                    // a 200 is the whole file: the same bytes only when this one range is all of it
+                    boolean whole = code == HttpURLConnection.HTTP_OK && start == 0 && pick.length <= RANGE;
+                    if (code != HttpURLConnection.HTTP_PARTIAL && !whole) {
                         throw new IOException("range " + start + "-" + end + ": HTTP " + code);
                     }
                     try (InputStream in = conn.getInputStream()) {

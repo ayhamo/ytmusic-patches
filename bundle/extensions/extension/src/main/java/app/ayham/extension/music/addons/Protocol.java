@@ -353,8 +353,10 @@ public final class Protocol {
     /** §3: settings, then the song's raw title and artist (when known), then the trimmed query (when not blank). */
     public static String searchUrl(String base, List<String[]> params, TrackMatcher.Target target, String query) {
         List<String[]> all = new ArrayList<>(params);
-        if (target != null && target.title != null && !target.title.isEmpty()) all.add(new String[]{"title", target.title});
-        if (target != null && target.artist != null && !target.artist.isEmpty()) all.add(new String[]{"artist", target.artist});
+        // §3: trimmed, each sent only when known (a blank one is not)
+        String title = target == null ? "" : Js.trim(Js.text(target.title)), artist = target == null ? "" : Js.trim(Js.text(target.artist));
+        if (!title.isEmpty()) all.add(new String[]{"title", title});
+        if (!artist.isEmpty()) all.add(new String[]{"artist", artist});
         String q = Js.trim(Js.text(query));
         if (!q.isEmpty()) all.add(new String[]{"q", q});
         return base + "/search?" + qs(all);
@@ -487,12 +489,6 @@ public final class Protocol {
             return Stream.miss("encrypted");
         }
         String quality = Js.text(first(j, "quality", "streamQuality", "audioQuality"));
-        StringBuilder all = new StringBuilder(url);
-        for (Object v : new Object[]{j.get("format"), quality, j.get("codec"), j.get("fileCodec"), j.get("container"),
-                j.get("containerFormat"), j.get("mimeType"), j.get("manifest"), j.get("mediaType"), j.get("audioMode")}) {
-            all.append(' ').append(Js.text(v));
-        }
-        String allText = all.toString();
         String atmosText = Js.text(j.get("codec")) + " " + Js.text(j.get("audioMode")) + " " + Js.text(j.get("format")) + " " + quality;
         boolean atmos = Pick.ATMOS.matcher(atmosText).find();
         // an Atmos row whose answer names only its codec (eac3, ac4) is Atmos too
@@ -513,6 +509,9 @@ public final class Protocol {
         }
         s.transport = path.endsWith(".m3u8") || HLS.matcher(fields).find() ? "hls"
                 : path.endsWith(".mpd") || DASH.matcher(fields).find() ? "dash" : "file";
+        // §4: missing numbers come from the answer's text, never the link (a token or file name
+        // with "24bit" or "96khz" in it is not the file's format)
+        String allText = fields.toString();
         Double sampleRate = Js.num(j.get("sampleRate"));
         if (sampleRate == null) sampleRate = Js.num(Js.group1(KHZ, allText));
         if (sampleRate != null && sampleRate < 1000) sampleRate *= 1000;

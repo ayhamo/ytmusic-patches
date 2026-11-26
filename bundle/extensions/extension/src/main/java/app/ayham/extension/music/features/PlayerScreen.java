@@ -120,6 +120,7 @@ final class PlayerScreen {
             // a new activity or player page (rotation, theme change): build ours again there
             for (View v : new View[]{overlay, mesh})
                 if (v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
+            if (overlay.getContext() != a) letGo(); // the old activity's views would keep it alive
             overlay = null;
             moved.clear();
         }
@@ -431,6 +432,15 @@ final class PlayerScreen {
         if (s != null && Math.abs(s.getTranslationY() - sheetOurs) < 0.5f) s.setTranslationY(sheetYt);
     }
 
+    /** YT's views of a gone activity let go, not given back (they went with it): held, they keep it alive. */
+    private static void letGo() {
+        dimmed.clear();
+        droppedSheet = null;
+        timesBar = null;
+        timePaints = null;
+        ytTimeColors.clear();
+    }
+
     /** YT's views back where YT put them (collapse, sheet, switch off). */
     private static void giveBack() {
         for (View v : dimmed) if (v.getAlpha() == TOP_ICONS_ALPHA) v.setAlpha(1f);
@@ -575,6 +585,7 @@ final class PlayerScreen {
                 volume = null;
                 zone = null;
                 moved.clear();
+                letGo();
                 FullArt.giveBack();
                 return;
             }
@@ -756,7 +767,9 @@ final class PlayerScreen {
                 Bitmap m = buildMesh(shot);
                 if (m == null) return; // nothing drawn there yet
                 meshFor = key;
-                mesh.show(m);
+                int[] px = new int[48 * 48];
+                shot.getPixels(px, 0, 48, 0, 0, 48, 48);
+                mesh.show(m, ArtMesh.glare(px));
                 Log.i(TAG, "mesh from the art of '" + key.replace('\u0000', '/') + "'");
             }, main);
         } catch (Throwable e) {
@@ -825,15 +838,16 @@ final class PlayerScreen {
         private long fadeStart;
         int seam, bannerTop;
         float e;
-        private int shadeFor = -1;
+        private int shadeFor = -1, glare, shown;
 
         MeshView(Context c) {
             super(c);
         }
 
-        void show(Bitmap m) {
+        void show(Bitmap m, int glare) {
             before = now;
             now = m;
+            this.glare = glare;
             fadeStart = SystemClock.uptimeMillis();
             invalidate();
         }
@@ -849,12 +863,24 @@ final class PlayerScreen {
         protected void onDraw(Canvas c) {
             c.drawColor(0xFF121212);
             // Metrolist's bleed (or an animated cover's backdrop); the colour mesh until there is one
-            if (ArtBackdrop.draw(c, this, bannerTop, e)) return;
-            if (now == null) return;
-            float t = Math.min(1f, (SystemClock.uptimeMillis() - fadeStart) / 900f);
-            if (before != null && t < 1f) draw(c, before, 255);
-            draw(c, now, Math.round(255 * t));
-            if (t < 1f) postInvalidateOnAnimation();
+            int extra = ArtBackdrop.glare();
+            if (!ArtBackdrop.draw(c, this, bannerTop, e)) {
+                if (now == null) return;
+                extra = glare;
+                float t = Math.min(1f, (SystemClock.uptimeMillis() - fadeStart) / 900f);
+                if (before != null && t < 1f) draw(c, before, 255);
+                draw(c, now, Math.round(255 * t));
+                if (t < 1f) postInvalidateOnAnimation();
+            }
+            // BitChord's scrim over every backdrop (ArtworkMeshBackdrop: black 6% to 30%), enough to keep
+            // white text off a bright sleeve; the bleed and the clip's backdrop had none (a near-white
+            // cover left the title, times and controls white on white); a bright cover gets more (ArtMesh.glare)
+            // eased to a new song's amount, no step
+            if (shown != extra) {
+                shown += Math.abs(extra - shown) < 4 ? extra - shown : (extra - shown) / 6;
+                postInvalidateOnAnimation();
+            }
+            if (shown > 0) c.drawColor(shown << 24);
             if (shadeFor != getHeight()) {
                 shadeFor = getHeight();
                 shade.setShader(new LinearGradient(0, 0, 0, getHeight(), 0x0F000000, 0x4D000000, Shader.TileMode.CLAMP));
@@ -1047,8 +1073,13 @@ final class PlayerScreen {
             // chromeWhite(0.7), text at 0.73 ("full" under the blend); unconfirmed rows at 0.45.
             // Each chrome white is 0.15 under its plain strength, so more of the backdrop shows.
             float all = gw + gap + tw, top = cy - 12 * d, bottom = cy + 12 * d;
-            // the Best part button (canvas.md §14 rule 3) is up for a few seconds: the badge waits
-            if (!pill.isEmpty() && pill.left < x0 + all + 6 * d) return;
+            // the Best part button (canvas.md §14 rule 3) is up to 45 s: the badge moves left of it,
+            // clear of YT's time on the left (~48 dp); it waits only when it can't fit there.
+            // (Hidden outright, "Hi-Res Lossless" was gone for a song's first 30 s, phone 2026-11-24.)
+            if (!pill.isEmpty() && pill.left < x0 + all + 6 * d) {
+                x0 = pill.left - 6 * d - all;
+                if (x0 < 60 * d) return;
+            }
             if (layerPaint == null) {
                 layerPaint = new Paint();
                 layerPaint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD));
@@ -1605,6 +1636,15 @@ final class PlayerScreen {
                 }
             };
 
+    /**
+     * YT's session says paused or stopped (not buffering: a song loading is no pause). False when
+     * the session is not found.
+     */
+    static boolean sessionPaused() {
+        int s = sessionState;
+        return s >= 0 && !playingState(s);
+    }
+
     private static boolean playingState(int s) {
         switch (s) {
             case android.media.session.PlaybackState.STATE_PLAYING:
@@ -1638,7 +1678,8 @@ final class PlayerScreen {
             for (android.service.notification.StatusBarNotification n : nm.getActiveNotifications()) {
                 Object tok = n.getNotification().extras.getParcelable(android.app.Notification.EXTRA_MEDIA_SESSION);
                 if (tok instanceof android.media.session.MediaSession.Token) {
-                    c = new android.media.session.MediaController(a, (android.media.session.MediaSession.Token) tok);
+                    // the app context: this controller is static and outlives the Activity
+                    c = new android.media.session.MediaController(a.getApplicationContext(), (android.media.session.MediaSession.Token) tok);
                     break;
                 }
             }
@@ -1844,15 +1885,14 @@ final class PlayerScreen {
         m.getMenu().add(0, 5, 0, "Play from the best part");
         m.getMenu().add(0, 1, 0, "Fullscreen cover art").setCheckable(true).setChecked(Features.switchOn("fullArt"));
         m.getMenu().add(0, 2, 1, "Animated covers").setCheckable(true).setChecked(Features.switchOn("canvas"));
-        m.getMenu().add(0, 6, 1, "Canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"))
-                .setEnabled(Features.switchOn("canvas"));
+        // canvas.md §13 rule 1: Canvas and Animated covers are two separate master switches
+        m.getMenu().add(0, 6, 1, "Canvas").setCheckable(true).setChecked(Features.switchOn("canvasSpotify"));
         String song = app.ayham.extension.music.automix.AddonDirect.playingId();
         boolean onAddon = song != null && app.ayham.extension.music.automix.AddonDirect.inUse(song);
         if (song != null && app.ayham.extension.music.addons.AddonSettings.on())
             m.getMenu().add(0, 7, 1, onAddon ? "Use YouTube quality" : "Upgrade quality");
         // canvas.md §15: one song's canvas
         if (CanvasSongMenu.offers()) m.getMenu().add(0, 8, 1, "This song's canvas");
-        if (Features.switchOn("lyricLine")) m.getMenu().add(0, 9, 1, "Lyrics timing");
         m.getMenu().add(0, 3, 2, "More options");
         m.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
@@ -1870,9 +1910,6 @@ final class PlayerScreen {
                     return true;
                 case 8:
                     CanvasSongMenu.show(a);
-                    return true;
-                case 9:
-                    LyricsOffsetDialog.show(a);
                     return true;
                 case 5:
                     BestPart.play(a);
@@ -1920,7 +1957,7 @@ final class PlayerScreen {
 
     /** [hidden]: also inside views we hid (YT's chips row). */
     private static View findLabel(View v, String label, boolean hidden) {
-        if (v == overlay || v.getVisibility() != View.VISIBLE) return null;
+        if (v == overlay || (!hidden && v.getVisibility() != View.VISIBLE)) return null;
         CharSequence d = v.getContentDescription();
         CharSequence t = v instanceof TextView ? ((TextView) v).getText() : null;
         if ((d != null && d.toString().trim().equalsIgnoreCase(label)) || (t != null && t.toString().trim().equalsIgnoreCase(label)))

@@ -243,8 +243,22 @@ final class AppleCanvas {
         });
         if (m == null) return null;
         // full-screen art: the tall clip, with the square one (BitChord's url) to fall back on
-        if (tall && m[2] != null) return new String[]{m[2], m[2].equals(m[0]) ? m[1] : m[0]};
-        return new String[]{m[0], m[1]};
+        if (tall && m[2] != null) return trustedPair(m[2], m[2].equals(m[0]) ? m[1] : m[0]);
+        return trustedPair(m[0], m[1]);
+    }
+
+    /**
+     * A fresh clip link passes the same trust check as everything else (https on 443, no user info,
+     * Apple's media hosts: canvas.md §4 rule 6's idea): an untrusted one is dropped, the other moves up.
+     */
+    static String[] trustedPair(String preferred, String alternate) {
+        String p = preferred != null && ArtistHeader.trusted(preferred, null) ? preferred : null;
+        String a = alternate != null && ArtistHeader.trusted(alternate, null) ? alternate : null;
+        if (p == null) {
+            p = a;
+            a = null;
+        }
+        return p == null ? null : new String[]{p, a};
     }
 
     /**
@@ -301,24 +315,46 @@ final class AppleCanvas {
         if (now < retryAfter) return null;
         retryAfter = now + 2 * 60_000L; // the network failed: tried again soon
         String html = get("https://music.apple.com/us/browse", null);
-        retryAfter = now + 30 * 60_000L; // Apple answered: a page with no token is not asked again for a while
         Matcher js = Pattern.compile("/assets/index(?:-legacy)?[~-][A-Za-z0-9_-]+\\.js").matcher(html);
+        // the web player's own token from any bundle wins; another bundle's unlabelled one only
+        // when no bundle has it (a stray JWT in the first must not hide the real one in the next)
+        String fallback = null;
         while (js.find()) {
             String script = get("https://music.apple.com" + js.group(), null);
             Matcher jwt = Pattern.compile("ey[A-Za-z0-9_-]+\\.ey[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+").matcher(script);
             java.util.List<String> found = new java.util.ArrayList<>();
             while (jwt.find()) if (!found.contains(jwt.group())) found.add(jwt.group());
             int pick = pickToken(found, now, rejected);
-            if (pick >= 0) {
-                token = found.get(pick);
-                tokenExpires = expiry(token);
-                retryAfter = 0;
-                CanvasCache.token(token, tokenExpires);
-                return token;
-            }
+            if (pick < 0) continue;
+            if (webPlayer(found.get(pick))) return use(found.get(pick));
+            if (fallback == null) fallback = found.get(pick);
         }
+        if (fallback != null) return use(fallback);
+        // every bundle read and none has one: not asked again for a while (a failed read above
+        // threw, and leaves the 2 minute retry)
+        retryAfter = now + 30 * 60_000L;
         Log.w(TAG, "canvas: no web player token found");
         return null;
+    }
+
+    private static String use(String t) {
+        token = t;
+        tokenExpires = expiry(t);
+        retryAfter = 0;
+        CanvasCache.token(token, tokenExpires);
+        return token;
+    }
+
+    /** The JWT's header kid says WebPlayKid or its payload iss AMPWebPlay (pickToken's first choice). */
+    private static boolean webPlayer(String t) {
+        try {
+            String[] parts = t.split("\\.");
+            String header = new String(java.util.Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
+            String payload = new String(java.util.Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+            return header.contains("WebPlayKid") || payload.contains("AMPWebPlay");
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**
@@ -375,7 +411,10 @@ final class AppleCanvas {
                 Log.i(TAG, "canvas: token refused (401), scraping again next time");
             }
         }
-        if (code >= 400) throw new IllegalStateException("http " + code + " for " + url.replaceAll("\\?.*", ""));
+        if (code >= 400) {
+            c.disconnect();
+            throw new IllegalStateException("http " + code + " for " + url.replaceAll("\\?.*", ""));
+        }
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             byte[] b = new byte[16384];

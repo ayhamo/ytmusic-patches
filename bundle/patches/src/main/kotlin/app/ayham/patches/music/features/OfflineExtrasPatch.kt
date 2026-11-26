@@ -51,12 +51,14 @@ val offlineExtrasPatch = patch(
 
     val log = Logger.getLogger("OfflineExtras")
 
-    execute {
+    // finalize, not execute: every hook here needs Morphe's extension classes or its resolver rewrite,
+    // which exist only once Morphe's patches have executed (order between bundles is not known)
+    finalize {
         mutableClassDefByOrNull(MORPHE_IN_APP_DOWNLOADS)?.methods?.firstOrNull {
             it.name == "replaceDeclinedOfflinePlayerResponse" &&
                 it.parameterTypes.map(CharSequence::toString) == listOf("Ljava/lang/Object;")
         }?.let { method ->
-            method.addInstruction(0, "invoke-static { p0 }, $OFFLINE_SAVE->onOfflinePlayerResponse(Ljava/lang/Object;)V")
+            method.addInstruction(0, "invoke-static/range { p0 .. p0 }, $OFFLINE_SAVE->onOfflinePlayerResponse(Ljava/lang/Object;)V")
             log.info("OfflineExtras: hooked Morphe replaceDeclinedOfflinePlayerResponse")
         } ?: log.warning("OfflineExtras: Morphe's Downloads patch is not applied, offline lyrics and art are off")
 
@@ -92,7 +94,7 @@ val offlineExtrasPatch = patch(
         mutableClassDefByOrNull(MORPHE_SPONSORBLOCK)?.methods?.firstOrNull {
             it.name == "offlineVideoRemoved" && it.parameterTypes.map(CharSequence::toString) == listOf("Ljava/lang/String;")
         }?.let { method ->
-            method.addInstruction(0, "invoke-static { p0 }, $OFFLINE_INDEX->removed(Ljava/lang/String;)V")
+            method.addInstruction(0, "invoke-static/range { p0 .. p0 }, $OFFLINE_INDEX->removed(Ljava/lang/String;)V")
             log.info("OfflineExtras: hooked Morphe offlineVideoRemoved")
         } ?: log.warning("OfflineExtras: Morphe's offlineVideoRemoved not found; deletes are found at start only")
     }

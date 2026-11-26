@@ -27,12 +27,15 @@ import java.util.concurrent.ConcurrentHashMap;
  *   video id so the canvas finds it offline;</li>
  *   <li>its video type, for the song-version and automix rules.</li>
  * </ul>
- * YT saves the thumbnail and the player data itself. One background thread per song, once per run.
+ * YT saves the thumbnail and the player data itself. Two songs at a time in the background (a
+ * whole playlist saved at once would otherwise ask every server for every song at once), once per run.
  */
 final class OfflineExtras {
     private static final String TAG = "AyhamDownloads";
     private static final String LYRICS = "app.morphe.extension.music.patches.lyrics.";
     private static final Set<String> done = ConcurrentHashMap.newKeySet();
+    private static final java.util.concurrent.ExecutorService worker =
+            java.util.concurrent.Executors.newFixedThreadPool(2, r -> new Thread(r, "ayham-offline-extras"));
 
     private OfflineExtras() {
     }
@@ -41,7 +44,7 @@ final class OfflineExtras {
     static void saved(String videoId, DownloadChoice.Choice ch) {
         Context c = Features.appContext;
         if (c == null || videoId == null || videoId.isEmpty() || !done.add(videoId)) return;
-        new Thread(() -> {
+        worker.execute(() -> {
             OfflineIndex.touch(c, videoId);
             try {
                 JSONObject d = null;
@@ -60,7 +63,7 @@ final class OfflineExtras {
                 String title = d.optString("title", ""), artist = d.optString("author", "");
                 int length = d.optInt("lengthSeconds", 0);
                 String type = d.optString("musicVideoType", "");
-                SongVersion.noteType(videoId, type);
+                MusicVideoType.note(videoId, type);
                 Log.i(TAG, "offline extras for " + videoId + ": '" + title + "' by '" + artist + "' (" + length + " s): " + ch);
                 if (title.isEmpty()) return;
                 if (ch.lossless) app.ayham.extension.music.addons.AddonDownloads.enqueue(c, videoId, title, artist,
@@ -72,7 +75,7 @@ final class OfflineExtras {
                 done.remove(videoId); // asked again on the next save
                 Log.w(TAG, "offline extras failed for " + videoId, t);
             }
-        }, "ayham-offline-extras").start();
+        });
     }
 
     /** YT Music's own title / artist / length / type for the video (the WEB_REMIX player data). */

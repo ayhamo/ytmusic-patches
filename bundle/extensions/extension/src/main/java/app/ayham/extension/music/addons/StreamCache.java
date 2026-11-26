@@ -27,6 +27,10 @@ public final class StreamCache {
     private static final String TAG = "AyhamAddons";
     public static final int CHUNK = 1 << 20;
     static final long MAX_BYTES = 512L << 20;
+    /** A file over this is no song (a CDN's wild Content-Range would size the chunk list by it). */
+    static final long MAX_LENGTH = 2L << 30;
+    /** One chunk's whole fetch: a server dripping a byte per read timeout would hold the entry for good. */
+    private static final long CHUNK_MS = 120_000;
     private static final int MAGIC = 0x41594331;   // "AYC1"
     private static final Map<String, Entry> open = new HashMap<>();
     /** Network fetches, off the callers' threads (Entry.chunkUninterrupted). */
@@ -56,7 +60,7 @@ public final class StreamCache {
     public static final class Entry {
         public final String key;
         final File data, meta;
-        private long length = -1;
+        private volatile long length = -1;
         private BitSet have = new BitSet();
         private volatile String url;
         private volatile Map<String, String> headers = new HashMap<>();
@@ -110,6 +114,7 @@ public final class StreamCache {
         /** Up to len bytes at pos, fetching their chunk when it is missing; -1 at the end. */
         public int read(long pos, byte[] b, int off, int len) throws IOException {
             if (len == 0) return 0;
+            if (pos < 0) throw new IOException("read before the start");
             int c = (int) (pos / CHUNK);
             chunkUninterrupted(c);
             long end;
@@ -206,18 +211,30 @@ public final class StreamCache {
                 if (code == 206) {
                     String cr = h.getHeaderField("Content-Range");   // bytes a-b/total
                     int slash = cr == null ? -1 : cr.lastIndexOf('/');
-                    if (slash > 0 && !cr.endsWith("*")) length = Long.parseLong(cr.substring(slash + 1).trim());
+                    if (slash > 0 && !cr.endsWith("*")) {
+                        long l;
+                        try {
+                            l = Long.parseLong(cr.substring(slash + 1).trim());
+                        } catch (NumberFormatException x) {
+                            throw new IOException("audio: an unreadable Content-Range");
+                        }
+                        if (l <= 0 || l > MAX_LENGTH) throw new IOException("audio: a length of " + l + " bytes");
+                        length = l;
+                    }
                 } else {
                     // a server that ignores ranges sends it all: read just this chunk of it
                     long l = h.getContentLengthLong();
+                    if (l > MAX_LENGTH) throw new IOException("audio: a length of " + l + " bytes");
                     if (l > 0) length = l;
                 }
+                String mime = h.getContentType();
                 byte[] buf = new byte[64 * 1024];
                 long want = length >= 0 ? Math.min(CHUNK, length - from) : CHUNK;
-                long got = 0;
+                long got = 0, until = android.os.SystemClock.elapsedRealtime() + CHUNK_MS;
                 try (InputStream in = h.getInputStream(); RandomAccessFile f = new RandomAccessFile(data, "rw")) {
                     f.seek(from);
                     while (got < want) {
+                        if (android.os.SystemClock.elapsedRealtime() > until) throw new IOException("audio: chunk " + c + " took over " + CHUNK_MS / 1000 + " s");
                         int n = in.read(buf, 0, (int) Math.min(buf.length, want - got));
                         if (n < 0) break;
                         f.write(buf, 0, n);
@@ -228,6 +245,11 @@ public final class StreamCache {
                     if (length < 0) length = from + got;   // the end came first
                     else throw new IOException("audio: the range ended early");
                 }
+                if (c == 0 && (isManifest(null, mime) || isManifest(head(data), null))) {
+                    // protocol.md 8.1.6: a manifest is never kept (nor read as this row's audio)
+                    forget();
+                    throw new IOException("audio: an HLS or DASH manifest, not a file; not kept");
+                }
                 fetched += got;
                 have.set(c);
                 save();
@@ -236,18 +258,36 @@ public final class StreamCache {
             }
         }
 
+        /** This entry's bytes and chunk list gone (a manifest found in it). */
+        private void forget() {
+            //noinspection ResultOfMethodCallIgnored
+            data.delete();
+            //noinspection ResultOfMethodCallIgnored
+            meta.delete();
+            length = -1;
+            have = new BitSet();
+        }
+
         private void load() {
             if (!meta.exists() || !data.exists()) return;
             try (DataInputStream in = new DataInputStream(new FileInputStream(meta))) {
                 if (in.readInt() != MAGIC) return;
-                length = in.readLong();
+                long l = in.readLong();
                 int n = in.readInt();
+                // a damaged list: a negative or huge count would throw past the catch (or run out of memory)
+                if (l < -1 || l > MAX_LENGTH || n < 0 || n > (int) (MAX_LENGTH / CHUNK / 8) + 1) throw new IOException("damaged");
                 byte[] bits = new byte[n];
                 in.readFully(bits);
+                length = l;
                 have = BitSet.valueOf(bits);
             } catch (IOException e) {
                 length = -1;
                 have = new BitSet();
+            }
+            // protocol.md 8.1.6: a manifest kept before this guard is dropped, never served
+            if (have.get(0) && isManifest(head(data), null)) {
+                Log.i(TAG, "stream " + key + ": a manifest was kept, dropped");
+                forget();
             }
         }
 
@@ -266,9 +306,48 @@ public final class StreamCache {
         }
     }
 
+    /**
+     * protocol.md 8.1.6: an HLS playlist or a DASH manifest, by its type or its first bytes (#EXTM3U,
+     * or an MPD element after an optional BOM and XML header), as file-cache.js isManifest.
+     */
+    static boolean isManifest(byte[] head, String mime) {
+        if (mime != null && MANIFEST_MIME.matcher(mime).find()) return true;
+        if (head == null) return false;
+        String t = new String(head, java.nio.charset.StandardCharsets.UTF_8);
+        if (t.startsWith("\uFEFF")) t = t.substring(1);
+        t = t.replaceFirst("^\\s+", "");
+        return t.startsWith("#EXTM3U") || MANIFEST_MPD.matcher(t).lookingAt();
+    }
+
+    private static final java.util.regex.Pattern MANIFEST_MIME = java.util.regex.Pattern.compile("mpegurl|dash\\+xml", java.util.regex.Pattern.CASE_INSENSITIVE),
+            // any case, after an XML header and comments: <mpd>, <!-- x --><MPD ...>
+            MANIFEST_MPD = java.util.regex.Pattern.compile("(?:(?:<\\?xml[^>]*>|<!--.*?-->)\\s*)*<MPD[\\s>/]",
+                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL);
+
+    /** The first 512 bytes of a file (fewer when it is shorter; null when it can't be read). */
+    private static byte[] head(File f) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            byte[] b = new byte[512];
+            int n = 0, r;
+            while (n < b.length && (r = in.read(b, n, b.length - n)) > 0) n += r;
+            return java.util.Arrays.copyOf(b, n);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     /** A fresh link for an entry (AddonClient.streamAgain): its url and headers, or null. */
     public interface Refresh {
         String[] again(Entry e) throws Exception;
+    }
+
+    /**
+     * A streamed row's key: the row, the quality asked (tier and the picked option) and the codec, so
+     * a Lossless copy is never served when Hi-Res was asked. Starts with key(host, rowId + "_"), the
+     * prefix "Upgrade quality" drops.
+     */
+    static String rowKey(String host, String rowId, String tier, String quality, String codec) {
+        return key(host, rowId + "_" + (tier == null ? "" : tier) + "_" + (quality == null ? "" : quality) + "_" + codec);
     }
 
     /** The entry for key, opened for use (release it when done). */

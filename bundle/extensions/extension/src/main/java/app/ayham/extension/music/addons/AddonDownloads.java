@@ -90,7 +90,9 @@ public final class AddonDownloads {
             return;
         }
         Properties p = pending(c);
-        p.setProperty(id, tier + "\n" + (isVideo ? "1" : "0") + "\n" + artist + "\n" + title);
+        // one line per field: a line break in the artist would shift the title into it
+        String a = artist == null ? "" : artist.replace('\r', ' ').replace('\n', ' ');
+        p.setProperty(id, tier + "\n" + (isVideo ? "1" : "0") + "\n" + a + "\n" + title);
         savePending(c, p);
         queue.addLast(id);
         start();
@@ -124,6 +126,18 @@ public final class AddonDownloads {
     }
 
     private static void work() {
+        try {
+            workLoop();
+        } finally {
+            // a throw past the loop's own catch ends this thread: the next enqueue or retry starts another
+            synchronized (AddonDownloads.class) {
+                if (worker == Thread.currentThread()) worker = null;
+                working = null;
+            }
+        }
+    }
+
+    private static void workLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
         while (true) {
             String id;
@@ -142,10 +156,21 @@ public final class AddonDownloads {
                 if (info == null || info.length < 4) continue;
                 working = id;
             }
-            // no network (a dropped Wi-Fi): wait for it rather than fail every song left
-            for (int waited = 0; !online(ctx); waited++) {
-                if (waited == 0) Log.i(TAG, "downloads: offline, waiting for the network");
+            // no network (a dropped Wi-Fi): wait for it rather than fail every song left; on mobile data
+            // with the addons' "Off on mobile data" on, wait for Wi-Fi (protocol.md §8.4.3, the phone's
+            // form of Wi-Fi only)
+            for (int waited = 0; ; waited++) {
+                boolean online = online(ctx), held = online && AddonSettings.offForMobile(ctx);
+                if (mayFetch(online, held)) break;
+                if (waited == 0) Log.i(TAG, held ? "downloads: on mobile data, waiting for Wi-Fi (Off on mobile data)" : "downloads: offline, waiting for the network");
                 SystemClock.sleep(15_000);
+            }
+            synchronized (AddonDownloads.class) {
+                // deleted while it waited for the network
+                if (pending(ctx).getProperty(id) == null) {
+                    working = null;
+                    continue;
+                }
             }
             long t0 = SystemClock.elapsedRealtime();
             AddonPrep.Prepared got = null;
@@ -161,8 +186,10 @@ public final class AddonDownloads {
                     if (got != null) break;
                     Log.i(TAG, "download " + id + ": no addon has it at " + tier + (tier.equals(info[0]) ? "" : " (stepped down)"));
                 }
-                if (got != null) save(ctx, got, info[3], info[2]);
-                else why = "no addon has it lossless" + (ATMOS.equals(info[0]) ? " or in Atmos" : "") + ": YouTube's download only";
+                if (got != null && !saveIfWanted(id, got, info[3], info[2])) {
+                    got = null;
+                    why = "deleted while it downloaded: not kept";
+                } else if (got == null) why = "no addon has it lossless" + (ATMOS.equals(info[0]) ? " or in Atmos" : "") + ": YouTube's download only";
             } catch (Throwable t) {
                 why = Protocol.scrub(String.valueOf(t));
                 retry = true;
@@ -174,18 +201,29 @@ public final class AddonDownloads {
                     // a failure (network, a refused fetch) is tried again in a minute or two; kept on disk meanwhile
                     tries.put(id, n);
                     final String again = id;
-                    if (later == null) later = new java.util.Timer("addon-downloads-retry", true);
-                    later.schedule(new java.util.TimerTask() {
+                    java.util.TimerTask task = new java.util.TimerTask() {
                         @Override
                         public void run() {
-                            synchronized (AddonDownloads.class) {
-                                if (pending(ctx).getProperty(again) != null && !queue.contains(again) && !again.equals(working)) {
-                                    queue.addLast(again);
-                                    start();
+                            // a task that throws cancels the Timer for good: nothing gets out
+                            try {
+                                synchronized (AddonDownloads.class) {
+                                    if (pending(ctx).getProperty(again) != null && !queue.contains(again) && !again.equals(working)) {
+                                        queue.addLast(again);
+                                        start();
+                                    }
                                 }
+                            } catch (Throwable t) {
+                                Log.w(TAG, "download " + again + ": the retry failed: " + Protocol.scrub(String.valueOf(t)));
                             }
                         }
-                    }, 60_000L * n);
+                    };
+                    if (later == null) later = new java.util.Timer("addon-downloads-retry", true);
+                    try {
+                        later.schedule(task, 60_000L * n);
+                    } catch (IllegalStateException cancelled) {
+                        later = new java.util.Timer("addon-downloads-retry", true);
+                        later.schedule(task, 60_000L * n);
+                    }
                     why += " (tried again in " + n + " min)";
                 } else {
                     // "no addon has it", or tried TRIES times: YouTube's download is all it has
@@ -197,6 +235,29 @@ public final class AddonDownloads {
             }
             Log.i(TAG, (got != null ? "downloaded: " + got : "download " + id + ": " + why) + " in " + (SystemClock.elapsedRealtime() - t0) + " ms");
         }
+    }
+
+    /**
+     * Keeps a finished download unless the song was deleted meanwhile (delete() takes it off the
+     * pending list): then its file goes too, or the deleted song would come back.
+     */
+    private static boolean saveIfWanted(String id, AddonPrep.Prepared got, String title, String artist) throws Exception {
+        synchronized (AddonDownloads.class) {
+            if (pending(ctx).getProperty(id) != null) {
+                save(ctx, got, title, artist);
+                return true;
+            }
+            //noinspection ResultOfMethodCallIgnored
+            if (got.file != null && !sharedBy(ctx, got.file)) got.file.delete();
+            //noinspection ResultOfMethodCallIgnored
+            if (got.wav != null) got.wav.delete();
+            return false;
+        }
+    }
+
+    /** A download fetches only online and not held off by "Off on mobile data". */
+    static boolean mayFetch(boolean online, boolean heldByMobile) {
+        return online && !heldByMobile;
     }
 
     @SuppressWarnings("deprecation")

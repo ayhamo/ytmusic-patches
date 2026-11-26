@@ -47,6 +47,7 @@ final class StepClock {
     }
 
     double at(long now, float speed) {
+        if (count == 0) return Double.NaN; // no anchor yet
         double[] a = java.util.Arrays.copyOf(anchors, count);
         java.util.Arrays.sort(a);
         double med = count % 2 == 1 ? a[count / 2] : (a[count / 2 - 1] + a[count / 2]) / 2;

@@ -30,12 +30,12 @@ import org.junit.Test;
  */
 public class AnalysisRealSongsTest {
     /** A WAV's samples, interleaved, as floats (32-bit float or 16-bit PCM). */
-    private static final class Wav {
+    static final class Wav {
         int rate, channels;
         float[] x;
     }
 
-    private static Wav read(File f) throws IOException {
+    static Wav read(File f) throws IOException {
         byte[] all = Files.readAllBytes(f.toPath());
         ByteBuffer b = ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN);
         if (b.getInt(0) != 0x46464952 || b.getInt(8) != 0x45564157) throw new IOException(f + ": not a WAV");
@@ -87,41 +87,48 @@ public class AnalysisRealSongsTest {
         for (File f : wavs) {
             String id = f.getName().substring(0, f.getName().length() - 4);
             long t0 = System.nanoTime();
-            Wav w = read(f);
-            long frames = w.x.length / w.channels;
-            // the decode: the mono fold over every frame, the opening and the end kept as 16-bit stereo
-            Analyzer.Fold fold = new Analyzer.Fold(w.rate);
-            for (long k = 0; k < frames; k++) {
-                float a = w.x[(int) (k * w.channels)], b = w.channels > 1 ? w.x[(int) (k * w.channels + 1)] : a;
-                fold.push(a, b);
-            }
-            Analyzer.Decoded d = new Analyzer.Decoded();
-            d.rate = w.rate;
-            d.monoRate = fold.monoRate;
-            d.frames = frames;
-            d.mono = fold.mono;
-            d.monoLength = fold.length;
-            File head = File.createTempFile(id, ".head"), tail = File.createTempFile(id, ".tail");
-            try {
-                Analyzer.Pcm hp = pcm(w, 0, Math.min(frames, Math.round(Analyzer.HEAD_SEC * w.rate)), head);
-                Analyzer.Pcm tp = pcm(w, Math.max(0, frames - Math.round(Analyzer.TAIL_SEC * w.rate)), frames, tail);
-                w.x = null;
-                Analysis a = Analyzer.analyzeDecoded(null, id, d, hp, tp, 0, 0);
-                Map<String, Object> j = new LinkedHashMap<>();
-                j.put("side", "phone");
-                j.put("videoId", id);
-                j.putAll(a.toJson());
-                Files.write(new File(out, id + ".json").toPath(), Json.write(j).getBytes(StandardCharsets.UTF_8));
-                System.out.println(String.format(Locale.US, "%s: %.1f s, grid %.2f BPM (conf %.2f) from %.3f s, end grid %s, key %s (%.2f), %d vocal windows, %d ms",
-                        id, a.durationSec, a.bpm, a.gridConfidence, a.firstDownbeatSec,
-                        a.tailGrid == null ? "none" : String.format(Locale.US, "%.2f BPM", a.tailGrid.bpm),
-                        a.keyName, a.keyConfidence, a.vocals.size(), (System.nanoTime() - t0) / 1000000));
-            } finally {
-                //noinspection ResultOfMethodCallIgnored
-                head.delete();
-                //noinspection ResultOfMethodCallIgnored
-                tail.delete();
-            }
+            Analysis a = analyse(id, read(f));
+            Map<String, Object> j = new LinkedHashMap<>();
+            j.put("side", "phone");
+            j.put("videoId", id);
+            j.putAll(a.toJson());
+            Files.write(new File(out, id + ".json").toPath(), Json.write(j).getBytes(StandardCharsets.UTF_8));
+            System.out.println(String.format(Locale.US, "%s: %.1f s, grid %.2f BPM (conf %.2f) from %.3f s, end grid %s, key %s (%.2f), %d vocal windows, %d ms",
+                    id, a.durationSec, a.bpm, a.gridConfidence, a.firstDownbeatSec,
+                    a.tailGrid == null ? "none" : String.format(Locale.US, "%.2f BPM", a.tailGrid.bpm),
+                    a.keyName, a.keyConfidence, a.vocals.size(), (System.nanoTime() - t0) / 1000000));
+        }
+    }
+
+    /**
+     * A decoded song the way the phone's decode leaves it: Analyzer.Fold makes the 16-bit mono over
+     * every frame, the opening (HEAD_SEC) and the end (TAIL_SEC) are kept as 16-bit stereo, and
+     * Analyzer.analyzeDecoded runs on them. w's samples are dropped on the way.
+     */
+    static Analysis analyse(String id, Wav w) throws Exception {
+        long frames = w.x.length / w.channels;
+        Analyzer.Fold fold = new Analyzer.Fold(w.rate);
+        for (long k = 0; k < frames; k++) {
+            float a = w.x[(int) (k * w.channels)], b = w.channels > 1 ? w.x[(int) (k * w.channels + 1)] : a;
+            fold.push(a, b);
+        }
+        Analyzer.Decoded d = new Analyzer.Decoded();
+        d.rate = w.rate;
+        d.monoRate = fold.monoRate;
+        d.frames = frames;
+        d.mono = fold.mono;
+        d.monoLength = fold.length;
+        File head = File.createTempFile(id, ".head"), tail = File.createTempFile(id, ".tail");
+        try {
+            Analyzer.Pcm hp = pcm(w, 0, Math.min(frames, Math.round(Analyzer.HEAD_SEC * w.rate)), head);
+            Analyzer.Pcm tp = pcm(w, Math.max(0, frames - Math.round(Analyzer.TAIL_SEC * w.rate)), frames, tail);
+            w.x = null;
+            return Analyzer.analyzeDecoded(null, id, d, hp, tp, 0, 0);
+        } finally {
+            //noinspection ResultOfMethodCallIgnored
+            head.delete();
+            //noinspection ResultOfMethodCallIgnored
+            tail.delete();
         }
     }
 }

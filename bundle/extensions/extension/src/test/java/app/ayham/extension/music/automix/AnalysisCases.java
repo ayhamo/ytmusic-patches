@@ -44,6 +44,11 @@ final class AnalysisCases {
         AnalysisSignals.Song song;
         List<String> check = new ArrayList<>();
         Map<String, String> knownMiss = new LinkedHashMap<>();
+
+        /** A length-only case (tooLong) isn't rendered or analysed (analysis-cases.md §6). */
+        boolean rendered() {
+            return !check.contains("tooLong");
+        }
     }
 
     static File specFile() {
@@ -261,6 +266,13 @@ final class AnalysisCases {
                     double v = iou(pairs);
                     res.verdicts.add(new Verdict(what, v >= rule.vocalIoU, v, String.format(Locale.US,
                             "sung regions overlap %s (IoU, needs %s; %d of %d frames sung)", pct(v), pct(rule.vocalIoU), sung, pairs.size()), known));
+                    break;
+                }
+                case "tooLong": {
+                    // the phone's cap (Analyzer.MAX_SONG_SEC): over it, the song isn't analysed
+                    boolean ok = c.song.sec > Analyzer.MAX_SONG_SEC;
+                    res.verdicts.add(new Verdict(what, ok, c.song.sec, String.format(Locale.US, "%s s against the %s s cap: %s",
+                            fmt(c.song.sec), fmt(Analyzer.MAX_SONG_SEC), ok ? "not analysed" : "analysed"), known));
                     break;
                 }
                 default:

@@ -47,7 +47,9 @@ public class AddonClientTest {
 
     private long now = 1_000_000;
     private final List<Long> sleeps = new ArrayList<>();
-    private final List<String> logs = new ArrayList<>();
+    // the race logs from its lane threads at once: a plain ArrayList could throw there, which ended a
+    // lane and gave "no addon has it" (raceGoesOnPastARefusal, 1 run in 5 under load, 2026-11-24)
+    private final List<String> logs = Collections.synchronizedList(new ArrayList<String>());
     private final List<Hit> hits = Collections.synchronizedList(new ArrayList<Hit>());
     private final Map<String, Map<String, Route>> addons = new HashMap<>();
     private final Map<String, Long> fileBytes = new HashMap<>();
@@ -346,6 +348,55 @@ public class AddonClientTest {
         assertEquals(0, hitsOf("slow", "file").size());
     }
 
+    /** The phone's race is decided by the check (the window fit, ~3 s): a lane whose search lands meanwhile waits, and sends no /stream once the answer is taken. */
+    @Test
+    public void aLaneWaitsOutTheCheckBeforeItsStream() throws InterruptedException {
+        String rows = tracks(row("fine", ""));
+        good("quick", rows);
+        good("slow", rows);
+        addon("slow", "search", (k, id, q) -> {
+            sleep(150);
+            return json(200, rows);
+        });
+        AddonClient.Options opt = new AddonClient.Options();
+        opt.check = o -> {
+            sleep(500);
+            return null;
+        };
+        AddonClient.Opened got = client().race(song(), list("slow", "quick"), opt);
+        assertEquals("Mock quick", got.addon.name);
+        sleep(300);
+        assertEquals(0, hitsOf("slow", "stream").size());
+    }
+
+    /** A /stream that returns while another answer is checked: no probe once that answer is taken. */
+    @Test
+    public void aLaneWaitsOutTheCheckBeforeItsProbe() throws InterruptedException {
+        String rows = tracks(row("fine", ""));
+        good("quick", rows);
+        addon("slow", "search", (k, id, q) -> json(200, rows));
+        addon("slow", "stream", (k, id, q) -> {
+            sleep(150);
+            return json(200, "{\"url\":\"" + fileUrl("slow", id) + "\",\"format\":\"flac\",\"codec\":\"flac\"}");
+        });
+        AddonClient.Options opt = new AddonClient.Options();
+        opt.check = o -> {
+            sleep(500);
+            return null;
+        };
+        AddonClient.Opened got = client().race(song(), list("slow", "quick"), opt);
+        assertEquals("Mock quick", got.addon.name);
+        sleep(300);
+        assertEquals(0, hitsOf("slow", "file").size());
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
     /** No lane has it: every lane's misses, in rank order. */
     @Test
     public void raceWithNoAnswerListsEveryLane() {
@@ -605,5 +656,26 @@ public class AddonClientTest {
         String rate = "[{\"key\":\"quality\",\"options\":[{\"value\":\"a\",\"label\":\"FLAC 44.1 kHz\"},{\"value\":\"b\",\"label\":\"FLAC 96 kHz\"}]}]";
         assertEquals("Hi-Res by sample rate with its unit", "b", quality(rate, Pick.HIRES));
         assertEquals("CD by 44.1 kHz", "a", quality(rate, Pick.CD));
+    }
+
+    /** The race's lanes log at the same moment (both have it): the Log sink must be thread-safe. */
+    @Test
+    public void raceLanesLogAtTheSameTime() throws Exception {
+        String rows = tracks(row("fine", ""));
+        good("one", rows);
+        good("two", rows);
+        final java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2);
+        AddonClient cl = new AddonClient(transport, () -> now, ms -> { }, line -> {
+            if (!line.contains(" has it: ")) return;
+            both.countDown();
+            try {
+                // the first lane's line waits here until the second lane logs too
+                both.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        });
+        AddonClient.Opened got = cl.race(song(), list("one", "two"), null);
+        assertNull(got.none);
+        assertEquals(0, both.getCount());
     }
 }

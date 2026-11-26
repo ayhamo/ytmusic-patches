@@ -60,7 +60,7 @@ final class ArtBackdrop {
     private static long liveCount, liveMs, liveLogAt;
 
     private static final class Layer {
-        int tone, width, detailTop, softTop;
+        int tone, width, detailTop, softTop, glare;
         Bitmap preview, detail, soft, mesh;
         /** The square cover it was made from: drawn in the banner's place while YT's card is hidden (a song swipe). */
         Bitmap cover;
@@ -108,7 +108,7 @@ final class ArtBackdrop {
         checkAt = now + CHECK_MS;
         View thumb = decor.findViewById(PlayerScreen.id(a, "player_thumbnail"));
         if (thumb == null || !(thumb.getParent() instanceof ViewGroup) || W == 0 || H == 0) return;
-        // the top shown image over the art: YT's, or the song cover laid over it (SongCover)
+        // the top shown image over the art: YT's, or the song cover laid over it
         ViewGroup group = (ViewGroup) thumb.getParent();
         Drawable d = null;
         for (int i = group.getChildCount() - 1; i >= 0 && d == null; i--) {
@@ -185,6 +185,7 @@ final class ArtBackdrop {
                 l.mesh = Bitmap.createBitmap(ArtMesh.mesh(small, 128, 128, Math.min(1f, width / (float) H)),
                         ArtMesh.TEX, ArtMesh.TEX, Bitmap.Config.ARGB_8888);
                 l.tone = l.mesh.getPixel(ArtMesh.TEX / 2, ArtMesh.TEX - 1);
+                l.glare = ArtMesh.glare(small);
                 long took = SystemClock.uptimeMillis() - t0;
                 main.post(() -> {
                     if (gen != generation) return;
@@ -215,6 +216,12 @@ final class ArtBackdrop {
      * centre-cropped to the whole screen with a 48dp blur (FullscreenBlurredBackdropCanvas). Made
      * small on its own thread; a frame that comes while one is made is skipped.
      */
+    /** Whether live() would take a frame now: the clip's frames are read off the GPU only then. */
+    static boolean wantsFrame() {
+        return !liveBusy && held == null && !FullArt.hiding() && screenW != 0
+                && (clipNow == null || SystemClock.uptimeMillis() - clipMeshAt >= CLIP_MESH_MS);
+    }
+
     static void live(int[] frame, int fw, int fh, boolean tall) {
         if (liveBusy || held != null || FullArt.hiding() || screenW == 0) return;
         long at = SystemClock.uptimeMillis();
@@ -276,6 +283,12 @@ final class ArtBackdrop {
      * Draws the backdrop for the banner at bannerTop (view px), e = how far the banner is up.
      * False when there is nothing to draw yet (the view then draws its colour mesh).
      */
+    /** The extra black the player puts over this backdrop (ArtMesh.glare of the cover). */
+    static int glare() {
+        Layer l = cur;
+        return l == null ? 0 : l.glare;
+    }
+
     static boolean draw(Canvas c, View v, int bannerTop, float e) {
         long now = SystemClock.uptimeMillis();
         boolean clip = FullArt.clipMode();

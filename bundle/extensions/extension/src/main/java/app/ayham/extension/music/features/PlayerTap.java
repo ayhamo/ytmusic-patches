@@ -103,8 +103,9 @@ public final class PlayerTap {
         if (path == null) {
             // the deep search runs on the main thread: not more than every 5 s while it finds nothing
             if (android.os.SystemClock.uptimeMillis() < nextSearch) return null;
-            format = search(player);
-            if (format != null) path = lastFound;
+            List<Field>[] found = newPath();
+            format = search(player, found);
+            if (format != null) path = found[0];
             else nextSearch = android.os.SystemClock.uptimeMillis() + 5000;
         } else {
             format = follow(player, path);
@@ -161,16 +162,23 @@ public final class PlayerTap {
         Object f = known == null ? null : follow(player, known);
         if (f != null) return f;
         ourPath = null;
-        f = search(player);
-        if (f != null) ourPath = lastFound;
+        List<Field>[] found = newPath();
+        f = search(player, found);
+        if (f != null) ourPath = found[0];
         return f;
     }
 
     private static volatile List<Field> ourPath;
     /** The stats line on screen is the addon's; the last line() came from the addon. */
     private static boolean addonLine, fromAddon;
-    /** The field path of the last search's find. */
-    private static List<Field> lastFound;
+    /**
+     * A holder for one search's path: each caller its own, as the stats line (main thread) and the
+     * addon (its own threads) search at the same time.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Field>[] newPath() {
+        return (List<Field>[]) new List[1];
+    }
     private static volatile Quality.Badge badge = Quality.Badge.NONE;
 
     /** The quality badge for addon audio (NONE when YT's own audio plays). */
@@ -178,7 +186,7 @@ public final class PlayerTap {
         return badge;
     }
 
-    private static Object search(Object root) throws Exception {
+    private static Object search(Object root, List<Field>[] found) throws Exception {
         long start = System.currentTimeMillis();
         Map<Object, Boolean> seen = new IdentityHashMap<>();
         List<Object[]> level = new ArrayList<>();
@@ -201,7 +209,7 @@ public final class PlayerTap {
                         List<Field> np = new ArrayList<>(p);
                         np.add(f);
                         if (isAudioFormat(v)) {
-                            lastFound = np;
+                            found[0] = np;
                             Log.i(TAG, "stats: audio format at " + describePath(np) + " (" + visited + " objects, "
                                     + (System.currentTimeMillis() - start) + " ms)");
                             return v;

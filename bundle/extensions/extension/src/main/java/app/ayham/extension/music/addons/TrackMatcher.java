@@ -19,7 +19,8 @@ import java.util.regex.Pattern;
  * Whether an addon's row is the same recording as a YouTube Music song: BitChord's TrackMatcher
  * (v1.9.2, web/app/src/data/match/trackMatcher.ts, GPL-3.0, by the BitChord authors) as the
  * extension ports it in src/addons/track-matcher.js, line for line. spec/addons/matcher-cases.json
- * holds for it as for BitChord (protocol.md §7).
+ * holds for it as for BitChord (protocol.md §7), except our mashup rule ({@link #isMashup}, the
+ * "(ours, mashups)" cases).
  *
  * Titles are taken apart into the words that carry identity (must agree), the markers of a
  * different take (remix, live, acoustic: must agree both ways) and packaging (a tie-break, never
@@ -97,6 +98,8 @@ public final class TrackMatcher {
     private static final Pattern WORD_SPLIT = Pattern.compile("[" + WS + ".·~〜]+");
     private static final Pattern NON_ALNUM = Pattern.compile("[^\\p{L}\\p{N}]");
     private static final Pattern LATIN = Pattern.compile("[a-z0-9]");
+    private static final Pattern MASHUP_WORD = Pattern.compile("(?:^|[^\\p{L}\\p{N}])(?:mash[" + WS + "-]?ups?|medley)(?:$|[^\\p{L}\\p{N}])");
+    private static final Pattern MASHUP_JOIN = Pattern.compile("[" + WS + "]+(?:x|×|vs\\.?|/)[" + WS + "]+");
     private static final String LATIN_QUERY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789 ";
     private static final Pattern CJK_OPEN = Pattern.compile("[「『【〈《〔［｛]");
     private static final Pattern CJK_CLOSE = Pattern.compile("[」』】〉》〕］｝]");
@@ -294,10 +297,13 @@ public final class TrackMatcher {
         Parsed wanted = parseTitle(nz(target.title), nz(target.artist));
         Parsed got = parseTitle(nz(candidate.title), nz(candidate.artist));
         if (Js.blank(wanted.core) || Js.blank(got.core)) return null;
+        // ours (protocol.md §7, mashups; not in BitChord a2d886e6): a mashup's title holds whole song
+        // titles, so one of them inside it is another song; the whole title must match, and the credit must
+        boolean mashup = isMashup(target.title, nz(target.artist));
         boolean isTitleMatch = wanted.core.equals(got.core)
                 || romajiOf(wanted.core).equals(romajiOf(got.core))
                 || isTranslationMatch(wanted, got)
-                || (!(Js.length(wanted.core) <= 3 || Js.length(got.core) <= 3)
+                || (!mashup && !(Js.length(wanted.core) <= 3 || Js.length(got.core) <= 3)
                 && (wanted.core.contains(got.core) || got.core.contains(wanted.core)));
         if (!isTitleMatch) return null;
 
@@ -311,7 +317,7 @@ public final class TrackMatcher {
         Integer duration = durationScore(target.durationSec, positive(candidate.durationSec), credited != null);
         if (duration == null) return null;
         Integer artist = credited != null ? credited
-                : (!target.isVideo && withinSeconds(candidate, target, CREDIT_OVERRIDE_SEC) ? Integer.valueOf(CREDITS_DISAGREE) : null);
+                : (!target.isVideo && !mashup && withinSeconds(candidate, target, CREDIT_OVERRIDE_SEC) ? Integer.valueOf(CREDITS_DISAGREE) : null);
         if (artist == null) return null;
         Integer explicit = explicitScore(target.isExplicit, candidate.explicit);
         if (explicit == null) return null;
@@ -470,6 +476,33 @@ public final class TrackMatcher {
         if ((wantedCJK && gotLatin) || (gotCJK && wantedLatin)) {
             if (foldLatin(String.join("", wanted.context)).equals(got.core)) return true;
             if (foldLatin(String.join("", got.context)).equals(wanted.core)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Ours (protocol.md §7, mashups): a mashup or medley, by a "mashup" / "medley" word anywhere, or
+     * by two or more titles joined with " x ", " vs ", " / " or " × " in one part of the title
+     * (brackets and dash parts apart). A side that is the credited artist makes it a credit
+     * ("Sigala x Ella Eyre - Came Here For Love"), not a mashup.
+     */
+    static boolean isMashup(String raw, String artist) {
+        String text = normalize(nz(raw));
+        if (has(MASHUP_WORD, text)) return true;
+        // nested brackets ("(a (b) c)") go from the inside out: one pass would leave a half bracket in a side
+        String bare = text;
+        for (int pass = 0; pass < BRACKET_PASSES; pass++) bare = BRACKETED.matcher(bare).replaceAll(" ");
+        for (String part : Js.split(bare, DASH)) {
+            if (isArtistName(part, artist)) continue;
+            List<String> sides = new ArrayList<>();
+            for (String side : Js.split(part, MASHUP_JOIN)) {
+                String t = side.trim();
+                if (!wordsOf(t).isEmpty()) sides.add(t);
+            }
+            if (sides.size() < 2) continue;
+            boolean credit = false;
+            for (String side : sides) if (isArtistName(side, artist)) credit = true;
+            if (!credit) return true;
         }
         return false;
     }

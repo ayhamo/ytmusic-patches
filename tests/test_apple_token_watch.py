@@ -76,7 +76,8 @@ class TokenTest(unittest.TestCase):
         self.assertEqual(kind, "web player token")
 
     def test_fallback_is_first_unexpired(self):
-        get = fake_get({"/us/browse": BROWSE, "index-legacy": f"'{EXPIRED}' 'eyJub3Rqc29u.eyJub3Q.x' '{OTHER}'"})
+        # every script is read before an unlabelled token is used, so the second one answers too
+        get = fake_get({"/us/browse": BROWSE, "index-legacy": f"'{EXPIRED}' 'eyJub3Rqc29u.eyJub3Q.x' '{OTHER}'", "index-Xy9": "nothing here"})
         with mock.patch.object(w, "get", get):
             token, exp, kind = w.scrape_token()
         self.assertEqual(token, OTHER)

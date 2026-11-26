@@ -1038,7 +1038,13 @@ final class Engine {
     boolean onIncoming(Object player) {
         if (!tookOver || inPlayer != null || stop) return false;
         if (!asked) {
-            main.post(() -> abort("the song was skipped during the mix", true));
+            // the listener's Next: the song skipped to stays silent until the deck's fade has been
+            // heard, else both play at full at once and the sum clips (the phone, 2026-11-26)
+            setVolume(player, 0f);
+            main.post(() -> {
+                abort("the song was skipped during the mix", true);
+                bringInSkipped(player);
+            });
             return false;
         }
         inPlayer = player;
@@ -1125,8 +1131,38 @@ final class Engine {
             finish(false, why);
             return;
         }
-        fadeOut(0.05);
+        // from the first block not rendered yet, not 0.2 s on: YT's player is already back
+        double[] f = fadeSoonest(fadeFrom, fadeLen, pauseFadeFrom(written, offsetFrames), ABORT_FADE_SEC);
+        fadeLen = f[1];
+        fadeSetAt = SystemClock.uptimeMillis();
+        fadeFrom = f[0];
         finishReason = why;
+    }
+
+    static final double ABORT_FADE_SEC = 0.05;
+
+    /** The song the listener skipped to, silent so far: its volume back once the deck's fade has reached the speaker. */
+    private void bringInSkipped(Object player) {
+        double heard = mixNow();
+        if (finished || Double.isNaN(heard) || Double.isNaN(fadeFrom)) {
+            restoreVolume(player);
+            return;
+        }
+        long ms = skipVolumeDelayMs(fadeFrom + fadeLen, heard, takeoverLatency);
+        Log.i(TAG, "the song skipped to comes in after " + ms + " ms, once the deck's fade is heard");
+        main.postDelayed(() -> Automix.rampVolume(player, SKIP_RISE_SEC), ms);
+    }
+
+    static final double SKIP_RISE_SEC = 0.03;
+
+    /**
+     * How long the song skipped to waits, in ms: until the deck's fade ([fadeEnd], mix seconds) has
+     * left the track ([heard]: the mix second the track has played) and the output latency after it
+     * ([latency]; NaN: 0.1 s), never over a second.
+     */
+    static long skipVolumeDelayMs(double fadeEnd, double heard, double latency) {
+        double lat = Double.isNaN(latency) ? 0.1 : latency;
+        return Math.max(0, Math.min(1000, Math.round((fadeEnd - heard + lat) * 1000)));
     }
 
     private String finishReason;
@@ -1239,12 +1275,17 @@ final class Engine {
      * pause end keeps the running fade; a sooner one goes on from the level the running one is at then.
      */
     static double[] pauseFade(double fs, double len, double at) {
-        if (Double.isNaN(fs) || !(len > 0)) return new double[]{at, PAUSE_FADE_SEC};
-        double end = at + PAUSE_FADE_SEC;
+        return fadeSoonest(fs, len, at, PAUSE_FADE_SEC);
+    }
+
+    /** pauseFade's rule for a fade of [sec] from [at] (an abort's too). */
+    static double[] fadeSoonest(double fs, double len, double at, double sec) {
+        if (Double.isNaN(fs) || !(len > 0)) return new double[]{at, sec};
+        double end = at + sec;
         if (fs + len <= end) return new double[]{fs, len};
         double level = Math.max(0, Math.min(1, 1 - (at - fs) / len));
         if (level <= 0) return new double[]{fs, len};
-        double l = PAUSE_FADE_SEC / level;
+        double l = sec / level;
         return new double[]{end - l, l};
     }
 

@@ -1,7 +1,7 @@
 {
-  "created_at": "",
-  "description": "",
-  "download_url": "",
+  "created_at": "2026-11-26T13:05:33",
+  "description": "Morphe 2.4.0 patches. Automix: late B entries keep A level, failed mix builds retry, lighter planner. Add-ons: HLS and DASH rows follow the extension's rules, range answers are checked, this device is refused over https.",
+  "download_url": "https://github.com/ayhamo/ytmusic-patches/releases/download/v0.1.0/patches-0.1.0.mpp",
   "signature_download_url": "",
-  "version": ""
+  "version": "0.1.0"
 }
